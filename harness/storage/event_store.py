@@ -8,8 +8,7 @@ from typing import Any
 
 import aiosqlite
 
-from harness.models.events import Event, EventType, PAYLOAD_MODEL_MAP
-
+from harness.models.events import PAYLOAD_MODEL_MAP, Event, EventType
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS events (
@@ -30,6 +29,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_idem
 
 class DuplicateIdempotencyKeyError(Exception):
     """Raised internally when a duplicate idempotency key is detected."""
+
+
+class SequenceConflictError(Exception):
+    """Raised when PK conflict retries are exhausted."""
 
 
 class EventStore:
@@ -90,56 +93,65 @@ class EventStore:
         payload: dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        max_retries: int = 3,
     ) -> Event:
         """Append a new event to the store.
 
         Validates payload against the Pydantic model for the event type,
         auto-computes the next seq, and enforces idempotency via unique index.
+
+        Retries on PRIMARY KEY (run_id, seq) conflicts (up to max_retries),
+        re-computing latest seq each attempt.
         """
         _validate_payload(event_type, payload)
 
         if idempotency_key is not None:
-            existing = await self._find_by_idempotency_key(
-                run_id, event_type, idempotency_key
-            )
+            existing = await self.find_by_idempotency_key(run_id, event_type, idempotency_key)
             if existing is not None:
                 return existing
 
-        next_seq = await self.get_latest_seq(run_id) + 1
-        created_at = time.time()
+        last_error: Exception | None = None
+        for attempt in range(max_retries + 1):
+            next_seq = await self.get_latest_seq(run_id) + 1
+            created_at = time.time()
 
-        sql = (
-            "INSERT INTO events (run_id, seq, event_type, payload, idempotency_key, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)"
-        )
-        payload_json = json.dumps(payload, ensure_ascii=False)
-
-        try:
-            await self.conn.execute(
-                sql,
-                (run_id, next_seq, event_type.value, payload_json, idempotency_key, created_at),
+            sql = (
+                "INSERT INTO events (run_id, seq, event_type, payload, idempotency_key, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)"
             )
-            await self.conn.commit()
-        except sqlite3.IntegrityError as exc:
-            if "UNIQUE constraint" in str(exc) and "idx_idem" in str(exc):
-                existing = await self._find_by_idempotency_key(
-                    run_id, event_type, idempotency_key
-                )
-                if existing is not None:
-                    return existing
-                raise DuplicateIdempotencyKeyError(
-                    f"Duplicate idempotency key '{idempotency_key}' for run '{run_id}'"
-                ) from exc
-            raise
+            payload_json = json.dumps(payload, ensure_ascii=False)
 
-        return Event(
-            run_id=run_id,
-            seq=next_seq,
-            event_type=event_type,
-            payload=payload,
-            idempotency_key=idempotency_key,
-            created_at=created_at,
-        )
+            try:
+                await self.conn.execute(
+                    sql,
+                    (run_id, next_seq, event_type.value, payload_json, idempotency_key, created_at),
+                )
+                await self.conn.commit()
+                return Event(
+                    run_id=run_id,
+                    seq=next_seq,
+                    event_type=event_type,
+                    payload=payload,
+                    idempotency_key=idempotency_key,
+                    created_at=created_at,
+                )
+            except sqlite3.IntegrityError as exc:
+                error_str = str(exc)
+                if "UNIQUE constraint" in error_str and "events.idempotency_key" in error_str:
+                    existing = await self.find_by_idempotency_key(run_id, event_type, idempotency_key)
+                    if existing is not None:
+                        return existing
+                    raise DuplicateIdempotencyKeyError(
+                        f"Duplicate idempotency key '{idempotency_key}' for run '{run_id}'"
+                    ) from exc
+                if "PRIMARY KEY" in error_str or "events.run_id" in error_str.lower():
+                    last_error = exc
+                    continue
+                raise
+
+        raise SequenceConflictError(
+            f"PK conflict on (run_id='{run_id}', seq) after {max_retries} retries"
+        ) from last_error
 
     async def get_events(self, run_id: str) -> list[Event]:
         """Return all events for a run, ordered by seq."""
@@ -190,9 +202,9 @@ class EventStore:
         row = await cursor.fetchone()
         return row["cnt"] if row else 0
 
-    # ── Internal helpers ───────────────────────────────────────
+    # ── Query helpers ──────────────────────────────────────────
 
-    async def _find_by_idempotency_key(
+    async def find_by_idempotency_key(
         self,
         run_id: str,
         event_type: EventType,

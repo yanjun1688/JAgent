@@ -17,6 +17,7 @@ class EventType(str, Enum):
     CONFIRMATION_REQUESTED = "ConfirmationRequested"
     CONFIRMATION_RECEIVED = "ConfirmationReceived"
     CONTEXT_COMPRESSED = "ContextCompressed"
+    CONTEXT_CHECKPOINTED = "ContextCheckpointed"
     RUN_PAUSED = "RunPaused"
     RUN_RESUMED = "RunResumed"
     RUN_COMPLETED = "RunCompleted"
@@ -73,8 +74,10 @@ class GuardrailTriggeredPayload(BaseModel):
 
 class ConfirmationRequestedPayload(BaseModel):
     confirmation_id: str
+    tool_call_id: str
     tool_name: str
     input: dict[str, Any]
+    idempotency_key: str
     risk_level: str = "medium"
 
 
@@ -88,6 +91,12 @@ class ContextCompressedPayload(BaseModel):
     original_tokens: int
     compressed_tokens: int
     summary_ref: str
+
+
+class ContextCheckpointedPayload(BaseModel):
+    checkpoint_seq: int
+    snapshot_ref: str
+    token_count: int
 
 
 class RunPausedPayload(BaseModel):
@@ -120,6 +129,7 @@ PAYLOAD_MODEL_MAP: dict[EventType, type[BaseModel]] = {
     EventType.CONFIRMATION_REQUESTED: ConfirmationRequestedPayload,
     EventType.CONFIRMATION_RECEIVED: ConfirmationReceivedPayload,
     EventType.CONTEXT_COMPRESSED: ContextCompressedPayload,
+    EventType.CONTEXT_CHECKPOINTED: ContextCheckpointedPayload,
     EventType.RUN_PAUSED: RunPausedPayload,
     EventType.RUN_RESUMED: RunResumedPayload,
     EventType.RUN_COMPLETED: RunCompletedPayload,

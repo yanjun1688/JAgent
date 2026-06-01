@@ -7,6 +7,7 @@ from harness.models.events import (
     AgentThoughtPayload,
     ConfirmationReceivedPayload,
     ConfirmationRequestedPayload,
+    ContextCheckpointedPayload,
     ContextCompressedPayload,
     Event,
     EventType,
@@ -56,6 +57,7 @@ class RunState:
     summary: str | None = None
     pause_reason: str | None = None
     pending_confirmations: list[ConfirmationRequestedPayload] = field(default_factory=list)
+    last_checkpoint_seq: int | None = None
 
 
 def fold_events(events: list[Event]) -> RunState:
@@ -72,9 +74,7 @@ def fold_events(events: list[Event]) -> RunState:
 
     for event in events:
         if event.run_id != run_id:
-            raise ValueError(
-                f"Mixed run_ids in event stream: expected '{run_id}', got '{event.run_id}'"
-            )
+            raise ValueError(f"Mixed run_ids in event stream: expected '{run_id}', got '{event.run_id}'")
         state.seq = max(state.seq, event.seq)
 
         match event.event_type:
@@ -147,13 +147,16 @@ def fold_events(events: list[Event]) -> RunState:
             case EventType.CONFIRMATION_RECEIVED:
                 p = ConfirmationReceivedPayload(**event.payload)
                 state.pending_confirmations = [
-                    c for c in state.pending_confirmations
-                    if c.confirmation_id != p.confirmation_id
+                    c for c in state.pending_confirmations if c.confirmation_id != p.confirmation_id
                 ]
 
             case EventType.CONTEXT_COMPRESSED:
                 p = ContextCompressedPayload(**event.payload)
                 state.summary = p.summary_ref
+
+            case EventType.CONTEXT_CHECKPOINTED:
+                p = ContextCheckpointedPayload(**event.payload)
+                state.last_checkpoint_seq = p.checkpoint_seq
 
             case EventType.RUN_PAUSED:
                 p = RunPausedPayload(**event.payload)

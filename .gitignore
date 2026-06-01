@@ -7,6 +7,9 @@ build/
 .venv/
 *.db
 *.sqlite3
+.coverage
+htmlcov/
+.pytest_cache/
 
 # IDE
 .vscode/
@@ -16,10 +19,3 @@ build/
 *.DS_Store
 Thumbs.db
 
-# Project internal docs (not for distribution)
-JAgent-docs/
-docs/
-uv.lock
-
-# Tests (local only)
-tests/
