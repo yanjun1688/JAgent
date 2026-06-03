@@ -30,7 +30,7 @@ class ToolDefinition(BaseModel):
     description: str
     input_schema: JSONSchema = Field(default_factory=dict)
     output_schema: JSONSchema = Field(default_factory=dict)
-    idempotency_key_fields: list[str]
+    idempotency_key_fields: list[str] | None = None
     side_effects: list[SideEffect]
     timeout_ms: int = 30000
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)

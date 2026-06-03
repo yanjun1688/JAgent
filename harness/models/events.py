@@ -42,7 +42,7 @@ class ToolCalledPayload(BaseModel):
     tool_call_id: str
     tool_name: str
     input: dict[str, Any]
-    idempotency_key: str
+    idempotency_key: str | None = None
 
 
 class ToolCompletedPayload(BaseModel):

@@ -172,7 +172,7 @@
   - `SchedulerConfig.pause_timeout_ms` 控制确认等待超时
   - `SchedulerConfig.max_iterations` 控制单次 Run 最大循环轮次
 - [x] **3.6** 集成测试（L1+L2+L3） — 完整循环测试 + 事件流重放验证（1d）
-  - 9 个测试：简单任务 / 多工具调用 / 自动事件写入 / 未知工具 / 熔断 / 最大迭代 / 挂起 / 事件流重放 / Guardrail 计入熔断
+  - 12 个测试：简单任务 / 多工具调用 / 自动事件写入 / 未知工具 / 熔断 / 最大迭代 / 挂起 / 恢复 / 事件流重放 / Guardrail 计入熔断 / 暂停确认 / 拒绝确认
 
 **验收检查清单**:
 - [x] 3 轮 tool_call 的 run 产生至少 9 个事件（3×AgentThought + 3×ToolCalled + 3×ToolCompleted）
@@ -194,8 +194,9 @@
 - [x] **4.2** 上下文窗口管理 — 通过 `System Prompt` + `State` 构建对话历史（内置于 `LLMAgentKernel`）
   - 最近 5 条 thought 作为 assistant 消息
   - 最近 5 条 tool_results 作为 user 反馈消息
-- [x] **4.3** Tool Registry — 由 Scheduler 的 `tool_defs + tool_fns` 参数提供（MVP 简化方案）
+- [x] **4.3** Tool Registry（MVP） — 由 Scheduler 的 `tool_defs + tool_fns` 参数提供（MVP 简化方案）
   - `build_tool_schemas()` 将 `ToolDefinition` 转为 OpenAI 兼容的函数定义
+  - V0.2 升级为正式的 `ToolRegistry` 类（`harness/tools/registry.py`），支持动态注册/查询/移除
 - [x] **4.4** System Prompt 管理 — `build_system_prompt()`（`harness/core/system_prompt.py`）
   - 注入 `intent`、工具列表、行为约束规则
   - 支持危险工具标注 `(dangerous — requires confirmation)`
@@ -218,15 +219,16 @@
 
 **前置依赖**: MVP 全部完成并通过验收
 
-| # | 任务 | 交付物 | 验收标准 | 预计 |
-|---|------|--------|----------|------|
-| 5.1 | `browser()` 工具 | Playwright 封装 | 支持导航、点击、输入、截图；独立浏览器上下文 | 2d |
-| 5.2 | `http_request()` 工具 | 异步 HTTP 客户端 | 支持 GET/POST/PUT/DELETE；超时控制；响应大小限制 | 1d |
-| 5.3 | `file_op()` 工具 | 文件读写操作 | 限定沙盒目录内操作；支持读/写/追加/删除 | 1d |
-| 5.4 | `mcp_call()` 入口 | MCP 工具统一调用 | 支持动态加载 MCP 工具定义；工具契约自动适配 | 2d |
-| 5.5 | SKILL 封装 | 多步技能包原型 | 对外表现为单一 `ToolDefinition`，内部编排多步调用 | 1.5d |
-| 5.6 | 幂等键全面支持 | 所有工具声明 `idempotency_key_fields` | 非只读工具均声明了幂等键字段；幂等键碰撞可正确查重 | 1d |
-| 5.7 | 工具测试套件 | 每个工具的单元测试 + 集成测试 | 工具分支覆盖 ≥ 85%；沙盒隔离验证 | 1.5d |
+| # | 任务 | 交付物 | 验收标准 | 预计 | 状态 |
+|---|------|--------|----------|------|------|
+| 5.0 | `ToolRegistry` 工具注册/加载机制 | `harness/tools/registry.py` | 支持动态注册/查询/移除；`build_llm_schemas()` 自动生成 LLM Schema | 0.5d | ✅ |
+| 5.1 | `browser()` 工具 | `harness/tools/browser_tool.py` (Playwright 封装) | 支持导航、点击、输入、截图；独立浏览器上下文 | 2d | ✅ |
+| 5.2 | `http_request()` 工具 | `harness/tools/http_request.py` (异步 HTTP 客户端) | 支持 GET/POST/PUT/DELETE；超时控制；响应大小限制 | 1d | ✅ |
+| 5.3 | `file_op()` 工具 | `harness/tools/file_op.py` (文件读写操作) | 限定沙盒目录内操作；支持读/写/追加/删除/列表 | 1d | ✅ |
+| 5.4 | `mcp_call()` 入口 | `harness/tools/mcp_call.py` (MCP 工具统一调用) | 支持动态连接 MCP server；工具契约自动适配 | 2d | ✅ |
+| 5.5 | SKILL 封装 | `harness/tools/skill.py` (多步技能包) | 对外表现为单一 `ToolDefinition`，内部编排多步调用 | 1.5d | ✅ |
+| 5.6 | 幂等键全面支持 | 所有工具声明 `idempotency_key_fields` | 非只读工具均声明了幂等键字段；幂等键碰撞可正确查重 | 1d | ✅ |
+| 5.7 | 工具测试套件 | `tests/test_tools_v02.py` | 26 项测试覆盖 Registry / http_request / file_op / SKILL；沙盒隔离验证 | 1.5d | ✅ |
 
 ---
 
@@ -234,16 +236,19 @@
 
 **前置依赖**: MVP + V0.2 完成
 
-| # | 任务 | 交付物 | 验收标准 | 预计 |
-|---|------|--------|----------|------|
-| 6.1 | 事件流 REST API | `GET /runs`、`GET /runs/{run_id}/events`、`POST /runs` | OpenAPI 文档完整；分页支持 | 1d |
-| 6.2 | WebSocket 事件推送 | `WS /runs/{run_id}/events` | 实时推送事件；按 seq 顺序保证；断线重连 | 1.5d |
-| 6.3 | Run 管理 API | `POST /runs/{run_id}/pause`、`POST /runs/{run_id}/resume`、`DELETE /runs/{run_id}` | 生命周期管理完整 | 1d |
-| 6.4 | 确认接口 | `POST /runs/{run_id}/confirm` | 幂等确认（同一 confirmation_id 重复提交不产生副作用） | 0.5d |
-| 6.5 | 前端项目脚手架 | TypeScript + React + Vite；OpenAPI 类型自动生成 | 后端模型变更时前端类型自动同步 | 1d |
-| 6.6 | Run 列表页 | 展示所有 Run 的状态、创建时间、事件数 | 状态字段来自 `get_run_state()` 折叠 | 1d |
-| 6.7 | Run 详情页 | 事件流按时间线渲染；工具调用 trace 可视化 | 事件按 seq 排序；`ToolCalled`→`ToolCompleted`/`ToolFailed` 链路清晰 | 2d |
-| 6.8 | 操作员确认 UI | 展示 `ConfirmationRequested` 详情；确认/拒绝按钮 | 确认操作携带 `run_id` + `confirmation_id` | 1d |
+| # | 任务 | 交付物 | 验收标准 | 预计 | 状态 |
+|---|------|--------|----------|------|------|
+| 6.0 | 后端基础设施补齐 | `EventStore.list_runs()` + `Scheduler.pause()` | 支持列举所有 Run、外部暂停正在运行的 Run | 1d | ✅ |
+| 6.1 | FastAPI 项目骨架 | `harness/api/` 模块；uvicorn 入口 | FastAPI app 可启动；OpenAPI 文档自动生成 | 0.5d | ✅ |
+| 6.2 | 事件流 REST API | `GET /runs`、`GET /runs/{run_id}/events`、`POST /runs` | OpenAPI 文档完整；分页支持；事件按 seq 排序 | 1d | ✅ |
+| 6.3 | Run 管理 API | `POST /runs/{run_id}/pause`、`POST /runs/{run_id}/resume`、`DELETE /runs/{run_id}` | 生命周期管理完整；pause 写入 `RunPaused` 事件 | 1d | ✅ |
+| 6.4 | 确认接口 | `POST /runs/{run_id}/confirm` | 幂等确认（同一 confirmation_id 重复提交不重复创建事件） | 0.5d | ✅ |
+| 6.5 | WebSocket 事件推送 | `WS /runs/{run_id}/events` | 实时推送事件；按 seq 顺序保证；连接时发送全部历史 | 1.5d | ✅ |
+| 6.6 | 前端项目脚手架 | `frontend/` 目录；TypeScript + React + Vite | 后端 OpenAPI Schema 自动生成前端类型 | 1d | ✅ |
+| 6.7 | Run 列表页 | 展示所有 Run 的状态、创建时间、事件数 | 状态字段来自 `get_run_state()` 折叠；点击进入详情 | 1d | ✅ |
+| 6.8 | Run 详情页 | 事件流按时间线渲染；工具调用 trace 可视化 | 事件按 seq 排序；`ToolCalled`→`ToolCompleted`/`ToolFailed` 链路清晰 | 2d | ✅ |
+| 6.9 | 操作员确认 UI | 展示 `ConfirmationRequested` 详情；确认/拒绝按钮 | 确认操作携带 `run_id` + `confirmation_id`；实时刷新 | 1d | ✅ |
+| 6.10 | **HarnessAPI DI 重构** | 全局 `_hapi` 单例 → FastAPI `Depends()` 依赖注入 | 所有端点通过 `Depends(get_hapi)` 获取 API 实例；测试通过 `app.dependency_overrides` 注入 mock | 0.5d | ✅ |
 
 ---
 

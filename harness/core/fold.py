@@ -31,11 +31,18 @@ class RunStatus(str, Enum):
     FAILED = "failed"
 
 
+class ToolResultStatus(str, Enum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    GUARDRAIL_BLOCKED = "guardrail_blocked"
+
+
 @dataclass
 class ToolResult:
     tool_call_id: str
     tool_name: str
-    status: str  # "completed" | "failed" | "timeout" | "guardrail_blocked"
+    status: ToolResultStatus
     output: object = None
     error: str | None = None
     duration_ms: int = 0
@@ -99,7 +106,7 @@ def fold_events(events: list[Event]) -> RunState:
                     ToolResult(
                         tool_call_id=p.tool_call_id,
                         tool_name=p.tool_name,
-                        status="completed",
+                        status=ToolResultStatus.COMPLETED,
                         output=p.output,
                         duration_ms=p.duration_ms,
                     )
@@ -111,7 +118,7 @@ def fold_events(events: list[Event]) -> RunState:
                     ToolResult(
                         tool_call_id=p.tool_call_id,
                         tool_name=p.tool_name,
-                        status="failed",
+                        status=ToolResultStatus.FAILED,
                         error=p.error,
                     )
                 )
@@ -123,7 +130,7 @@ def fold_events(events: list[Event]) -> RunState:
                     ToolResult(
                         tool_call_id=p.tool_call_id,
                         tool_name=p.tool_name,
-                        status="timeout",
+                        status=ToolResultStatus.TIMEOUT,
                         error=f"Timeout after {p.timeout_ms}ms",
                     )
                 )
@@ -135,7 +142,7 @@ def fold_events(events: list[Event]) -> RunState:
                     ToolResult(
                         tool_call_id=p.tool_call_id,
                         tool_name=p.tool_name,
-                        status="guardrail_blocked",
+                        status=ToolResultStatus.GUARDRAIL_BLOCKED,
                         error=f"Guardrail '{p.guardrail_id}': {p.reason}",
                     )
                 )

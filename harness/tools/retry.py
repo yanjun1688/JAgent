@@ -25,14 +25,17 @@ class RetryRunner:
     @staticmethod
     async def execute_with_retry(fn, *args, policy: RetryPolicy, **kwargs):
         last_error: Exception | None = None
+        retry_count = 0
         for attempt in range(1, policy.max_retries + 2):
             try:
-                return await fn(*args, **kwargs)
+                result = await fn(*args, **kwargs)
+                return result, retry_count
             except Exception as exc:
                 last_error = exc
                 error_str = str(exc)
                 if not RetryRunner.should_retry(attempt, error_str, policy):
                     raise
+                retry_count += 1
             backoff_ms = RetryRunner._backoff_ms(attempt, policy)
             await asyncio.sleep(backoff_ms / 1000.0)
         raise last_error  # type: ignore[misc]

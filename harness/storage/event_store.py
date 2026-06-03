@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import aiosqlite
@@ -24,6 +25,19 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_idem
     ON events(run_id, event_type, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
+
+-- Append-Only enforcement: reject UPDATE and DELETE on events table
+CREATE TRIGGER IF NOT EXISTS trg_prevent_update_events
+    BEFORE UPDATE ON events
+BEGIN
+    SELECT RAISE(ABORT, 'Append-Only: UPDATE is forbidden on events table');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_prevent_delete_events
+    BEFORE DELETE ON events
+BEGIN
+    SELECT RAISE(ABORT, 'Append-Only: DELETE is forbidden on events table');
+END;
 """
 
 
@@ -53,6 +67,9 @@ class EventStore:
     def __init__(self, db_path: str = ":memory:") -> None:
         self.db_path = db_path
         self._conn: aiosqlite.Connection | None = None
+        # 写入后回调列表：每次新事件成功入库后，依次调用所有注册的回调
+        # EventStore 不关心谁在听、为什么听——这是受信组件的边界原则
+        self._post_append: list[Callable[[Event], Awaitable[None]]] = []
 
     async def __aenter__(self) -> EventStore:
         await self.initialize()
@@ -77,6 +94,14 @@ class EventStore:
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
+
+    def on_append(self, callback: Callable[[Event], Awaitable[None]]) -> None:
+        """注册事件写入后的通知回调。
+
+        每次 append_event 成功写入一条新事件（非幂等缓存命中）后，
+        会依次调用所有已注册的 callback(event)。常用于 WebSocket 广播。
+        """
+        self._post_append.append(callback)
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -127,7 +152,7 @@ class EventStore:
                     (run_id, next_seq, event_type.value, payload_json, idempotency_key, created_at),
                 )
                 await self.conn.commit()
-                return Event(
+                event = Event(
                     run_id=run_id,
                     seq=next_seq,
                     event_type=event_type,
@@ -135,6 +160,10 @@ class EventStore:
                     idempotency_key=idempotency_key,
                     created_at=created_at,
                 )
+                # 通知外部监听者（如 WebSocket 广播），EventStore 不感知谁在听
+                for cb in self._post_append:
+                    await cb(event)
+                return event
             except sqlite3.IntegrityError as exc:
                 error_str = str(exc)
                 if "UNIQUE constraint" in error_str and "events.idempotency_key" in error_str:
@@ -218,6 +247,57 @@ class EventStore:
         if row is None:
             return None
         return _row_to_event(dict(row))
+
+    async def list_runs(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        cursor = await self.conn.execute(
+            """
+            SELECT run_id, MIN(seq) AS seq, MIN(created_at) AS created_at,
+                   MAX(created_at) AS updated_at,
+                   COUNT(*) AS event_count
+            FROM events
+            GROUP BY run_id
+            ORDER BY MAX(created_at) DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def total_run_count(self) -> int:
+        cursor = await self.conn.execute(
+            "SELECT COUNT(DISTINCT run_id) AS cnt FROM events"
+        )
+        row = await cursor.fetchone()
+        return row["cnt"] if row else 0
+
+    async def get_events_for_runs(self, run_ids: list[str]) -> list[Event]:
+        if not run_ids:
+            return []
+        placeholders = ",".join("?" * len(run_ids))
+        cursor = await self.conn.execute(
+            f"SELECT * FROM events WHERE run_id IN ({placeholders}) ORDER BY run_id, seq ASC",
+            run_ids,
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_event(dict(r)) for r in rows]
+
+    async def find_confirmation_by_id(self, run_id: str, confirmation_id: str) -> Event | None:
+        cursor = await self.conn.execute(
+            "SELECT * FROM events WHERE run_id = ? AND event_type = ?",
+            (run_id, EventType.CONFIRMATION_RECEIVED.value),
+        )
+        rows = await cursor.fetchall()
+        for row in rows:
+            event = _row_to_event(dict(row))
+            payload = json.loads(row["payload"])
+            if payload.get("confirmation_id") == confirmation_id:
+                return event
+        return None
 
 
 # ── Helpers ────────────────────────────────────────────────────

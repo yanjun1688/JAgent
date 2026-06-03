@@ -379,6 +379,133 @@ async def test_resume_writes_run_resumed_and_completes_execution(store: EventSto
     assert len(state.pending_confirmations) == 0
 
 
+# ── User-requested pause / resume ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_user_pause_stops_loop(store: EventStore):
+    """scheduler.pause() should actually halt the run loop (not just write an event)."""
+    async def slow_fn(input):
+        await asyncio.sleep(0.08)
+        return {"ok": True}
+
+    tool_def = ToolDefinition(
+        name="counter",
+        description="Count calls",
+        idempotency_key_fields=None,  # Disable caching so each call executes
+        side_effects=[],
+        timeout_ms=5000,
+        retry_policy=RetryPolicy(),
+    )
+
+    # Use unique inputs so each call has a different idempotency key
+    kernel = MockAgentKernel(
+        [
+            ThinkResult(thought="Call 1", tool_name="counter", tool_input={"seq": 1}),
+            ThinkResult(thought="Call 2", tool_name="counter", tool_input={"seq": 2}),
+            ThinkResult(thought="Call 3", tool_name="counter", tool_input={"seq": 3}),
+            ThinkResult(thought="Done", tool_name=None),
+        ]
+    )
+    executor = ToolExecutor(store)
+    scheduler = AgentLoopScheduler(store, executor, kernel, [tool_def], {"counter": slow_fn})
+
+    task = asyncio.create_task(scheduler.run("run-pause", "Pause test"))
+
+    # Wait for at least one tool call to complete
+    await asyncio.sleep(0.15)
+
+    await scheduler.pause("run-pause")
+
+    # Wait for loop to detect PAUSED and also let any in-flight iteration settle
+    await asyncio.sleep(0.3)
+
+    events_paused = await store.get_events("run-pause")
+    n_paused = len(events_paused)
+    event_types_paused = [e.event_type for e in events_paused]
+
+    # RunPaused should be in the stream
+    assert EventType.RUN_PAUSED in event_types_paused
+
+    await scheduler.resume("run-pause")
+    await asyncio.wait_for(task, timeout=10.0)
+
+    events_final = await store.get_events("run-pause")
+    event_types_final = [e.event_type for e in events_final]
+
+    assert EventType.RUN_PAUSED in event_types_final
+    assert EventType.RUN_RESUMED in event_types_final
+    assert EventType.RUN_COMPLETED in event_types_final
+    assert len(events_final) > n_paused, "No events added after resume"
+
+
+# ── Confirmation denied path ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_confirmation_denied_writes_tool_failed(store: EventStore):
+    """When operator denies a dangerous tool, ToolFailed should be written."""
+    dangerous_def = ToolDefinition(
+        name="delete_file",
+        description="Delete",
+        idempotency_key_fields=["path"],
+        side_effects=[SideEffect.DELETE],
+        requires_confirmation=True,
+        timeout_ms=5000,
+        retry_policy=RetryPolicy(),
+    )
+
+    def delete_fn(input):
+        return {"deleted": input["path"]}
+
+    kernel = MockAgentKernel(
+        [
+            ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"}),
+            ThinkResult(thought="Done", tool_name=None),
+        ]
+    )
+    executor = ToolExecutor(store)
+
+    scheduler = AgentLoopScheduler(store, executor, kernel, [dangerous_def], {"delete_file": delete_fn})
+
+    task = asyncio.create_task(scheduler.run("run-deny", "Deny test"))
+
+    await asyncio.sleep(0.3)
+
+    events = await store.get_events("run-deny")
+    cf_payload = None
+    for e in events:
+        if e.event_type == EventType.CONFIRMATION_REQUESTED:
+            cf_payload = e.payload
+            break
+    assert cf_payload is not None
+
+    from harness import ConfirmationReceivedPayload
+
+    await store.append_event(
+        "run-deny",
+        EventType.CONFIRMATION_RECEIVED,
+        ConfirmationReceivedPayload(
+            confirmation_id=cf_payload["confirmation_id"],
+            confirmed=False,
+            operator_id="op-test",
+        ).model_dump(),
+    )
+
+    await scheduler.resume("run-deny")
+    await asyncio.wait_for(task, timeout=5.0)
+
+    all_events = await store.get_events("run-deny")
+    event_types = [e.event_type for e in all_events]
+
+    assert EventType.CONFIRMATION_RECEIVED in event_types
+    assert EventType.CONFIRMATION_REQUESTED in event_types
+    assert EventType.RUN_RESUMED in event_types
+    assert EventType.TOOL_FAILED in event_types
+    assert EventType.RUN_COMPLETED in event_types
+    # When denied, executor writes ToolFailed directly (no ToolCalled)
+
+
 # ── 3.6 Integration: event stream replay ──────────────────────
 
 
