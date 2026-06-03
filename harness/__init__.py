@@ -1,5 +1,5 @@
 from harness.core.agent_kernel import LLMAgentKernel, MockAgentKernel
-from harness.core.fold import RunState, RunStatus, ToolResult, fold_events
+from harness.core.fold import RunState, RunStatus, ToolResult, ToolResultStatus, fold_events
 from harness.core.llm_client import LLMClient, MockLLMClient
 from harness.core.scheduler import AgentKernel, AgentLoopScheduler, SchedulerConfig, ThinkResult
 from harness.models.events import (
@@ -30,6 +30,11 @@ from harness.models.tools import (
 )
 from harness.storage.event_store import EventStore, SequenceConflictError
 from harness.tools import (
+    BROWSER_DEF,
+    FILE_OP_DEF,
+    HTTP_REQUEST_DEF,
+    MCP_CALL_DEF,
+    BrowserManager,
     ExecutionStatus,
     GuardrailResult,
     GuardrailRunner,
@@ -38,8 +43,17 @@ from harness.tools import (
     Sandbox,
     SandboxResult,
     SchemaGuardrail,
+    Skill,
     ToolExecutionResult,
     ToolExecutor,
+    ToolRegistry,
+    browser_fn,
+    connect_mcp_server,
+    disconnect_mcp_server,
+    file_op_fn,
+    http_request_fn,
+    mcp_call_fn,
+    set_sandbox_root,
 )
 
 __all__ = [
@@ -78,6 +92,21 @@ __all__ = [
     "RetryRunner",
     "Sandbox",
     "SandboxResult",
+    # V0.2
+    "ToolRegistry",
+    "HTTP_REQUEST_DEF",
+    "http_request_fn",
+    "FILE_OP_DEF",
+    "file_op_fn",
+    "set_sandbox_root",
+    "BROWSER_DEF",
+    "browser_fn",
+    "BrowserManager",
+    "MCP_CALL_DEF",
+    "mcp_call_fn",
+    "connect_mcp_server",
+    "disconnect_mcp_server",
+    "Skill",
     # Storage
     "EventStore",
     "SequenceConflictError",
@@ -85,6 +114,7 @@ __all__ = [
     "RunState",
     "RunStatus",
     "ToolResult",
+    "ToolResultStatus",
     "fold_events",
     "AgentLoopScheduler",
     "AgentKernel",

@@ -1,4 +1,4 @@
-"""Tool Executor — 8-step execution flow with idempotency, guardrails, and confirmation."""
+"""Tool Executor — 8-step execution flow with idempotency, guardrails, confirmation, and retry."""
 
 import asyncio
 import time
@@ -21,6 +21,7 @@ from harness.models.tools import ToolDefinition
 from harness.storage.event_store import EventStore
 from harness.tools.guardrails import GuardrailRunner
 from harness.tools.idempotency import IdempotencyKeyGenerator
+from harness.tools.retry import RetryRunner
 from harness.tools.sandbox import Sandbox
 
 
@@ -48,6 +49,7 @@ class ToolExecutionResult:
     guardrail_reason: str | None = None
     confirmation_id: str | None = None
     cached: bool = False
+    retry_attempts: int = 0
 
 
 class ToolExecutor:
@@ -62,16 +64,18 @@ class ToolExecutor:
         input: dict[str, Any],
         tool_def: ToolDefinition,
         tool_fn: Callable[[dict[str, Any]], Any],
+        *,
+        override_tool_call_id: str | None = None,
     ) -> ToolExecutionResult:
-        # ── Step 0: Generate tool_call_id ────────────────────────
-        tool_call_id = str(uuid.uuid4())
+        # ── Step 0: Generate/Reuse tool_call_id ──────────────────
+        tool_call_id = override_tool_call_id or str(uuid.uuid4())
 
         # ── Step 2: Compute idempotency key ──────────────────────
+        # Returns None when tool_def.idempotency_key_fields is None
+        # (opt-out of idempotency caching per architecture §5.2).
         ik_key = IdempotencyKeyGenerator.compute(tool_def, input)
 
         # ── Step 1+4: Schema + Guardrails pre-checks ─────────────
-        # SchemaGuardrail is the first guardrail inside GuardrailRunner;
-        # runs before cache lookup so malformed input fails fast.
         gr_results = self.guardrails.run(tool_def, input)
         for gr in gr_results:
             if not gr.passed:
@@ -95,30 +99,47 @@ class ToolExecutor:
                 )
 
         # ── Step 3: Idempotency cache lookup ─────────────────────
-        existing_tc = await self.store.find_by_idempotency_key(run_id, EventType.TOOL_COMPLETED, ik_key)
-        if existing_tc is not None:
-            payload = ToolCompletedPayload.model_validate(existing_tc.payload)
-            return ToolExecutionResult(
-                status=ExecutionStatus.IDEMPOTENCY_HIT,
-                tool_call_id=payload.tool_call_id,
-                tool_name=tool_name,
-                idempotency_key=ik_key,
-                output=payload.output,
-                duration_ms=payload.duration_ms,
-                cached=True,
-            )
+        # Skip lookup when ik_key is None (tool opted out of idempotency).
+        if ik_key is not None:
+            existing_tc = await self.store.find_by_idempotency_key(run_id, EventType.TOOL_COMPLETED, ik_key)
+            if existing_tc is not None:
+                payload = ToolCompletedPayload.model_validate(existing_tc.payload)
+                return ToolExecutionResult(
+                    status=ExecutionStatus.IDEMPOTENCY_HIT,
+                    tool_call_id=payload.tool_call_id,
+                    tool_name=tool_name,
+                    idempotency_key=ik_key,
+                    output=payload.output,
+                    duration_ms=payload.duration_ms,
+                    cached=True,
+                )
 
         # ── Step 5: Confirmation check ───────────────────────────
         if tool_def.requires_confirmation:
-            existing_req = await self.store.find_by_idempotency_key(run_id, EventType.CONFIRMATION_REQUESTED, ik_key)
+            # Use a dummy key for confirmation lookup when ik_key is None
+            confirm_key = ik_key or f"_noik_{tool_name}"
+            existing_req = await self.store.find_by_idempotency_key(
+                run_id, EventType.CONFIRMATION_REQUESTED, confirm_key
+            )
             if existing_req is not None:
                 req_payload = ConfirmationRequestedPayload.model_validate(existing_req.payload)
                 confirmed_event = await self._find_confirmation_received(run_id, req_payload.confirmation_id)
                 if confirmed_event is not None:
                     cr_payload = ConfirmationReceivedPayload.model_validate(confirmed_event.payload)
                     if cr_payload.confirmed:
-                        pass  # Skip confirmation, continue to execution
+                        # Reuse original tool_call_id to maintain trace chain (Issue #6 fix)
+                        tool_call_id = req_payload.tool_call_id
                     else:
+                        await self.store.append_event(
+                            run_id,
+                            EventType.TOOL_FAILED,
+                            ToolFailedPayload(
+                                tool_call_id=tool_call_id,
+                                tool_name=tool_name,
+                                error="Confirmation denied by operator",
+                                retryable=False,
+                            ).model_dump(),
+                        )
                         return ToolExecutionResult(
                             status=ExecutionStatus.FAILED,
                             tool_call_id=tool_call_id,
@@ -141,13 +162,13 @@ class ToolExecutor:
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     input=input,
-                    idempotency_key=ik_key,
+                    idempotency_key=confirm_key,
                 )
                 await self.store.append_event(
                     run_id,
                     EventType.CONFIRMATION_REQUESTED,
                     confirmation_payload.model_dump(),
-                    idempotency_key=ik_key,
+                    idempotency_key=confirm_key,
                 )
                 return ToolExecutionResult(
                     status=ExecutionStatus.CONFIRMATION_NEEDED,
@@ -169,10 +190,16 @@ class ToolExecutor:
             ).model_dump(),
         )
 
-        # ── Step 7: Execute via Sandbox + write completion ──────────
+        # ── Step 7: Execute via Sandbox with RetryRunner ─────────
         step7_start = time.monotonic()
         try:
-            output = await Sandbox.invoke(tool_fn, input, timeout_ms=tool_def.timeout_ms)
+            async def _run() -> Any:
+                return await Sandbox.invoke(tool_fn, input, timeout_ms=tool_def.timeout_ms)
+
+            output, retry_count = await RetryRunner.execute_with_retry(
+                _run,
+                policy=tool_def.retry_policy,
+            )
             duration_ms = int((time.monotonic() - step7_start) * 1000)
             tp = ToolCompletedPayload(
                 tool_call_id=tool_call_id,
@@ -188,6 +215,7 @@ class ToolExecutor:
                 idempotency_key=ik_key,
                 output=output,
                 duration_ms=duration_ms,
+                retry_attempts=retry_count,
             )
         except asyncio.TimeoutError:
             duration_ms = int((time.monotonic() - step7_start) * 1000)
@@ -230,16 +258,10 @@ class ToolExecutor:
                 error=str(exc),
                 retryable=retryable,
                 duration_ms=duration_ms,
+                retry_attempts=0,
             )
 
     # ── Helpers ──────────────────────────────────────────────────
 
     async def _find_confirmation_received(self, run_id: str, confirmation_id: str):
-        # TODO(L5): 改为 SQL json_extract 查询，避免全量加载事件
-        events = await self.store.get_events(run_id)
-        for event in events:
-            if event.event_type == EventType.CONFIRMATION_RECEIVED:
-                payload = ConfirmationReceivedPayload.model_validate(event.payload)
-                if payload.confirmation_id == confirmation_id:
-                    return event
-        return None
+        return await self.store.find_confirmation_by_id(run_id, confirmation_id)

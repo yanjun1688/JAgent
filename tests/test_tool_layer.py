@@ -303,8 +303,9 @@ class TestRetryRunner:
             return "ok"
 
         policy = RetryPolicy(max_retries=4, retryable_errors=["timeout"], backoff_base_ms=10)
-        result = await RetryRunner.execute_with_retry(flaky, policy=policy)
+        result, retry_count = await RetryRunner.execute_with_retry(flaky, policy=policy)
         assert result == "ok"
+        assert retry_count == 2
         assert call_count[0] == 3
 
     @pytest.mark.asyncio
@@ -375,7 +376,7 @@ class TestToolExecutor:
 
         def failing_tool(input):
             call_count[0] += 1
-            raise RuntimeError("timeout error")
+            raise RuntimeError("fatal error (not retryable)")
 
         r1 = await executor.execute(
             "run-1", "http_request", {"url": "https://a.com", "method": "GET"}, http_tool_def, failing_tool

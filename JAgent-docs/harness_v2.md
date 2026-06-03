@@ -239,7 +239,9 @@ interface ToolDefinition {
 }
 ```
 
-**SKILL 说明**：SKILL 是预定义的多步技能包，对外表现为单个工具（有 `name`、`input_schema`、`output_schema`），内部可以包含多步操作。Agent 调用 SKILL 和调用普通工具的方式完全相同，无需区分。
+**ToolRegistry 说明**：`ToolRegistry`（`harness/tools/registry.py`）是工具的中央注册表，支持动态注册/查询/移除。Scheduler 通过 `registry.list_tool_defs()` 和 `registry.list_tool_fns()` 获取工具列表，`build_llm_schemas()` 自动生成 LLM 兼容的函数定义。新增工具只需注册到 Registry，无需修改 Scheduler 或 Kernel。
+
+**SKILL 说明**：SKILL 是预定义的多步技能包，对外表现为单个工具（有 `name`、`input_schema`、`output_schema`），内部可以包含多步操作。Agent 调用 SKILL 和调用普通工具的方式完全相同，无需区分。SKILL 通过 `Skill` 类（`harness/tools/skill.py`）定义，支持步骤编排和外部工具依赖注入。
 
 ### 5.2 幂等性保证
 
@@ -303,24 +305,6 @@ Agent 不感知 `tool_call_id` 的存在——它由 Tool Layer 在接收 `tool_
   │      └─ true 且无已确认记录 → 写入 ConfirmationRequested，触发挂起流程（见 5.3）
   ├─ 6. 写入 ToolCalled 事件 ← 此时才写入，确认即将实际执行
   └─ 7. 经 Sandbox 执行工具，写入 ToolCompleted / ToolFailed / ToolTimeout 事件
-```
-接收 tool_call (tool_name, input)
-  │
-  ├─ 0. 生成 tool_call_id（UUID/ULID）
-  ├─ 1. Schema 校验（SchemaGuardrail）
-  ├─ 2. 自动计算幂等键（若 input 含 idempotency_key 且不为 None）
-  ├─ 3. 查询 Event Store：此幂等键是否已有 ToolCompleted 事件？
-  │      ├─ 是 → 直接返回缓存结果（不写入 ToolCalled，无副作用）
-  │      └─ 否 → 继续
-  ├─ 4. 执行 Guardrails 前置检查
-  │      ├─ 通过 → 继续
-  │      └─ 失败 → 写入 GuardrailTriggered 事件，拒绝执行
-  ├─ 5. requires_confirmation 检查
-  │      ├─ false → 继续
-  │      ├─ 已有 ConfirmationReceived(confirmed=true) 对应本幂等键 → 跳过，继续
-  │      └─ true 且无已确认记录 → 写入 ConfirmationRequested，触发挂起流程（见 5.3）
-  ├─ 6. 写入 ToolCalled 事件 ← 此时才写入，确认即将实际执行
-  └─ 7. 经 Sandbox 执行工具（`invoke()` 或 `run()` 路径），写入 ToolCompleted / ToolFailed / ToolTimeout 事件
 ```
 
 **ToolCalled 写入时机说明：**
@@ -459,7 +443,7 @@ Guardrails 在 Tool Layer 实现，与 Agent 推理逻辑完全解耦。**即使
 | `ConfirmationRequested` | Tool Layer | 危险操作被拦截时自动写入 | `confirmation_id, tool_call_id, tool_name, input, idempotency_key, risk_level` |
 | `ConfirmationReceived` | 外部接口 | 操作员提交决策 | `confirmation_id, confirmed, operator_id` |
 | `ContextCompressed` | Context Manager | 自动压缩触发时写入（V0.5+） | `original_tokens, compressed_tokens, summary_ref` |
-| `ContextCheckpointed` | Context Manager | 定期快照写入（V0.5+） | `checkpoint_seq, snapshot_ref, token_count` |
+| `ContextCheckpointed` | Context Manager / 任意受信组件 | 定期快照写入（V0.5+）；L2 已定义完整 Payload 和 fold 处理 | `checkpoint_seq, snapshot_ref, token_count` |
 | `RunPaused` | Scheduler | 暂停执行（如等待确认） | `reason` |
 | `RunResumed` | Scheduler | 恢复执行（确认完成后） | `resume_from_seq` |
 | `RunCompleted` | Scheduler | LLM 输出停止信号后自动写入 | `result_summary` |
@@ -650,7 +634,12 @@ Worker Process (Python asyncio)
   │
   ├─ Agent Instance                 ← 非受信，LLM 推理
   │   ├─ Context Window（当前上下文）
-  │   └─ Tool Registry（工具定义，运行时动态加载）
+  │   └─ 通过 Scheduler 接收 tool_defs（`list[ToolDefinition]` 参数注入）
+  │
+  ├─ Tool Registry                  ← 受信，工具生命周期管理
+  │   ├─ 集中注册/查询/移除工具定义和实现
+  │   ├─ build_llm_schemas() 自动生成 LLM 兼容的 function calling 定义
+  │   └─ Scheduler 通过 registry.list_tool_defs() / list_tool_fns() 获取
   │
   ├─ Tool Executor                  ← 受信，强制执行契约
   │   ├─ Idempotency Checker（自动计算 + 查重）
@@ -660,7 +649,6 @@ Worker Process (Python asyncio)
   ├─ Sandbox                        ← 受信，统一执行入口
   │   ├─ invoke(fn, input, timeout_ms)  ← 进程内工具（http_request, file_op）
   │   └─ run(command, timeout_ms, cwd)  ← 子进程工具（run_code, browser）
-  │
   │
   ├─ Context Manager                ← 受信，自动压缩（V0.5+）
   │   └─ 监控 token 使用，接近阈值时触发滚动摘要
@@ -672,13 +660,103 @@ Worker Process (Python asyncio)
 
 ---
 
+## 8.3 接口层设计（V0.3+）
+
+### 8.3.0 依赖注入模式
+
+HarnessAPI 通过 FastAPI `Depends()` 注入所有端点（实现见 `harness/api/deps.py`）：
+
+```python
+# harness/api/deps.py
+class HarnessAPI:
+    """Wraps core dependencies injected into every endpoint."""
+    def __init__(self, store: EventStore, executor=None):
+        self.store = store
+        self.executor = executor
+        self._schedulers: dict[str, AgentLoopScheduler] = {}
+        self._ws_clients: dict[str, list[WebSocket]] = {}
+
+_hapi: HarnessAPI | None = None
+
+def get_hapi() -> HarnessAPI:
+    """FastAPI dependency — injects HarnessAPI into endpoints."""
+    if _hapi is None:
+        raise RuntimeError("HarnessAPI not initialized.")
+    return _hapi
+
+# Endpoints receive via Depends():
+@app.get("/api/v1/runs")
+async def list_runs(api: HarnessAPI = Depends(get_hapi)):
+    ...
+
+# 测试通过 dependency_overrides 注入 mock 实例：
+app.dependency_overrides[get_hapi] = lambda: test_api
+```
+
+- HTTP 和 WebSocket 端点统一使用 `Depends(get_hapi)`
+- 生产环境通过 `configure_hapi(api)` 设置全局实例（`harness/api/deps.py:43`）
+- 测试无需调用 `configure_hapi()`，直接覆盖依赖即可，避免全局状态污染
+- 生命周期由外部管理（`store.initialize()` / `store.close()`），FastAPI lifespan 为空
+- WebSocket 端点和 REST 端点共享同一 `HarnessAPI` 实例，通过 `broadcast_event()` 推送新事件（`harness/api/deps.py:58`）
+
+### 8.3.1 REST API
+
+| 端点 | 方法 | 用途 | 响应 |
+|------|------|------|------|
+| `/api/v1/runs` | GET | 列举所有 Run（分页） | `{ runs: RunSummary[], total: int }` |
+| `/api/v1/runs` | POST | 创建新 Run | `{ run_id: str }` |
+| `/api/v1/runs/{run_id}` | GET | 获取 Run 状态快照 | `RunDetailResponse`（含 status, intent, seq, event_count, last_error, summary, pause_reason, pending_confirmations） |
+| `/api/v1/runs/{run_id}` | DELETE | 归档/删除 Run | `{ success: bool }` |
+| `/api/v1/runs/{run_id}/events` | GET | 获取事件流（分页） | `{ events: Event[], total: int }` |
+| `/api/v1/runs/{run_id}/pause` | POST | 暂停 Run | `{ success: bool }` |
+| `/api/v1/runs/{run_id}/resume` | POST | 恢复 Run | `{ success: bool }` |
+| `/api/v1/runs/{run_id}/confirm` | POST | 提交确认决策 | `{ success: bool }` |
+
+### 8.3.2 WebSocket
+
+| 端点 | 用途 |
+|------|------|
+| `WS /api/v1/runs/{run_id}/events` | 实时推送 Run 的新事件 |
+
+- 连接时立即发送该 Run 的所有历史事件（按 seq 排序）
+- 新事件产生时实时推送给所有连接的客户端
+- 每个消息包含单个 `Event` JSON 对象
+
+### 8.3.3 前端架构
+
+```
+frontend/
+├── src/
+│   ├── api/           # fetch 客户端 + WebSocket 连接（client.ts）
+│   │   ├── client.ts  # API 调用封装 + connectEventStream()
+│   │   └── schema.ts  # 从 OpenAPI schema 自动生成的 TypeScript 类型
+│   ├── components/    # 可复用 UI 组件
+│   │   └── ConfirmDialog.tsx
+│   ├── pages/         # 页面组件
+│   │   ├── RunList.tsx     # Run 列表（带创建输入 + 5s 自动刷新）
+│   │   └── RunDetail.tsx   # 详情页：事件时间线 + pause/resume/delete + 确认操作
+│   └── App.tsx
+├── public/
+│   └── openapi.json   # `python scripts/generate_openapi.py` 导出的 OpenAPI Schema
+└── package.json
+
+类型同步方式（scripts/generate_openapi.py 在项目根目录）：
+1. 后端 Pydantic Model 变更后运行 `npm run generate-api`（调用 `py .../generate_openapi.py`）
+2. `python scripts/generate_openapi.py` 离线从 `FastAPI app.openapi()` 导出 `openapi.json` → `frontend/public/openapi.json`
+3. 同一脚本同时从 `components.schemas` 提取 TypeScript 接口 → `frontend/src/api/schema.ts`
+4. `client.ts` 从 `schema.ts` 导入类型（import type { RunSummary, RunDetailResponse, EventResponse }），不手写重复定义
+5. WebSocket 逻辑内联在 `client.ts` (connectEventStream) + `RunDetail.tsx`（useRef 管理连接、lastSeqRef 去重），无独立 hooks 目录
+```
+
+---
+
 ## 9. 里程碑规划
 
 | 阶段 | 周期 | 目标 | 交付物 |
 |------|------|------|--------|
 | **MVP** | 3 周 | Agent 核心跑通 | `StatefulAgent` + `AgentLoopScheduler` + 自动事件写入 + 3 个基础工具 + SQLite Event Store |
-| **V0.2** | 2 周 | 工具层完善 | `browser()` + `http()` + `run_code()` + 幂等键自动计算 + Retry 策略 |
-| **V0.3** | 2 周 | 可观测性 | 事件流 API + Run 详情 UI + 工具调用 trace 可视化 |
+| **V0.2** | 2 周 | 工具层完善 | `ToolRegistry` + `browser()` + `http_request()` + `file_op()` + `mcp_call()` + `SKILL` + 幂等键全面声明 |
+| **V0.3** | 2 周 | 可观测性 | FastAPI 后端（REST + WebSocket）+ React 前端（Run 列表/详情/确认 UI）|
 | **V0.4** | 2 周 | Guardrails + 确认流程 | 前置检查框架 + 挂起/恢复机制 + 操作员确认 UI |
 | **V0.5** | 2 周 | 长流程稳定性 | Context Manager 自动压缩 + 滚动摘要 + 断点续传 |
 | **V1.0** | 3 周 | 生产就绪 | 分层记忆 + 分布式 Worker + 权限 + 监控报警 |

@@ -11,6 +11,9 @@ build/
 htmlcov/
 .pytest_cache/
 
+# Node
+node_modules/
+
 # IDE
 .vscode/
 .idea/
