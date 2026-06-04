@@ -11,6 +11,7 @@ import {
   RunDetail as RunDetailType,
   HarnessEvent,
 } from '../api/client'
+import type { PendingConfirmationItem } from '../api/schema'
 import ConfirmDialog from '../components/ConfirmDialog'
 
 const EVENT_COLORS: Record<string, string> = {
@@ -35,7 +36,12 @@ export default function RunDetail() {
   const [run, setRun] = useState<RunDetailType | null>(null)
   const [events, setEvents] = useState<HarnessEvent[]>([])
   const [loading, setLoading] = useState(true)
-  const [confirmDialog, setConfirmDialog] = useState<{ confirmationId: string; toolName: string } | null>(null)
+  const [confirmDialog, setConfirmDialog] = useState<{
+    confirmationId: string
+    toolName: string
+    input: Record<string, unknown> | undefined
+    riskLevel: string | undefined
+  } | null>(null)
 
   const wsRef = useRef<WebSocket | null>(null)
   const lastSeqRef = useRef(0)
@@ -201,13 +207,18 @@ export default function RunDetail() {
       {run.pending_confirmations && run.pending_confirmations.length > 0 && (
         <div style={{ background: '#fff3e0', padding: 16, borderRadius: 8, marginBottom: 16 }}>
           <h3 style={{ margin: '0 0 8px' }}>Pending Confirmations</h3>
-          {(run.pending_confirmations as Array<Record<string, string>>).map((pc) => (
+          {run.pending_confirmations?.map((pc) => (
             <div key={pc.confirmation_id} style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 8 }}>
               <span>
                 Tool: <strong>{pc.tool_name}</strong> (risk: {pc.risk_level})
               </span>
               <button
-                onClick={() => setConfirmDialog({ confirmationId: pc.confirmation_id, toolName: pc.tool_name })}
+                onClick={() => setConfirmDialog({
+                  confirmationId: pc.confirmation_id,
+                  toolName: pc.tool_name,
+                  input: pc.input,
+                  riskLevel: pc.risk_level,
+                })}
                 style={{ cursor: 'pointer' }}
               >
                 Review
@@ -255,6 +266,8 @@ export default function RunDetail() {
       {confirmDialog && (
         <ConfirmDialog
           toolName={confirmDialog.toolName}
+          input={confirmDialog.input}
+          riskLevel={confirmDialog.riskLevel}
           onConfirm={(operatorId) => handleConfirm(true, operatorId)}
           onDeny={(operatorId) => handleConfirm(false, operatorId)}
           onClose={() => setConfirmDialog(null)}

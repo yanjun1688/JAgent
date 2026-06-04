@@ -1,6 +1,17 @@
-"""Guardrail framework — pre-execution safety checks for tool calls."""
+"""Guardrail framework — pre-execution safety checks for tool calls (V0.4).
 
+Includes:
+- SchemaGuardrail (built-in, always first)
+- ScopeGuardrail (7.1): path/domain whitelist enforcement
+- RateLimitGuardrail (7.2): per-tool/per-run rate limiting
+- DestructiveOpGuardrail (7.3): auto-trigger confirmation on dangerous ops
+- DependencyGuardrail (7.4): Event Store prerequisite event check
+"""
+
+import asyncio
+import time
 from dataclasses import dataclass
+from typing import Any
 
 import jsonschema
 
@@ -12,6 +23,10 @@ class GuardrailResult:
     passed: bool
     guardrail_id: str
     reason: str
+    triggers_confirmation: bool = False  # V0.4: DestructiveOpGuardrail signals this
+
+
+# ── Built-in: SchemaGuardrail ─────────────────────────────────────
 
 
 class SchemaGuardrail:
@@ -31,14 +46,213 @@ class SchemaGuardrail:
             )
 
 
+# ── 7.1 ScopeGuardrail ────────────────────────────────────────────
+
+
+class ScopeGuardrail:
+    """Check operation targets against allowed scopes.
+
+    Config (in Guardrail.config):
+        allowed_directories: list[str]  — path prefixes for file operations
+        allowed_domains: list[str]      — domain whitelist for HTTP/browser
+        allowed_commands: list[str]     — command whitelist (future, run_code)
+    """
+
+    GUARDRAIL_ID = "scope"
+
+    @staticmethod
+    def check(tool_def: ToolDefinition, input: dict, config: dict[str, Any]) -> GuardrailResult:
+        allowed_dirs = config.get("allowed_directories", [])
+        allowed_domains = config.get("allowed_domains", [])
+        allowed_commands = config.get("allowed_commands", [])
+
+        if tool_def.name == "file_op":
+            path = (input.get("path") or "").replace("\\", "/")
+            if allowed_dirs and not any(path.startswith(d.rstrip("/")) for d in allowed_dirs):
+                return GuardrailResult(
+                    passed=False,
+                    guardrail_id=ScopeGuardrail.GUARDRAIL_ID,
+                    reason=f"Path '{path}' is outside allowed directories: {allowed_dirs}",
+                )
+
+        if tool_def.name in ("http_request", "browser"):
+            url = input.get("url") or input.get("arguments", {}).get("url", "")
+            if allowed_domains:
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                domain = parsed.hostname or ""
+                if not any(domain == d or domain.endswith("." + d) for d in allowed_domains):
+                    return GuardrailResult(
+                        passed=False,
+                        guardrail_id=ScopeGuardrail.GUARDRAIL_ID,
+                        reason=f"Domain '{domain}' is not in allowed list: {allowed_domains}",
+                    )
+
+        if tool_def.name == "run_code":
+            command = input.get("command", "")
+            if allowed_commands and not any(cmd in command for cmd in allowed_commands):
+                return GuardrailResult(
+                    passed=False,
+                    guardrail_id=ScopeGuardrail.GUARDRAIL_ID,
+                    reason=f"Command not in allowed list: {allowed_commands}",
+                )
+
+        return GuardrailResult(passed=True, guardrail_id=ScopeGuardrail.GUARDRAIL_ID, reason="")
+
+
+# ── 7.2 RateLimitGuardrail ────────────────────────────────────────
+
+
+class RateLimitGuardrail:
+    """Rate-limit tool calls within a time window.
+
+    Config:
+        max_calls: int         — max calls allowed (default 10)
+        window_seconds: int    — sliding window in seconds (default 60)
+        scope: str             — "tool" (per tool name) or "run" (per run_id+tool)
+    """
+
+    GUARDRAIL_ID = "rate_limit"
+
+    _call_history: dict[str, list[float]] = {}
+
+    @staticmethod
+    def _make_key(scope: str, tool_name: str, config: dict) -> str:
+        if scope == "run":
+            run_id = config.get("run_id", "")
+            return f"run:{run_id}:{tool_name}"
+        return f"tool:{tool_name}"
+
+    @classmethod
+    def check(cls, tool_def: ToolDefinition, input: dict, config: dict[str, Any]) -> GuardrailResult:
+        max_calls = config.get("max_calls", 10)
+        window = config.get("window_seconds", 60)
+        scope = config.get("scope", "tool")
+        now = time.time()
+
+        key = cls._make_key(scope, tool_def.name, config)
+        history = cls._call_history.setdefault(key, [])
+        history[:] = [t for t in history if now - t < window]
+
+        if len(history) >= max_calls:
+            return GuardrailResult(
+                passed=False,
+                guardrail_id=RateLimitGuardrail.GUARDRAIL_ID,
+                reason=f"Rate limit exceeded: {max_calls} calls per {window}s (scope={scope})",
+            )
+
+        history.append(now)
+        return GuardrailResult(passed=True, guardrail_id=RateLimitGuardrail.GUARDRAIL_ID, reason="")
+
+    @classmethod
+    def reset(cls) -> None:
+        cls._call_history.clear()
+
+
+# ── 7.3 DestructiveOpGuardrail ────────────────────────────────────
+
+
+class DestructiveOpGuardrail:
+    """Detect destructive operations and trigger confirmation flow.
+
+    Config:
+        destructive_operations: list[str]  — input operations to treat as destructive (default ["delete"])
+    """
+
+    GUARDRAIL_ID = "destructive_op"
+
+    @staticmethod
+    def check(tool_def: ToolDefinition, input: dict, config: dict[str, Any]) -> GuardrailResult:
+        destructive_ops = config.get("destructive_operations", ["delete"])
+
+        if tool_def.name == "file_op" and input.get("operation") in destructive_ops:
+            return GuardrailResult(
+                passed=True,
+                guardrail_id=DestructiveOpGuardrail.GUARDRAIL_ID,
+                reason=f"Destructive operation '{input['operation']}' requires confirmation",
+                triggers_confirmation=True,
+            )
+
+        if tool_def.name == "run_code":
+            return GuardrailResult(
+                passed=True,
+                guardrail_id=DestructiveOpGuardrail.GUARDRAIL_ID,
+                reason="Code execution requires confirmation",
+                triggers_confirmation=True,
+            )
+
+        if tool_def.name == "file_op" and input.get("operation") == "write":
+            if "write" not in destructive_ops:
+                return GuardrailResult(passed=True, guardrail_id=DestructiveOpGuardrail.GUARDRAIL_ID, reason="")
+            return GuardrailResult(
+                passed=True,
+                guardrail_id=DestructiveOpGuardrail.GUARDRAIL_ID,
+                reason="Write operation requires confirmation",
+                triggers_confirmation=True,
+            )
+
+        return GuardrailResult(passed=True, guardrail_id=DestructiveOpGuardrail.GUARDRAIL_ID, reason="")
+
+
+# ── 7.4 DependencyGuardrail ───────────────────────────────────────
+
+
+class DependencyGuardrail:
+    """Check that prerequisite events exist in the Event Store.
+
+    Requires EventStore reference. Config:
+        required_events: list[str]  — event types that must exist (e.g. ["RunStarted", "AgentThought"])
+    """
+
+    GUARDRAIL_ID = "dependency"
+
+    def __init__(self, store=None):
+        self._store = store
+
+    async def check(
+        self, tool_def: ToolDefinition, input: dict, config: dict[str, Any], *, run_id: str | None = None
+    ) -> GuardrailResult:
+        if self._store is None:
+            return GuardrailResult(
+                passed=True,
+                guardrail_id=DependencyGuardrail.GUARDRAIL_ID,
+                reason="EventStore not available — skipping dependency check",
+            )
+
+        required = config.get("required_events", [])
+        if not required:
+            return GuardrailResult(passed=True, guardrail_id=DependencyGuardrail.GUARDRAIL_ID, reason="")
+
+        rid = run_id or config.get("run_id", "")
+        if not rid:
+            return GuardrailResult(passed=True, guardrail_id=DependencyGuardrail.GUARDRAIL_ID, reason="")
+
+        events = await self._store.get_events(rid)
+        existing = {e.event_type.value for e in events}
+        missing = [ev for ev in required if ev not in existing]
+
+        if missing:
+            return GuardrailResult(
+                passed=False,
+                guardrail_id=DependencyGuardrail.GUARDRAIL_ID,
+                reason=f"Required events not found: {', '.join(missing)}",
+            )
+
+        return GuardrailResult(passed=True, guardrail_id=DependencyGuardrail.GUARDRAIL_ID, reason="")
+
+
+# ── GuardrailRunner (V0.4: async, store-aware) ────────────────────
+
+
 class GuardrailRunner:
-    def __init__(self, custom_guardrails: dict[str, type] | None = None):
+    def __init__(self, custom_guardrails: dict[str, type] | None = None, store=None):
         self._registry: dict[str, type] = custom_guardrails.copy() if custom_guardrails else {}
+        self._store = store
 
     def register(self, guardrail_type: str, guardrail_cls: type):
         self._registry[guardrail_type] = guardrail_cls
 
-    def run(self, tool_def: ToolDefinition, input: dict) -> list[GuardrailResult]:
+    async def run(self, tool_def: ToolDefinition, input: dict, *, run_id: str | None = None) -> list[GuardrailResult]:
         results: list[GuardrailResult] = []
 
         schema_result = SchemaGuardrail.check(tool_def, input)
@@ -59,8 +273,13 @@ class GuardrailRunner:
                     )
                     return results
 
-                instance = guardrail_cls()
-                result = instance.check(tool_def, input, gr.config)
+                instance = guardrail_cls(store=self._store) if self._store else guardrail_cls()
+
+                if asyncio.iscoroutinefunction(instance.check):
+                    result = await instance.check(tool_def, input, gr.config, run_id=run_id)
+                else:
+                    result = instance.check(tool_def, input, gr.config)
+
                 results.append(result)
                 if not result.passed:
                     return results

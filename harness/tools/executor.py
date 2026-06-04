@@ -1,11 +1,16 @@
 """Tool Executor — 8-step execution flow with idempotency, guardrails, confirmation, and retry."""
 
 import asyncio
+import contextvars
 import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable
+
+# Context variable that tool functions can read to discover the current run_id.
+# Set by ToolExecutor.execute() before each invocation.
+current_run_id: contextvars.ContextVar[str] = contextvars.ContextVar("current_run_id", default="")
 
 from harness.models.events import (
     ConfirmationReceivedPayload,
@@ -76,7 +81,12 @@ class ToolExecutor:
         ik_key = IdempotencyKeyGenerator.compute(tool_def, input)
 
         # ── Step 1+4: Schema + Guardrails pre-checks ─────────────
-        gr_results = self.guardrails.run(tool_def, input)
+        gr_results = await self.guardrails.run(tool_def, input, run_id=run_id)
+        # V0.4: DestructiveOpGuardrail may have flagged confirmation-needed
+        guardrail_triggers_confirmation = any(
+            getattr(gr, "triggers_confirmation", False) for gr in gr_results
+        )
+
         for gr in gr_results:
             if not gr.passed:
                 await self.store.append_event(
@@ -115,7 +125,8 @@ class ToolExecutor:
                 )
 
         # ── Step 5: Confirmation check ───────────────────────────
-        if tool_def.requires_confirmation:
+        needs_confirmation = tool_def.requires_confirmation or guardrail_triggers_confirmation
+        if needs_confirmation:
             # Use a dummy key for confirmation lookup when ik_key is None
             confirm_key = ik_key or f"_noik_{tool_name}"
             existing_req = await self.store.find_by_idempotency_key(
@@ -192,6 +203,7 @@ class ToolExecutor:
 
         # ── Step 7: Execute via Sandbox with RetryRunner ─────────
         step7_start = time.monotonic()
+        token = current_run_id.set(run_id)
         try:
             async def _run() -> Any:
                 return await Sandbox.invoke(tool_fn, input, timeout_ms=tool_def.timeout_ms)
@@ -260,6 +272,8 @@ class ToolExecutor:
                 duration_ms=duration_ms,
                 retry_attempts=0,
             )
+        finally:
+            current_run_id.reset(token)
 
     # ── Helpers ──────────────────────────────────────────────────
 

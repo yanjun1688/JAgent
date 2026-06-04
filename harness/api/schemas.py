@@ -30,6 +30,14 @@ class RunSummary(BaseModel):
     updated_at: float = 0
 
 
+class PendingConfirmationItem(BaseModel):
+    confirmation_id: str
+    tool_name: str
+    tool_call_id: str
+    input: dict
+    risk_level: str
+
+
 class RunDetailResponse(BaseModel):
     run_id: str
     status: str
@@ -39,7 +47,7 @@ class RunDetailResponse(BaseModel):
     last_error: str | None = None
     summary: str | None = None
     pause_reason: str | None = None
-    pending_confirmations: list[dict] = []
+    pending_confirmations: list[PendingConfirmationItem] = []
 
 
 class EventResponse(BaseModel):

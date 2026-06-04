@@ -407,6 +407,7 @@ Guardrails 在 Tool Layer 实现，与 Agent 推理逻辑完全解耦。**即使
 | `run_code` | 沙盒代码执行 |
 | `file_op` | 文件读写操作 |
 | `mcp_call` | MCP 工具 / SKILL 统一调用入口 |
+| `orchestrate` | 多步动态编排：Agent 提交步骤序列，Harness 逐步骤安全执行（见 §5.6） |
 
 #### 控制工具（Control Tools）
 
@@ -417,6 +418,117 @@ Guardrails 在 Tool Layer 实现，与 Agent 推理逻辑完全解耦。**即使
 | `get_run_state` | 折叠事件流得到当前状态快照 | 否（Agent 调用） |
 
 > 注意：事件写入、上下文压缩、确认触发均由受信组件自动完成，不在工具列表中。
+
+### 5.6 Dynamic Orchestration（动态编排）
+
+#### 5.6.1 核心概念
+
+动态编排允许 Agent 在**单次 tool_call** 中提交多步工具序列，由 Harness（`Orchestrator` 受信组件）逐步骤安全执行。这是对"Agent 提议，Harness 执行"模式在序列层面的扩展：
+
+```
+传统模式（单步）:
+  Agent thinks → 调 1 个 tool → observe → Agent thinks → 调 1 个 tool → ...
+
+动态编排（多步）:
+  Agent thinks → 调 orchestrate([stepA, stepB, stepC])
+    → Harness 逐步骤执行:
+        stepA → Tool Layer(Guardrails+幂等+确认) → StepCompleted
+        stepB → Tool Layer(Guardrails+幂等+确认) → StepCompleted
+        stepC → Tool Layer(Guardrails+幂等+确认) → StepCompleted
+    → 聚合结果返回 Agent
+  Agent observes → thinks next
+```
+
+**核心原则**：
+- **Agent 决策，Harness 执行**：Agent 决定"做什么"（步骤序列），Harness 决定"怎么做"（何时执行、是否安全、如何容错）
+- **原子可见性**：编排过程 Agent 不可见中间结果，只看到最终聚合结果
+- **失败即终止**：任一步失败停止编排，Agent 下轮 think 中自行修复
+
+#### 5.6.2 Orchestrator 组件
+
+`Orchestrator`（`harness/core/orchestrator.py`）是编排的执行引擎，职责：
+
+```
+Orchestrator.execute(input):
+  ├─ 1. 校验计划（PlanGuardrail）
+  │   ├─ 步数 ≤ max_steps（默认 10）
+  │   ├─ 每步 tool_name 存在于 ToolRegistry
+  │   └─ 每步 input 通过该工具的 SchemaGuardrail
+  │
+  ├─ 2. 写入 OrchestrationStarted 事件
+  │
+  ├─ 3. 逐步骤执行
+  │   for i, step in enumerate(steps):
+  │     result = ToolExecutor.execute(
+  │       run_id, step.tool, step.input,
+  │       tool_def, tool_fn
+  │     )
+  │     match result.status:
+  │       COMPLETED | IDEMPOTENCY_HIT → 写入 StepCompleted
+  │       CONFIRMATION_NEEDED → 挂起等待 → 恢复后重试
+  │       FAILED | TIMEOUT | GUARDRAIL_BLOCKED → 写入 StepFailed → 终止
+  │
+  ├─ 4. 写入 OrchestrationCompleted / OrchestrationFailed
+  │
+  └─ 5. 返回聚合结果
+```
+
+#### 5.6.3 `orchestrate` 工具契约
+
+```typescript
+ToolDefinition {
+  name: "orchestrate",
+  description: "Execute multiple tool calls in sequence under harness control",
+  input_schema: {
+    type: "object",
+    properties: {
+      intent: { type: "string", description: "编排目标" },
+      steps: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            tool: { type: "string" },
+            input: { type: "object" },
+            description: { type: "string" }
+          },
+          required: ["tool", "input"]
+        }
+      }
+    },
+    required: ["intent", "steps"]
+  },
+  idempotency_key_fields: ["intent", "steps"],
+  side_effects: [EXTERNAL],
+  timeout_ms: 600000,          // 10 min（编排可能包含多个 I/O 操作）
+  retry_policy: { max_retries: 0 },  // 编排整体不重试，重试在步骤级别
+  requires_confirmation: false
+}
+```
+
+`orchestrate` 作为普通工具注册到 `ToolRegistry`，Scheduler **不需要**感知编排的存在。Scheduler 的 think→act→observe 循环不变，`orchestrate` 只是 Agent 可选调用的众多工具之一。
+
+#### 5.6.4 安全的层级结构
+
+编排保留了 Harness 的每一层安全控制：
+
+| 层级 | 保障 | 机制 |
+|------|------|------|
+| 计划级 | 步数限制 | `PlanGuardrail`：max_steps（默认 10） |
+| 计划级 | 工具可用性 | `PlanGuardrail`：确认每步 tool 已注册 |
+| 计划级 | 输入合法性 | `PlanGuardrail`：每步输入预校验 Schema |
+| 步骤级 | 完整 Tool Layer | 每步独立经过 SchemaGuardrail → 幂等键 → Guardrails → Sandbox 执行 |
+| 步骤级 | 人工确认 | `requires_confirmation=true` 的工具触发完整挂起/恢复流程 |
+| 循环级 | Scheduler 熔断 | 步骤失败计入 `consecutive_failures`，触发熔断时整个 Run 终止 |
+| Run 级 | Pause/Cancel | 暂停/取消从 Scheduler 级联到 Orchestrator |
+
+#### 5.6.5 与已有机制的互补
+
+| 机制 | 关系 |
+|------|------|
+| `make_plan()` | `make_plan` 产生文本计划供 Agent 参考；`orchestrate` 直接执行结构化步骤。Agent 可先 `make_plan` 规划再 `orchestrate` 执行 |
+| SKILL | SKILL 是开发者预编码的多步技能包；`orchestrate` 是 Agent 动态组装的多步序列。两者都通过 Tool Layer 执行 |
+| 单个工具调用 | `orchestrate` 不会绕过或替代单工具调用。Agent 根据任务复杂度自行选择：1 步用普通调用，3+ 步用 `orchestrate` |
 
 ---
 
@@ -442,12 +554,18 @@ Guardrails 在 Tool Layer 实现，与 Agent 推理逻辑完全解耦。**即使
 | `GuardrailTriggered` | Tool Layer | 前置检查未通过时自动写入 | `tool_call_id, tool_name, guardrail_id, reason` |
 | `ConfirmationRequested` | Tool Layer | 危险操作被拦截时自动写入 | `confirmation_id, tool_call_id, tool_name, input, idempotency_key, risk_level` |
 | `ConfirmationReceived` | 外部接口 | 操作员提交决策 | `confirmation_id, confirmed, operator_id` |
-| `ContextCompressed` | Context Manager | 自动压缩触发时写入（V0.5+） | `original_tokens, compressed_tokens, summary_ref` |
+| `ContextCompressed` | Context Manager | 自动压缩触发时写入（V0.5+） | `original_tokens, compressed_tokens, summary_ref`（V0.5+ 改为 `EpisodeSummary \| str` 结构化输出） |
 | `ContextCheckpointed` | Context Manager / 任意受信组件 | 定期快照写入（V0.5+）；L2 已定义完整 Payload 和 fold 处理 | `checkpoint_seq, snapshot_ref, token_count` |
 | `RunPaused` | Scheduler | 暂停执行（如等待确认） | `reason` |
 | `RunResumed` | Scheduler | 恢复执行（确认完成后） | `resume_from_seq` |
 | `RunCompleted` | Scheduler | LLM 输出停止信号后自动写入 | `result_summary` |
 | `RunFailed` | Scheduler / Tool Layer | 熔断或 `fail_with_reason` | `final_error, event_count` |
+| `OrchestrationStarted` | Orchestrator | 编排开始时写入 | `plan_id, intent, steps_summary` |
+| `StepCompleted` | Orchestrator | 编排中某一步执行成功 | `plan_id, step_index, tool_call_id, output` |
+| `StepFailed` | Orchestrator | 编排中某一步执行失败 | `plan_id, step_index, tool_call_id, error` |
+| `OrchestrationCompleted` | Orchestrator | 全部步骤完成 | `plan_id, completed_steps, summary` |
+| `FeedbackInjected` | RunMonitor | 监控组件检测到异常时自动注入反馈（V0.6） | `feedback_text, priority` |
+| `OrchestrationFailed` | Orchestrator | 编排因步骤失败终止 | `plan_id, completed_steps, final_error` |
 
 > **tool_call_id 链路**：每次工具调用由 Tool Layer 生成全局唯一的 `tool_call_id`，`ToolCalled`、`ToolCompleted`、`ToolFailed`、`ToolTimeout`、`GuardrailTriggered` 共享同一 ID，通过该 ID 可重建完整的工具调用 trace 链表。
 
@@ -534,10 +652,12 @@ class RunState:
     tool_calls: list[ToolCalledPayload]         # tool_call 追踪链
     tool_results: list[ToolResult]              # 工具结果（completed/failed/timeout/guardrail_blocked）
     last_error: str | None
-    summary: str | None
+    summary: EpisodeSummary | str | None    # V0.5+ 结构化摘要，无 LLM 时降级纯文本
+    keep_recent_count: int = 0              # 紧急压缩时保留最近 3 轮详情
     pause_reason: str | None
     pending_confirmations: list[ConfirmationRequestedPayload]  # 未解决的确认请求
     last_checkpoint_seq: int | None   # 最近 ContextCheckpointed 的 seq（V0.5+）
+    feedbacks: list[FeedbackInjectedPayload]  # V0.6 监控反馈列表，折叠 `FeedbackInjected` 事件
 ```
 
 **fold 逻辑要点：**
@@ -754,12 +874,15 @@ frontend/
 
 | 阶段 | 周期 | 目标 | 交付物 |
 |------|------|------|--------|
-| **MVP** | 3 周 | Agent 核心跑通 | `StatefulAgent` + `AgentLoopScheduler` + 自动事件写入 + 3 个基础工具 + SQLite Event Store |
-| **V0.2** | 2 周 | 工具层完善 | `ToolRegistry` + `browser()` + `http_request()` + `file_op()` + `mcp_call()` + `SKILL` + 幂等键全面声明 |
-| **V0.3** | 2 周 | 可观测性 | FastAPI 后端（REST + WebSocket）+ React 前端（Run 列表/详情/确认 UI）|
-| **V0.4** | 2 周 | Guardrails + 确认流程 | 前置检查框架 + 挂起/恢复机制 + 操作员确认 UI |
-| **V0.5** | 2 周 | 长流程稳定性 | Context Manager 自动压缩 + 滚动摘要 + 断点续传 |
-| **V1.0** | 3 周 | 生产就绪 | 分层记忆 + 分布式 Worker + 权限 + 监控报警 |
+| **MVP** | 3 周 | Agent 核心跑通 | `StatefulAgent` + `AgentLoopScheduler` + 自动事件写入 + 3 个基础工具 + SQLite Event Store | ✅ |
+| **V0.2** | 2 周 | 工具层完善 | `ToolRegistry` + `browser()` + `http_request()` + `file_op()` + `mcp_call()` + `SKILL` + 幂等键全面声明 | ✅ |
+| **V0.3** | 2 周 | 可观测性 | FastAPI 后端（REST + WebSocket）+ React 前端（Run 列表/详情/确认 UI）| ✅ |
+| **V0.4** | 2 周 | Guardrails + 确认流程 | ScopeGuardrail + RateLimitGuardrail + DestructiveOpGuardrail + DependencyGuardrail + 操作员确认 UI + Guardrail 测试 32 项 | ✅ |
+| **V0.4+** | 1 周 | Dynamic Orchestration | `Orchestrator` + `orchestrate` 工具 + PlanGuardrail + 5 种编排事件 + 16 项集成测试 | ✅ |
+| **V0.5** | 2 周 | 长流程稳定性 | Context Manager 自动压缩 + 滚动摘要 + 断点续传 + 20 项集成测试 | ✅ |
+| **V0.5+** | 1 周 | 记忆压缩优化 | EpisodeSummary 结构化摘要 + 紧急压缩（压缩旧 50% 保留近 3 轮）+ 9 项新增测试 | ✅ |
+| **V0.6** | 2 周 | 监控与反馈 | RunMonitor（on_append 实时监听）+ FeedbackInjected 事件 + Scheduler System Prompt 注入 + 22 项测试 | ✅ |
+| **V1.0** | 3 周 | 生产就绪 | 分层记忆 + 分布式 Worker + 权限 + 业务适配 | 🔜 |
 
 > ✅ **MVP 验收标准**：`AgentLoopScheduler` 驱动一个 `StatefulAgent`，完成自然语言任务，全程事件由系统自动写入（不依赖 Agent 主动触发），幂等键由 Tool Layer 自动计算，工具重试无副作用。
 
@@ -788,11 +911,18 @@ frontend/
 - [ ] 每个 think/act/observe 的事件写入是否由系统自动完成，不依赖 Agent 主动触发？
 - [ ] Event Store 是否为 Append-Only，是否有物理约束防止 UPDATE/DELETE？
 - [ ] Guardrails 是否为最后一道不可绕过的防线，不依赖 System Prompt 是否提醒了 Agent？
-- [ ] Agent Loop Scheduler 是否独立于 Agent Kernel，能够在确认等待时挂起/恢复循环？
-- [ ] Worker 崩溃后，Agent 状态能否从 Event Store 恢复，恢复时间是否 < 30 秒？
+- [x] Agent Loop Scheduler 是否独立于 Agent Kernel，能够在确认等待时挂起/恢复循环？
+- [x] Worker 崩溃后，Agent 状态能否从 Event Store 恢复，恢复时间是否 < 30 秒？
+- [x] V0.5 ContextManager 是否对 Agent 透明？Agent 是否可以感知压缩事件的事件写入？
+- [x] V0.5 `state.summary` 是否被 AgentKernel 正确消费，实现上下文压缩效果？
 - [ ] 工具注册表是否支持运行时动态加载，新增工具不需要修改 Agent 核心？
 - [ ] MCP 工具和 SKILL 是否均通过 `mcp_call()` 入口，工具契约格式是否一致？
 - [ ] MVP 阶段上下文上限（≤ 30 轮）是否在产品层有明确的任务拆分策略？
+- [x]（V0.4+）`orchestrate` 工具的每步是否独立经过 Tool Layer 的 Guardrails/幂等键/确认检查？
+
+- [x]（V0.4+）编排失败时是否立即终止并写入 `OrchestrationFailed`，不继续执行后续步骤？
+
+- [x]（V0.4+）编排事件（OrchestrationStarted / StepCompleted / StepFailed / OrchestrationCompleted）是否完整记录在 Event Store？
 
 ---
 
