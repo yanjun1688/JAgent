@@ -1,4 +1,4 @@
-# Harness v2.2
+# Harness v2.1
 
 **Agent-First 任务执行引擎** — Agent 拥有决策权，系统拥有强制权。
 
@@ -24,17 +24,25 @@
 │  Agent Loop Scheduler        ← 受信              │
 │     控制 think/act/observe 节奏                  │
 │     自动事件写入 · 挂起/恢复控制 · 熔断保护       │
+│     拉取反馈 → 注入 System Prompt               │
+├─────────────────────────────────────────────────┤
+│  Monitoring & Feedback       ← 受信 (V0.6)      │
+│     RunMonitor: on_append 实时监听               │
+│     异常检测 · Token 预警 · 反馈注入             │
 ├─────────────────────────────────────────────────┤
 │  Agent Kernel (LLM)          ← 非受信            │
 │     think → 选择工具 → 推理决策                   │
+│     被动接收反馈（不感知监控机制）                │
 ├────────────────┬────────────────────────────────┤
 │  Planning Tools│  Execution Tools    ← 非受信    │
 │  make_plan()   │  browser()   http_request()    │
 │  revise_plan() │  run_code()  file_op()         │
-│                │  mcp_call()                    │
+│                │  mcp_call()  orchestrate       │
 ├────────────────┴────────────────────────────────┤
 │  Tool Registry + Tool Layer Infra  ← 受信       │
 │  幂等键 · Guardrails · Sandbox · 超时重试        │
+│  Context Manager: 自动压缩 + Checkpoint (V0.5)  │
+│  Orchestrator: 多步动态编排 (V0.4+)              │
 ├─────────────────────────────────────────────────┤
 │  Event Store (append-only)   ← 受信             │
 │  run_id + seq → 不可变事件流                     │
@@ -50,18 +58,33 @@
 - **幂等键由 Tool Layer 自动计算**，Agent 不感知幂等机制的存在
 - **沙盒是统一执行入口**：进程内工具经 `Sandbox.invoke()`，子进程工具经 `Sandbox.run()`
 
-## 事件类型 (15 种)
+## 事件类型 (22 种)
 
+**核心循环**:
 ```
 RunStarted → AgentThought → ToolCalled → ToolCompleted
                                         → ToolFailed
                                         → ToolTimeout
                                         → GuardrailTriggered
                                         → ConfirmationRequested → ConfirmationReceived
-                           → ContextCompressed
-                           → ContextCheckpointed (V0.5+)
                            → RunPaused → RunResumed
                            → RunCompleted / RunFailed
+```
+
+**上下文管理 (V0.5+)**:
+```
+ContextCompressed (滚动摘要) · ContextCheckpointed (快照)
+```
+
+**编排事件 (V0.4+)**:
+```
+OrchestrationStarted → StepCompleted / StepFailed
+                     → OrchestrationCompleted / OrchestrationFailed
+```
+
+**监控反馈 (V0.6)**:
+```
+FeedbackInjected (由 RunMonitor 自动写入)
 ```
 
 所有事件 Append-Only 存储在 SQLite，`PRIMARY KEY (run_id, seq)` 保证全局有序，`fold_events()` 纯函数可重建任意时刻状态快照。写入后自动通过 WebSocket 广播给前端。
@@ -72,13 +95,13 @@ RunStarted → AgentThought → ToolCalled → ToolCompleted
 harness/
 ├── __init__.py                 # 公共导出
 ├── models/
-│   ├── events.py               # 15 种事件 Payload + EventType 枚举 (Pydantic v2)
+│   ├── events.py               # 22 种事件 Payload + EventType 枚举 (Pydantic v2)
 │   └── tools.py                # ToolDefinition + Guardrail + RetryPolicy 模型
 ├── storage/
 │   └── event_store.py          # SQLite Append-Only Event Store (PK 冲突重试, on_append 回调)
 ├── tools/
 │   ├── executor.py             # Tool Executor — 8 步执行流程 (幂等/Guardrails/确认/沙盒)
-│   ├── guardrails.py           # GuardrailRunner + SchemaGuardrail
+│   ├── guardrails.py           # GuardrailRunner (async) + 5 Guardrail (Schema/Scope/RateLimit/DestructiveOp/Dependency)
 │   ├── idempotency.py          # 幂等键自动计算 (SHA256)
 │   ├── sandbox.py              # Sandbox — invoke() 进程内 + run() 子进程
 │   ├── retry.py                # RetryRunner — 指数退避 + jitter
@@ -90,15 +113,20 @@ harness/
 │   └── skill.py                # 多步技能包封装
 ├── core/
 │   ├── fold.py                 # fold_events() → RunState 纯函数
-│   ├── scheduler.py            # AgentLoopScheduler — think→act→observe 循环
+│   ├── scheduler.py            # AgentLoopScheduler — think→act→observe 循环 (含反馈注入)
 │   ├── agent_kernel.py         # AgentKernel ABC + MockAgentKernel + LLMAgentKernel
 │   ├── llm_client.py           # LLMClient 抽象 + MockLLMClient
-│   └── system_prompt.py        # System Prompt 构建器 + 工具 Schema 格式化
+│   ├── system_prompt.py        # System Prompt 构建器 + 工具 Schema 格式化
+│   ├── context_manager.py      # Context Manager — 自动压缩 + Checkpoint + 断点续传 (V0.5)
+│   └── orchestrator.py         # Orchestrator — 多步动态编排 (V0.4+)
+├── monitoring/
+│   ├── __init__.py             # 模块导出
+│   └── run_monitor.py          # RunMonitor — on_append 实时监控 + FeedbackInjected 注入 (V0.6)
 └── api/
     ├── app.py                  # FastAPI 应用组装 (CORS, lifespan, router include)
     ├── deps.py                 # HarnessAPI 容器 + DI + start_run + WebSocket 广播
     ├── schemas.py              # 请求/响应 Pydantic 模型
-    ├── routes.py               # 8 个 REST 端点 + 确认接口
+    ├── routes.py               # REST 端点 + 确认接口
     ├── ws.py                   # WebSocket 事件推送端点
     └── serve.py                # 生产入口 — 装配 Mock/LLM kernel + 工具
 
@@ -109,9 +137,9 @@ frontend/                       # React + Vite 前端
 │   │   └── schema.ts           # 从 OpenAPI 自动生成的 TypeScript 类型
 │   ├── pages/
 │   │   ├── RunList.tsx         # Run 列表 (创建 + 自动刷新)
-│   │   └── RunDetail.tsx       # 详情页 (事件时间线 + pause/resume/confirm)
+│   │   └── RunDetail.tsx       # 详情页 (事件时间线 + pause/resume/confirm/feedback)
 │   ├── components/
-│   │   └── ConfirmDialog.tsx   # 操作员确认弹窗
+│   │   └── ConfirmDialog.tsx   # 操作员确认弹窗 (含 risk_level + input 参数展示)
 │   └── App.tsx
 ├── public/openapi.json         # OpenAPI schema
 └── package.json
@@ -120,13 +148,18 @@ scripts/
 └── generate_openapi.py         # 离线导出 OpenAPI + TypeScript 类型
 
 tests/
-├── test_event_store.py         # L1 测试 (23 tests)
-├── test_fold.py                # 事件流折叠测试 (24 tests)
-├── test_tool_layer.py          # L2 测试 (44 tests)
-├── test_scheduler.py           # L3 测试 (12 tests)
-├── test_kernel.py              # L4 测试 (16 tests)
-├── test_tools_v02.py           # V0.2 工具测试 (26 tests)
-└── test_api.py                 # V0.3 API 测试 (14 tests)
+├── test_event_store.py         # L1 测试 (23)
+├── test_fold.py                # 事件流折叠测试 (24)
+├── test_tool_layer.py          # L2 测试 (44)
+├── test_scheduler.py           # L3 测试 (12)
+├── test_kernel.py              # L4 测试 (16)
+├── test_tools_v02.py           # V0.2 工具测试 (26)
+├── test_api.py                 # V0.3 API 测试 (14)
+├── test_guardrails_v04.py      # V0.4 Guardrails 测试 (32)
+├── test_orchestrator.py        # V0.4+ 编排测试 (16)
+├── test_context_manager.py     # V0.5 上下文管理测试 (20)
+│                               # V0.5+ 结构化摘要测试 (9)
+└── test_monitoring.py          # V0.6 监控反馈测试 (22)
 ```
 
 ## 开发进度
@@ -139,10 +172,13 @@ tests/
 | L4 | Agent Kernel 接口 | ✓ 完成 | 16 |
 | V0.2 | 工具层 (Registry / browser / http / file / MCP / SKILL) | ✓ 完成 | 26 |
 | V0.3 | 可观测性 (REST + WebSocket + 前端 + DI 重构) | ✓ 完成 | 14 |
-| V0.4 | Guardrails + 确认流程完善 | 待开始 | — |
-| V0.5 | 长流程稳定性 | 待开始 | — |
+| V0.4 | Guardrails (5 种) + 确认 UI 完善 | ✓ 完成 | 32 |
+| V0.4+ | Orchestrator 动态编排 + PlanGuardrail | ✓ 完成 | 16 |
+| V0.5 | Context Manager 自动压缩 + Checkpoint + 断点续传 | ✓ 完成 | 20 |
+| V0.5+ | EpisodeSummary 结构化摘要 + 紧急压缩 | ✓ 完成 | 9 |
+| V0.6 | RunMonitor + FeedbackInjected + System Prompt 注入 | ✓ 完成 | 22 |
 
-**总计: 161 项测试，全部通过。**
+**总计: 261 项测试，全部通过。**
 
 ## 快速开始
 
@@ -237,9 +273,12 @@ curl -X POST http://localhost:8000/api/v1/runs \
 | **MVP** | `AgentLoopScheduler` + 自动事件写入 + 3 个基础工具 | ✓ 完成 |
 | **V0.2** | 工具层完善：browser / http / file_op / MCP / SKILL | ✓ 完成 |
 | **V0.3** | 可观测性：REST API + WebSocket + React 前端 | ✓ 完成 |
-| **V0.4** | Guardrails + 确认流程完善 | 待开始 |
-| **V0.5** | 长流程稳定性：自动压缩 + 断点续传 | 待开始 |
-| **V1.0** | 生产就绪：PostgreSQL + 分布式 Worker + 分层记忆 | 待开始 |
+| **V0.4** | Guardrails (5 种) + 确认流程完善 | ✓ 完成 |
+| **V0.4+** | Orchestrator 动态编排 + PlanGuardrail | ✓ 完成 |
+| **V0.5** | Context Manager 自动压缩 + Checkpoint + 断点续传 | ✓ 完成 |
+| **V0.5+** | EpisodeSummary 结构化摘要 + 紧急压缩 | ✓ 完成 |
+| **V0.6** | RunMonitor + FeedbackInjected + Scheduler 反馈注入 | ✓ 完成 |
+| **V1.0** | 生产就绪：分层记忆 + 权限 + 分布式 Worker + 业务适配 | 🔜 待开始 |
 
 ## 技术栈
 
