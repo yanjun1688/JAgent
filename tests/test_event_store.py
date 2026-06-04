@@ -333,6 +333,23 @@ class TestAll15EventTypes:
             (EventType.RUN_RESUMED, {"resume_from_seq": 5}),
             (EventType.RUN_COMPLETED, {"result_summary": "all done"}),
             (EventType.RUN_FAILED, {"final_error": "max retries exceeded", "event_count": 10}),
+            (EventType.ORCHESTRATION_STARTED, {"plan_id": "p-1", "intent": "test", "steps_summary": "2 steps"}),
+            (
+                EventType.STEP_COMPLETED,
+                {"plan_id": "p-1", "step_index": 0, "tool_call_id": "tc-5", "output": {"ok": True}},
+            ),
+            (
+                EventType.STEP_FAILED,
+                {"plan_id": "p-1", "step_index": 1, "tool_call_id": "tc-6", "error": "boom"},
+            ),
+            (
+                EventType.ORCHESTRATION_COMPLETED,
+                {"plan_id": "p-1", "completed_steps": 1, "summary": "partial success"},
+            ),
+            (
+                EventType.ORCHESTRATION_FAILED,
+                {"plan_id": "p-1", "completed_steps": 1, "final_error": "step 1 failed"},
+            ),
         ]
 
         for idx, (etype, payload) in enumerate(test_cases, start=1):
@@ -341,4 +358,4 @@ class TestAll15EventTypes:
             assert event.event_type == etype
 
         events = await store.get_events("run-1")
-        assert len(events) == 15
+        assert len(events) == 20

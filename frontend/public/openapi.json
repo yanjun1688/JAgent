@@ -63,7 +63,7 @@
           "runs"
         ],
         "summary": "Create Run",
-        "description": "Create a new run and write the RunStarted event.",
+        "description": "Create a new run and write the RunStarted event.\n\n写入 RunStarted 后立即通过 start_run() 拉起 AgentLoopScheduler 的后台循环。\nScheduler 自动执行 think→act→observe，事件写入后通过 WebSocket 广播。\nAPI 响应不等待 Scheduler 完成——循环运行在 asyncio.Task 中。",
         "operationId": "create_run_api_v1_runs_post",
         "requestBody": {
           "required": true,
@@ -306,7 +306,7 @@
           "runs"
         ],
         "summary": "Resume Run",
-        "description": "Resume a paused run. Requires an active scheduler instance.",
+        "description": "Resume a paused run. Writes RunResumed event and wakes the scheduler loop.",
         "operationId": "resume_run_api_v1_runs__run_id__resume_post",
         "parameters": [
           {
@@ -521,6 +521,40 @@
         "type": "object",
         "title": "PauseRequest"
       },
+      "PendingConfirmationItem": {
+        "properties": {
+          "confirmation_id": {
+            "type": "string",
+            "title": "Confirmation Id"
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name"
+          },
+          "tool_call_id": {
+            "type": "string",
+            "title": "Tool Call Id"
+          },
+          "input": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Input"
+          },
+          "risk_level": {
+            "type": "string",
+            "title": "Risk Level"
+          }
+        },
+        "type": "object",
+        "required": [
+          "confirmation_id",
+          "tool_name",
+          "tool_call_id",
+          "input",
+          "risk_level"
+        ],
+        "title": "PendingConfirmationItem"
+      },
       "RunDetailResponse": {
         "properties": {
           "run_id": {
@@ -578,8 +612,7 @@
           },
           "pending_confirmations": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/PendingConfirmationItem"
             },
             "type": "array",
             "title": "Pending Confirmations",

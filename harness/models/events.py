@@ -22,6 +22,12 @@ class EventType(str, Enum):
     RUN_RESUMED = "RunResumed"
     RUN_COMPLETED = "RunCompleted"
     RUN_FAILED = "RunFailed"
+    ORCHESTRATION_STARTED = "OrchestrationStarted"
+    STEP_COMPLETED = "StepCompleted"
+    STEP_FAILED = "StepFailed"
+    ORCHESTRATION_COMPLETED = "OrchestrationCompleted"
+    ORCHESTRATION_FAILED = "OrchestrationFailed"
+    FEEDBACK_INJECTED = "FeedbackInjected"
 
 
 # ── Payload Models ──────────────────────────────────────────────
@@ -87,10 +93,23 @@ class ConfirmationReceivedPayload(BaseModel):
     operator_id: str
 
 
+class EpisodeSummary(BaseModel):
+    episode_range: tuple[int, int]
+    original_tokens: int
+    compressed_tokens: int
+    key_decisions: list[str]
+    tools_used: list[str]
+    key_findings: list[str]
+    errors_encountered: list[str]
+    current_plan: str | None = None
+    original_event_refs: list[int]
+
+
 class ContextCompressedPayload(BaseModel):
     original_tokens: int
     compressed_tokens: int
-    summary_ref: str
+    summary_ref: EpisodeSummary | str
+    keep_recent_count: int = 0
 
 
 class ContextCheckpointedPayload(BaseModel):
@@ -116,6 +135,46 @@ class RunFailedPayload(BaseModel):
     event_count: int
 
 
+class OrchestrationStartedPayload(BaseModel):
+    plan_id: str
+    intent: str
+    steps_summary: str
+
+
+class StepCompletedPayload(BaseModel):
+    plan_id: str
+    step_index: int
+    tool_call_id: str
+    output: Any
+
+
+class StepFailedPayload(BaseModel):
+    plan_id: str
+    step_index: int
+    tool_call_id: str
+    error: str
+
+
+class OrchestrationCompletedPayload(BaseModel):
+    plan_id: str
+    completed_steps: int
+    summary: str
+
+
+class OrchestrationFailedPayload(BaseModel):
+    plan_id: str
+    completed_steps: int
+    final_error: str
+
+
+from typing import Literal
+
+
+class FeedbackInjectedPayload(BaseModel):
+    feedback_text: str
+    priority: Literal["high", "medium"] = "medium"
+
+
 # ── Payload model registry ─────────────────────────────────────
 
 PAYLOAD_MODEL_MAP: dict[EventType, type[BaseModel]] = {
@@ -134,6 +193,12 @@ PAYLOAD_MODEL_MAP: dict[EventType, type[BaseModel]] = {
     EventType.RUN_RESUMED: RunResumedPayload,
     EventType.RUN_COMPLETED: RunCompletedPayload,
     EventType.RUN_FAILED: RunFailedPayload,
+    EventType.ORCHESTRATION_STARTED: OrchestrationStartedPayload,
+    EventType.STEP_COMPLETED: StepCompletedPayload,
+    EventType.STEP_FAILED: StepFailedPayload,
+    EventType.ORCHESTRATION_COMPLETED: OrchestrationCompletedPayload,
+    EventType.ORCHESTRATION_FAILED: OrchestrationFailedPayload,
+    EventType.FEEDBACK_INJECTED: FeedbackInjectedPayload,
 }
 
 

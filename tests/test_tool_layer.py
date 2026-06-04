@@ -158,7 +158,8 @@ class FakeGuardrail:
 
 
 class TestGuardrailRunner:
-    def test_schema_runs_first(self):
+    @pytest.mark.asyncio
+    async def test_schema_runs_first(self):
         td = ToolDefinition(
             name="test",
             description="t",
@@ -167,12 +168,13 @@ class TestGuardrailRunner:
             side_effects=[],
         )
         runner = GuardrailRunner({"fake": FakeGuardrail})
-        results = runner.run(td, {})
+        results = await runner.run(td, {})
         assert len(results) == 1
         assert not results[0].passed
         assert results[0].guardrail_id == "schema"
 
-    def test_custom_guardrail_passes(self):
+    @pytest.mark.asyncio
+    async def test_custom_guardrail_passes(self):
         td = ToolDefinition(
             name="test",
             description="t",
@@ -182,11 +184,12 @@ class TestGuardrailRunner:
             guardrails=[Guardrail(guardrail_type="fake", config={"fail": False})],
         )
         runner = GuardrailRunner({"fake": FakeGuardrail})
-        results = runner.run(td, {"x": "hello"})
+        results = await runner.run(td, {"x": "hello"})
         assert len(results) == 2
         assert all(r.passed for r in results)
 
-    def test_custom_guardrail_blocks(self):
+    @pytest.mark.asyncio
+    async def test_custom_guardrail_blocks(self):
         td = ToolDefinition(
             name="test",
             description="t",
@@ -196,12 +199,13 @@ class TestGuardrailRunner:
             guardrails=[Guardrail(guardrail_type="fake", config={"fail": True, "reason": "blocked"})],
         )
         runner = GuardrailRunner({"fake": FakeGuardrail})
-        results = runner.run(td, {"x": "hello"})
+        results = await runner.run(td, {"x": "hello"})
         assert len(results) == 2
         assert results[0].passed  # schema ok
         assert not results[1].passed  # custom blocked
 
-    def test_unknown_guardrail_type_blocks(self):
+    @pytest.mark.asyncio
+    async def test_unknown_guardrail_type_blocks(self):
         td = ToolDefinition(
             name="test",
             description="t",
@@ -210,13 +214,14 @@ class TestGuardrailRunner:
             guardrails=[Guardrail(guardrail_type="nonexistent")],
         )
         runner = GuardrailRunner()
-        results = runner.run(td, {"x": "hello"})
+        results = await runner.run(td, {"x": "hello"})
         assert len(results) == 2
         assert results[0].passed
         assert not results[1].passed
         assert "Unknown guardrail type" in results[1].reason
 
-    def test_short_circuit_on_schema_failure(self):
+    @pytest.mark.asyncio
+    async def test_short_circuit_on_schema_failure(self):
         td = ToolDefinition(
             name="test",
             description="t",
@@ -226,7 +231,7 @@ class TestGuardrailRunner:
             guardrails=[Guardrail(guardrail_type="fake", config={"fail": False})],
         )
         runner = GuardrailRunner({"fake": FakeGuardrail})
-        results = runner.run(td, {})
+        results = await runner.run(td, {})
         assert len(results) == 1
         assert results[0].guardrail_id == "schema"
 

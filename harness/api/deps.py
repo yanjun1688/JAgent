@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Callable
 
 from fastapi import WebSocket
 
-from harness.core.scheduler import AgentLoopScheduler
+from harness.core.scheduler import AgentLoopScheduler, SchedulerConfig
 
 if TYPE_CHECKING:
     from harness.core.scheduler import AgentKernel
@@ -49,6 +49,8 @@ class HarnessAPI:
         self.kernel_factory: Callable[[], AgentKernel] | None = None
         self.tool_defs: list[ToolDefinition] = []
         self.tool_fns: dict[str, Callable] = {}
+        self.context_manager = None  # V0.5: ContextManager 实例，由 serve.py 注入
+        self.scheduler_config: SchedulerConfig | None = None  # Scheduler 配置，默认 max_iterations=50
 
     def wire_broadcast(self) -> None:
         """订阅 Event Store 写入通知 → 自动推送给 WebSocket 客户端。
@@ -65,6 +67,8 @@ class HarnessAPI:
 
         create_run 写入 RunStarted 事件后立即调用此方法。
         Scheduler 以 asyncio.Task 运行在后台，不阻塞 API 响应。
+        V0.5+：如果设置了 context_manager，自动注入 Scheduler 以实现
+        压缩和检查点。
         """
         if self.kernel_factory is None:
             return  # 无 kernel 配置，跳过（测试场景或无 LLM 环境）
@@ -75,6 +79,8 @@ class HarnessAPI:
             kernel=self.kernel_factory(),
             tool_defs=self.tool_defs,
             tool_fns=self.tool_fns,
+            config=self.scheduler_config,  # 可选：自定义 max_iterations 等
+            context_manager=self.context_manager,  # V0.5: 自动上下文压缩
         )
         self.register_scheduler(run_id, scheduler)
         asyncio.create_task(scheduler.run(run_id, intent))

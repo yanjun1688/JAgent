@@ -1,5 +1,8 @@
-# Harness v2.2 — 实现路线图
+# Harness v2.2 — 实现路线图（历史归档）
 
+> ⚠️ **注意**: 当前活跃路线图为 `docs/TODO_v2.1.md`（基于 harness v2.1）。
+> 本文件保留为 v2.2 架构的历史参考，后续开发请以 `TODO_v2.1.md` 为准。
+>
 > 基于 `harness_v2.md` v2.2 架构方案与 `AGENTS.md` 开发协作规范生成
 > 分层推进，每层完成后进入下一层，禁止跨层跳跃
 
@@ -9,13 +12,15 @@
 
 | 层级 | 组件 | 前置依赖 | 里程碑 |
 |------|------|----------|--------|
-| L1 | Event Store 基础设施 | 无 | MVP Phase 1 |
-| L2 | Tool Layer 核心 | L1 | MVP Phase 2 |
-| L3 | Agent Loop Scheduler | L1, L2 | MVP Phase 3 |
-| L4 | Agent Kernel 接口 | L3 | MVP Phase 4 |
-| L5 | 工具注册与实现 | L2 | V0.2 |
-| L6 | 接口层（API / WebSocket） | L3 | V0.3 |
-| L7 | 前端可观测性 | L6 | V0.3 |
+| L1 | Event Store 基础设施 | 无 | MVP Phase 1 ✅ |
+| L2 | Tool Layer 核心 | L1 | MVP Phase 2 ✅ |
+| L3 | Agent Loop Scheduler | L1, L2 | MVP Phase 3 ✅ |
+| L4 | Agent Kernel 接口 | L3 | MVP Phase 4 ✅ |
+| L5 | 工具注册与实现 | L2 | V0.2 ✅ |
+| L6 | 接口层（API / WebSocket） | L3 | V0.3 ✅ |
+| L7 | 前端可观测性 | L6 | V0.3 ✅ |
+| — | Guardrails + 确认流程 | V0.3 | V0.4 ✅ |
+| — | Dynamic Orchestration（动态编排） | V0.4 | V0.4+ ✅ |
 
 ---
 
@@ -252,39 +257,142 @@
 
 ---
 
-## V0.4 — Guardrails + 确认流程完善（2 周）
+## V0.4 — Guardrails + 确认流程完善（2 周 ✅）
 
 **前置依赖**: V0.3 完成
+**状态**: 全部完成
 
-| # | 任务 | 交付物 | 验收标准 | 预计 |
-|---|------|--------|----------|------|
-| 7.1 | ScopeGuardrail | 操作目标范围检查 | 可配置白名单目录/域名/端口 | 1d |
-| 7.2 | RateLimitGuardrail | 单位时间调用次数限流 | 可配置每工具/每 run 的调用上限 | 1d |
-| 7.3 | DestructiveOpGuardrail | 不可逆操作自动触发确认 | `file_op delete`、`run_code` 等自动标记 `requires_confirmation: true` | 1d |
-| 7.4 | DependencyGuardrail | 前置步骤检查 | 通过 Event Store 查询前置事件是否存在 | 1d |
-| 7.5 | Guardrail 组合执行 | 多个 Guardrail 顺序执行 + 短路 | 任一 Guardrail 失败即终止，写入 `GuardrailTriggered` | 0.5d |
-| 7.6 | 挂起/恢复 UI 完善 | WebSocket 实时推送确认请求；操作员可在页面直接决策 | 确认流程全链路通顺，不丢失上下文 | 1.5d |
-| 7.7 | Guardrail 测试 | 每条 Guardrail 规则 100% 分支覆盖 | 包含边界条件、异常输入、组合场景 | 1d |
+| # | 任务 | 交付物 | 验收标准 | 预计 | 状态 |
+|---|------|--------|----------|------|------|
+| 7.1 | ScopeGuardrail | `harness/tools/guardrails.py::ScopeGuardrail` | 支持 `allowed_directories`/`allowed_domains`/`allowed_commands` 白名单 | 1d | ✅ |
+| 7.2 | RateLimitGuardrail | `harness/tools/guardrails.py::RateLimitGuardrail` | 可配置 `max_calls`/`window_seconds`/`scope`（tool/run）；类级别调用历史 + `reset()` | 1d | ✅ |
+| 7.3 | DestructiveOpGuardrail | `harness/tools/guardrails.py::DestructiveOpGuardrail` | `file_op delete`/`run_code` 自动设 `triggers_confirmation=true`；Executor 联动确认流 | 1d | ✅ |
+| 7.4 | DependencyGuardrail | `harness/tools/guardrails.py::DependencyGuardrail` | 通过 Event Store 查询 `required_events`；异步 check；无 store 时跳过 | 1d | ✅ |
+| 7.5 | GuardrailRunner 异步化 | `run()` 改为 `async`，自动检测 sync/async guardrail | 向后兼容现有 sync guardrail（SchemaGuardrail/FakeGuardrail） | 0.5d | ✅ |
+| 7.6 | 确认 UI 完善 | ConfirmDialog 展示 `input` 参数 + `risk_level`；API 返回 `tool_call_id`+`input` | 操作员可在确认前看到完整的工具调用参数 | 1.5d | ✅ |
+| 7.7 | Guardrail 测试 | `tests/test_guardrails_v04.py`（32 项） | 7 Scope + 5 RateLimit + 6 DestructiveOp + 5 Dependency + 2 Runner + 7 Executor 集成 | 1d | ✅ |
+
+**验收检查清单**:
+- [x] ScopeGuardrail 按白名单拦截/放行路径、域名（对应 §5.4）
+- [x] RateLimitGuardrail 超限拦截，不同工具独立计数，可 reset（对应 §5.4）
+- [x] DestructiveOpGuardrail 触发确认流，`triggers_confirmation` 由 Executor 消费（对应 §5.3/§5.4）
+- [x] DependencyGuardrail 异步查询 Event Store，缺失事件时拦截（对应 §5.4）
+- [x] GuardrailRunner 同步/异步混合支持，向后兼容（对应 §5.4 GuardrailRunner）
+- [x] 确认 UI 展示完整 input 参数（对应 §8.3.3 前端架构）
+- [x] 32 项测试全部通过，历史 161 项测试不受影响（共 193 项通过）
 
 ---
 
-## V0.5 — 长流程稳定性（2 周）
+## V0.4+ — Dynamic Orchestration（动态编排层 ✅）
 
 **前置依赖**: V0.4 完成
+**状态**: 全部完成
+**核心思路**: Agent 一次性提交多步工具序列，Harness 逐步骤安全执行。每步完整经过 Tool Layer（Guardrails/幂等/确认），Agent 只做一次决策，Harness 负责执行细节。
 
-| # | 任务 | 交付物 | 验收标准 | 预计 |
-|---|------|--------|----------|------|
-| 8.1 | Context Manager 实现 | 监控上下文 token 数，接近阈值时触发压缩 | Agent 无感知；压缩后上下文仍保持完整语义 | 2d |
-| 8.2 | 滚动摘要策略 | LLM 对历史事件生成摘要，替代原始内容 | 摘要保留关键决策和工具调用结果 | 1.5d |
-| 8.3 | Checkpoint 自动触发 | 每 N 轮/每 M tokens 自动写入 `ContextCheckpointed` | 断点续传时从最近 checkpoint 开始恢复，而非从头 | 1d |
-| 8.4 | 断点续传完整实现 | Worker 崩溃 → 新 Worker 读取 Event Store → 恢复上下文 → 接续执行 | 恢复时间 < 30s（MVP 可放宽到 60s） | 2d |
-| 8.5 | 长流程压力测试 | 100+ 轮工具调用 Run | 不溢出、不丢失上下文、可正常完成或优雅熔断 | 1.5d |
+**架构决策（已确认）**:
+- 原子执行：编排过程 Agent 不可见中间结果，仅返回最终聚合结果
+- 失败终止：任一步失败即停止编排，Agent 下轮 think 中自行修复
+- 归属 L5 扩展：作为工具注册在 `ToolRegistry`，Scheduler 无需感知编排
+
+### 新增组件
+
+| 组件 | 位置 | 职责 |
+|------|------|------|
+| `Orchestrator` | `harness/core/orchestrator.py` | 接收步骤序列 → 校验 → 逐步骤通过 `ToolExecutor` 执行 → 写入事件 → 聚合结果 |
+| `orchestrate` 工具 | 注册到 `ToolRegistry` | Agent 通过标准 `tool_call` 调用，`tool_fn` 指向 `Orchestrator.execute()` |
+| PlanGuardrail | 内置在 `Orchestrator` | 步数上限（默认 10）、工具可用性、输入 Schema 校验 |
+
+### 新增事件类型
+
+| 事件类型 | 写入方 | 关键字段 |
+|----------|--------|----------|
+| `OrchestrationStarted` | Orchestrator | `plan_id, intent, steps_summary` |
+| `StepCompleted` | Orchestrator | `plan_id, step_index, tool_call_id, output` |
+| `StepFailed` | Orchestrator | `plan_id, step_index, tool_call_id, error` |
+| `OrchestrationCompleted` | Orchestrator | `plan_id, completed_steps, summary` |
+| `OrchestrationFailed` | Orchestrator | `plan_id, completed_steps, final_error` |
+
+### 实现任务
+
+| # | 任务 | 交付物 | 验收标准 | 预计 | 状态 |
+|---|------|--------|----------|------|------|
+| 7.8 | `Orchestrator` 核心实现 | `harness/core/orchestrator.py` | 接收步骤序列，逐步骤通过 `ToolExecutor.execute()` 执行，写入编排事件；通过 `current_run_id` contextvar 获取 run_id，不依赖 Scheduler 注入 | 1d | ✅ |
+| 7.9 | `orchestrate` 工具注册 | `ORCHESTRATE_DEF` + `make_orchestrate_fn()` | Agent 可通过 `tool_call` 调用 `orchestrate`，Scheduler 无需修改 | 0.5d | ✅ |
+| 7.10 | PlanGuardrail | `PlanGuardrail.validate()` | 步数超限拒绝、工具不存在拒绝、输入 Schema 不匹配拒绝 | 0.5d | ✅ |
+| 7.11 | 步骤级安全继承 | 每步独立过 Guardrails/幂等/确认 | 危险操作步骤仍触发 `ConfirmationRequested` | 0.5d | ✅ |
+| 7.12 | 确认挂起兼容 | `EventStore.on_append` 监听 `RunResumed` | Orchestrator 写入 `RunPaused` 后等待，operator 确认后自动恢复 | 0.5d | ✅ |
+| 7.13 | 集成测试 | `tests/test_orchestrator.py`（16 项） | 多步骤编排、失败终止、确认触发、事件流完整性全覆盖 | 1d | ✅ |
+
+### 验收检查清单
+
+- [x] `orchestrate` 工具注册在 `ToolRegistry`，Agent 可正常调用（通过 `make_orchestrate_fn` 绑定到 `Orchestrator`）
+- [x] 3 步编排产生 5 事件（OrchestrationStarted + 3×StepCompleted + OrchestrationCompleted）
+- [x] 失败步骤触发 `StepFailed` + `OrchestrationFailed`，后续步骤不执行，错误信息含 tool name 上下文
+- [x] 危险操作步骤触发确认流程，确认完成后接续执行后续步骤（通过 `EventStore.on_append` 自动恢复）
+- [x] 编排的每步独立走 Guardrails 检查，`SchemaGuardrail` 拦截非法参数
+- [x] 编排事件在 Event Store 中完整可追溯，`fold_events()` 折叠后可见编排历史（`orchestration_history`）
+
+---
+
+## V0.5 — 长流程稳定性（2 周 ✅）
+
+**前置依赖**: V0.4 完成
+**状态**: 全部完成
+
+| # | 任务 | 交付物 | 验收标准 | 预计 | 状态 |
+|---|------|--------|----------|------|------|
+| 8.1 | Context Manager 实现 | `harness/core/context_manager.py` | 每次 observe 后检查 token 估算，超阈值触发压缩；Agent 无感知；使用启发式估算（char × 0.25）预留 LLM tokenize API 接口 | 2d | ✅ |
+| 8.2 | 滚动摘要策略 | ContextManager 通过 `LLMClient` 调用 LLM 生成摘要；无 LLM 时降级为纯文本拼接 | 摘要保留关键决策和工具调用结果；`ContextCompressed` 事件写入 Event Store，`state.summary` 被 `LLMAgentKernel.think()` 消费 | 1.5d | ✅ |
+| 8.3 | Checkpoint 自动触发 | `ContextManager.try_checkpoint()` 被 Scheduler 每轮调用 | 每 N 轮（默认 10）自动写入 `ContextCheckpointed` 事件；`state.last_checkpoint_seq` 记录最新检查点 | 1d | ✅ |
+| 8.4 | 断点续传 | `_run_loop` 检测已有 `RunStarted` 事件时自动续传；`ContextManager.find_resume_seq()` 定位最新检查点 | Worker 重启后从 Event Store 折叠恢复上下文，接续执行；不重复写入 `RunStarted` | 2d | ✅ |
+| 8.5 | 长流程压力测试 | `tests/test_context_manager.py::TestLongRunning` | 100+ 轮完成且正常运行；checkpoint ≥ 10 个；压缩事件 ≥ 1 个 | 1.5d | ✅ |
+
+### 验收检查清单
+
+- [x] ContextManager 在每次 observe 后自动触发 token 检查
+- [x] token 超过阈值时写入 `ContextCompressed` 事件，LLM 摘要保留关键信息
+- [x] 无 LLM Client 时自动降级为纯文本拼接
+- [x] 每 10 轮自动写入 `ContextCheckpointed`，`find_resume_seq()` 可定位最新检查点
+- [x] 100+ 轮长流程正常完成，上下文不溢出
+- [x] `LLMAgentKernel.think()` 在 `state.summary` 存在时使用摘要压缩上下文（2 条最近记录 + 摘要，替代 5 条原始记录）
+- [x] Scheduler `_run_loop` 检测已有事件时自动续传
+
+### 架构约束
+
+- ContextManager 是受信组件，Agent 无感知压缩过程
+- ContextCompressed 事件由系统强制写入，Agent 无法绕过
+- 断点续传通过 `fold_events()` 重建状态，不需额外状态存储
+- token 估算用启发式（char × 0.25），预留 TODO 注释将来替换为 LLM tokenize API
+
+---
+
+## V0.5+ — 记忆压缩优化（已迁移到 v2.1 路线图）
+
+> ✅ 已完成 — 详情见 `docs/TODO_v2.1.md` V0.5+ 章节
+
+- `EpisodeSummary` Pydantic Model
+- `ContextManager` 结构化摘要输出（LLM JSON / 降级纯文本）
+- 紧急压缩 `select_compression_window()`
+- 9 项测试通过
+
+---
+
+## V0.6 — 监控与反馈系统（已迁移到 v2.1 路线图）
+
+> ✅ 已完成 — 详情见 `docs/TODO_v2.1.md` V0.6 章节
+
+- `RunMonitor` 受信组件，通过 `on_append` 实时监听 Event Store
+- `FeedbackInjected` 事件类型
+- `AgentKernel.think()` 新增 `feedback` 参数
+- `LLMAgentKernel` System Prompt 段注入
+- Scheduler 拉取反馈并传入 Kernel
+- 22 项测试通过（总计 261 项）
 
 ---
 
 ## V1.0 — 生产就绪（3 周）
 
-**前置依赖**: V0.5 完成
+**前置依赖**: V0.5+ / V0.6 完成（已在 v2.1 路线图中完成）
 
 | # | 任务 | 交付物 | 验收标准 | 预计 |
 |---|------|--------|----------|------|
@@ -292,9 +400,8 @@
 | 9.2 | 分布式 Worker | asyncio.Queue → Redis Streams | 多 Worker 可同时消费不同 run_id 的任务 | 3d |
 | 9.3 | 分层记忆 | Working / Episodic / Semantic 三层记忆架构 | 短期记忆在上下文窗口；长期记忆持久化 + 按需检索 | 3d |
 | 9.4 | 权限系统 | 工具级别权限控制 + API 认证 | 不同角色可见/可调用的工具不同 | 2d |
-| 9.5 | 监控与报警 | Prometheus metrics + 关键事件告警 | Worker 健康检查、事件写入延迟、LLM 调用失败率 | 2d |
-| 9.6 | 性能优化 | 事件批量写入、查询缓存、上下文窗口预加载 | 事件写入吞吐 ≥ 1000/s；Run 状态查询 < 100ms | 2d |
-| 9.7 | 安全审查 | 沙盒隔离加固、敏感信息过滤、审计日志 | 符合生产环境安全基线 | 2d |
+| 9.5 | 性能优化 | 事件批量写入、查询缓存、上下文窗口预加载 | 事件写入吞吐 ≥ 1000/s；Run 状态查询 < 100ms | 2d |
+| 9.6 | 安全审查 | 沙盒隔离加固、敏感信息过滤、审计日志 | 符合生产环境安全基线 | 2d |
 
 ---
 

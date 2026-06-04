@@ -19,6 +19,7 @@ from harness.api.schemas import (
     CreateRunRequest,
     EventListResponse,
     PauseRequest,
+    PendingConfirmationItem,
     RunDetailResponse,
     RunListResponse,
 )
@@ -108,11 +109,13 @@ async def get_run(run_id: str, api: HarnessAPI = Depends(get_hapi)):
         "summary": state.summary,
         "pause_reason": state.pause_reason,
         "pending_confirmations": [
-            {
-                "confirmation_id": c.confirmation_id,
-                "tool_name": c.tool_name,
-                "risk_level": c.risk_level,
-            }
+            PendingConfirmationItem(
+                confirmation_id=c.confirmation_id,
+                tool_name=c.tool_name,
+                tool_call_id=c.tool_call_id,
+                input=c.input,
+                risk_level=c.risk_level,
+            )
             for c in state.pending_confirmations
         ],
     }

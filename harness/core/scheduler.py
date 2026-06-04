@@ -6,8 +6,12 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
+if TYPE_CHECKING:
+    from harness.monitoring.run_monitor import RunMonitor
+
+from harness.core.context_manager import ContextManager
 from harness.core.fold import RunState, RunStatus, fold_events
 from harness.models.events import (
     AgentThoughtPayload,
@@ -42,6 +46,7 @@ class AgentKernel(ABC):
         intent: str,
         tool_defs: list[ToolDefinition],
         state: RunState,
+        feedback: str | None = None,
     ) -> ThinkResult: ...
 
 
@@ -67,6 +72,8 @@ class AgentLoopScheduler:
         tool_defs: list[ToolDefinition],
         tool_fns: dict[str, Callable[[dict[str, Any]], Any]],
         config: SchedulerConfig | None = None,
+        context_manager: ContextManager | None = None,
+        monitor: RunMonitor | None = None,
     ):
         self.store = store
         self.executor = executor
@@ -74,6 +81,8 @@ class AgentLoopScheduler:
         self.tool_defs = tool_defs
         self.tool_fns = tool_fns
         self.config = config or SchedulerConfig()
+        self.context_manager = context_manager
+        self.monitor = monitor
         self._pause_events: dict[str, asyncio.Event] = {}
         self._cancel_flags: dict[str, asyncio.Event] = {}
         self._running_tasks: dict[str, asyncio.Task] = {}
@@ -96,8 +105,6 @@ class AgentLoopScheduler:
             self._cancel_flags.pop(run_id, None)
 
     async def _run_loop(self, run_id: str, intent: str) -> RunState:
-        # Only write RunStarted if it doesn't already exist (tests call
-        # scheduler.run() directly; production writes it in create_run).
         events = await self.store.get_events(run_id)
         if not events or events[0].event_type != EventType.RUN_STARTED:
             await self.store.append_event(
@@ -105,116 +112,136 @@ class AgentLoopScheduler:
                 EventType.RUN_STARTED,
                 RunStartedPayload(intent=intent).model_dump(),
             )
+        else:
+            if self.context_manager:
+                last_cp = self.context_manager.find_resume_seq(events)
+                if last_cp > 0:
+                    _logger.info("Resuming run %s from seq %d (checkpoint)", run_id, last_cp)
+                else:
+                    _logger.info("Resuming run %s from beginning (no checkpoint)", run_id)
 
         consecutive_failures = 0
 
-        for _iteration in range(1, self.config.max_iterations + 1):
-            if self._cancel_flags.get(run_id, asyncio.Event()).is_set():
-                await self._fail(run_id, "Run cancelled by user")
-                return fold_events(await self.store.get_events(run_id))
-
-            events = await self.store.get_events(run_id)
-            state = fold_events(events)
-
-            if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
-                return state
-
-            # Handle user-requested pause: wait for resume before continuing
-            if state.status == RunStatus.PAUSED:
-                event = self._pause_events.setdefault(run_id, asyncio.Event())
-                event.clear()
-                try:
-                    await asyncio.wait_for(event.wait(), timeout=self.config.pause_timeout_ms / 1000.0)
-                except asyncio.TimeoutError:
-                    pass
-                finally:
-                    event.clear()
+        try:
+            for _iteration in range(1, self.config.max_iterations + 1):
                 if self._cancel_flags.get(run_id, asyncio.Event()).is_set():
                     await self._fail(run_id, "Run cancelled by user")
                     return fold_events(await self.store.get_events(run_id))
+
                 events = await self.store.get_events(run_id)
                 state = fold_events(events)
+
+                if self.context_manager:
+                    await self.context_manager.maybe_compress(run_id, _iteration, state)
+                    await self.context_manager.try_checkpoint(run_id, _iteration, state)
+
                 if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
                     return state
 
-            think_result = await self.kernel.think(intent, self.tool_defs, state)
-            await self.store.append_event(
-                run_id,
-                EventType.AGENT_THOUGHT,
-                AgentThoughtPayload(
-                    thought=think_result.thought,
-                    tool_choice=think_result.tool_name,
-                    token_count=think_result.token_count,
-                ).model_dump(),
-            )
+                if state.status == RunStatus.PAUSED:
+                    event = self._pause_events.setdefault(run_id, asyncio.Event())
+                    event.clear()
+                    try:
+                        await asyncio.wait_for(event.wait(), timeout=self.config.pause_timeout_ms / 1000.0)
+                    except asyncio.TimeoutError:
+                        pass
+                    finally:
+                        event.clear()
+                    if self._cancel_flags.get(run_id, asyncio.Event()).is_set():
+                        await self._fail(run_id, "Run cancelled by user")
+                        return fold_events(await self.store.get_events(run_id))
+                    events = await self.store.get_events(run_id)
+                    state = fold_events(events)
+                    if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
+                        return state
 
-            if think_result.tool_name is None:
+                feedback_text: str | None = None
+                if self.monitor:
+                    feedbacks = state.feedbacks[-5:]
+                    if feedbacks:
+                        feedback_text = "\n".join(f.feedback_text for f in feedbacks)
+
+                think_result = await self.kernel.think(intent, self.tool_defs, state, feedback=feedback_text)
                 await self.store.append_event(
                     run_id,
-                    EventType.RUN_COMPLETED,
-                    RunCompletedPayload(result_summary=think_result.thought).model_dump(),
+                    EventType.AGENT_THOUGHT,
+                    AgentThoughtPayload(
+                        thought=think_result.thought,
+                        tool_choice=think_result.tool_name,
+                        token_count=think_result.token_count,
+                    ).model_dump(),
                 )
-                return fold_events(await self.store.get_events(run_id))
 
-            tool_def = self._find_tool_def(think_result.tool_name)
-            if tool_def is None:
-                await self._fail(run_id, f"Unknown tool: '{think_result.tool_name}'")
-                return fold_events(await self.store.get_events(run_id))
-
-            tool_fn = self.tool_fns.get(think_result.tool_name)
-            if tool_fn is None:
-                await self._fail(run_id, f"Tool '{think_result.tool_name}' has no handler registered")
-                return fold_events(await self.store.get_events(run_id))
-
-            result = await self.executor.execute(
-                run_id,
-                think_result.tool_name,
-                think_result.tool_input or {},
-                tool_def,
-                tool_fn,
-            )
-
-            match result.status:
-                case ExecutionStatus.COMPLETED | ExecutionStatus.IDEMPOTENCY_HIT:
-                    consecutive_failures = 0
-
-                case ExecutionStatus.CONFIRMATION_NEEDED:
+                if think_result.tool_name is None:
                     await self.store.append_event(
                         run_id,
-                        EventType.RUN_PAUSED,
-                        RunPausedPayload(reason="waiting_confirmation").model_dump(),
+                        EventType.RUN_COMPLETED,
+                        RunCompletedPayload(result_summary=think_result.thought).model_dump(),
                     )
-                    await self._wait_for_resume(run_id)
-                    result = await self.executor.execute(
-                        run_id,
-                        think_result.tool_name,
-                        think_result.tool_input or {},
-                        tool_def,
-                        tool_fn,
-                    )
-                    match result.status:
-                        case ExecutionStatus.COMPLETED | ExecutionStatus.IDEMPOTENCY_HIT:
-                            consecutive_failures = 0
-                        case ExecutionStatus.FAILED | ExecutionStatus.TIMEOUT | ExecutionStatus.GUARDRAIL_BLOCKED:
-                            consecutive_failures += 1
-                            if consecutive_failures >= self.config.max_consecutive_failures:
-                                await self._fail(
-                                    run_id,
-                                    f"Circuit breaker: {consecutive_failures} consecutive failures",
-                                )
-                                return fold_events(await self.store.get_events(run_id))
+                    return fold_events(await self.store.get_events(run_id))
 
-                case ExecutionStatus.FAILED | ExecutionStatus.TIMEOUT | ExecutionStatus.GUARDRAIL_BLOCKED:
-                    consecutive_failures += 1
-                    if consecutive_failures >= self.config.max_consecutive_failures:
-                        await self._fail(
+                tool_def = self._find_tool_def(think_result.tool_name)
+                if tool_def is None:
+                    await self._fail(run_id, f"Unknown tool: '{think_result.tool_name}'")
+                    return fold_events(await self.store.get_events(run_id))
+
+                tool_fn = self.tool_fns.get(think_result.tool_name)
+                if tool_fn is None:
+                    await self._fail(run_id, f"Tool '{think_result.tool_name}' has no handler registered")
+                    return fold_events(await self.store.get_events(run_id))
+
+                result = await self.executor.execute(
+                    run_id,
+                    think_result.tool_name,
+                    think_result.tool_input or {},
+                    tool_def,
+                    tool_fn,
+                )
+
+                match result.status:
+                    case ExecutionStatus.COMPLETED | ExecutionStatus.IDEMPOTENCY_HIT:
+                        consecutive_failures = 0
+
+                    case ExecutionStatus.CONFIRMATION_NEEDED:
+                        await self.store.append_event(
                             run_id,
-                            f"Circuit breaker: {consecutive_failures} consecutive failures",
+                            EventType.RUN_PAUSED,
+                            RunPausedPayload(reason="waiting_confirmation").model_dump(),
                         )
-                        return fold_events(await self.store.get_events(run_id))
+                        await self._wait_for_resume(run_id)
+                        result = await self.executor.execute(
+                            run_id,
+                            think_result.tool_name,
+                            think_result.tool_input or {},
+                            tool_def,
+                            tool_fn,
+                        )
+                        match result.status:
+                            case ExecutionStatus.COMPLETED | ExecutionStatus.IDEMPOTENCY_HIT:
+                                consecutive_failures = 0
+                            case ExecutionStatus.FAILED | ExecutionStatus.TIMEOUT | ExecutionStatus.GUARDRAIL_BLOCKED:
+                                consecutive_failures += 1
+                                if consecutive_failures >= self.config.max_consecutive_failures:
+                                    await self._fail(
+                                        run_id,
+                                        f"Circuit breaker: {consecutive_failures} consecutive failures",
+                                    )
+                                    return fold_events(await self.store.get_events(run_id))
 
-        await self._fail(run_id, f"Exceeded max iterations ({self.config.max_iterations})")
-        return fold_events(await self.store.get_events(run_id))
+                    case ExecutionStatus.FAILED | ExecutionStatus.TIMEOUT | ExecutionStatus.GUARDRAIL_BLOCKED:
+                        consecutive_failures += 1
+                        if consecutive_failures >= self.config.max_consecutive_failures:
+                            await self._fail(
+                                run_id,
+                                f"Circuit breaker: {consecutive_failures} consecutive failures",
+                            )
+                            return fold_events(await self.store.get_events(run_id))
+
+            await self._fail(run_id, f"Exceeded max iterations ({self.config.max_iterations})")
+            return fold_events(await self.store.get_events(run_id))
+        finally:
+            if self.monitor:
+                self.monitor.cleanup(run_id)
 
     # ── Pause / resume / cancel ───────────────────────────
 

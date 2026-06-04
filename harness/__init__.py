@@ -1,6 +1,8 @@
 from harness.core.agent_kernel import LLMAgentKernel, MockAgentKernel
+from harness.core.context_manager import ContextManager
 from harness.core.fold import RunState, RunStatus, ToolResult, ToolResultStatus, fold_events
 from harness.core.llm_client import LLMClient, MockLLMClient
+from harness.core.orchestrator import ORCHESTRATE_DEF, Orchestrator, PlanGuardrail, make_orchestrate_fn
 from harness.core.scheduler import AgentKernel, AgentLoopScheduler, SchedulerConfig, ThinkResult
 from harness.models.events import (
     PAYLOAD_MODEL_MAP,
@@ -9,19 +11,27 @@ from harness.models.events import (
     ConfirmationRequestedPayload,
     ContextCheckpointedPayload,
     ContextCompressedPayload,
+    EpisodeSummary,
     Event,
     EventType,
+    FeedbackInjectedPayload,
     GuardrailTriggeredPayload,
+    OrchestrationCompletedPayload,
+    OrchestrationFailedPayload,
+    OrchestrationStartedPayload,
     RunCompletedPayload,
     RunFailedPayload,
     RunPausedPayload,
     RunResumedPayload,
     RunStartedPayload,
+    StepCompletedPayload,
+    StepFailedPayload,
     ToolCalledPayload,
     ToolCompletedPayload,
     ToolFailedPayload,
     ToolTimeoutPayload,
 )
+from harness.monitoring.run_monitor import RunMonitor
 from harness.models.tools import (
     Guardrail,
     RetryPolicy,
@@ -72,10 +82,17 @@ __all__ = [
     "ConfirmationReceivedPayload",
     "ContextCompressedPayload",
     "ContextCheckpointedPayload",
+    "EpisodeSummary",
+    "FeedbackInjectedPayload",
     "RunPausedPayload",
     "RunResumedPayload",
     "RunCompletedPayload",
     "RunFailedPayload",
+    "OrchestrationStartedPayload",
+    "StepCompletedPayload",
+    "StepFailedPayload",
+    "OrchestrationCompletedPayload",
+    "OrchestrationFailedPayload",
     # Tool models
     "ToolDefinition",
     "SideEffect",
@@ -89,6 +106,10 @@ __all__ = [
     "GuardrailRunner",
     "GuardrailResult",
     "SchemaGuardrail",
+    "ScopeGuardrail",
+    "RateLimitGuardrail",
+    "DestructiveOpGuardrail",
+    "DependencyGuardrail",
     "RetryRunner",
     "Sandbox",
     "SandboxResult",
@@ -124,4 +145,13 @@ __all__ = [
     "MockLLMClient",
     "MockAgentKernel",
     "LLMAgentKernel",
+    # V0.4+
+    "Orchestrator",
+    "PlanGuardrail",
+    "ORCHESTRATE_DEF",
+    "make_orchestrate_fn",
+    # V0.5
+    "ContextManager",
+    # V0.6
+    "RunMonitor",
 ]

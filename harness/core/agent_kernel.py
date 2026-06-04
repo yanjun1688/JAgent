@@ -10,6 +10,7 @@ from harness.core.fold import RunState
 from harness.core.llm_client import LLMClient
 from harness.core.scheduler import AgentKernel, ThinkResult
 from harness.core.system_prompt import build_system_prompt, build_tool_schemas
+from harness.models.events import EpisodeSummary
 from harness.models.tools import ToolDefinition
 
 _STOP_MARKER = "<STOP>"
@@ -61,8 +62,14 @@ class MockAgentKernel(AgentKernel):
         self._idx = 0
         self.think_calls: list[dict[str, Any]] = []
 
-    async def think(self, intent: str, tool_defs: list[ToolDefinition], state: RunState) -> ThinkResult:
-        self.think_calls.append({"intent": intent, "tool_defs": tool_defs, "state": state})
+    async def think(
+        self,
+        intent: str,
+        tool_defs: list[ToolDefinition],
+        state: RunState,
+        feedback: str | None = None,
+    ) -> ThinkResult:
+        self.think_calls.append({"intent": intent, "tool_defs": tool_defs, "state": state, "feedback": feedback})
         if self._idx >= len(self.responses):
             return ThinkResult(thought="Task complete (no more pre-programmed responses)")
         result = self.responses[self._idx]
@@ -80,17 +87,46 @@ class LLMAgentKernel(AgentKernel):
         self,
         intent: str,
         tool_defs: list[ToolDefinition],
-        state,
+        state: RunState,
+        feedback: str | None = None,
     ) -> ThinkResult:
         system_prompt = build_system_prompt(intent, tool_defs)
         schemas = build_tool_schemas(tool_defs)
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
-        for thought in state.thought_history[-5:]:
+        if feedback:
+            messages.append({"role": "system", "content": f"## Monitoring Feedback\n{feedback}"})
+
+        # When a context summary is available (from ContextManager compression),
+        # use it plus recent items instead of the full 5-item window.
+        # The keep_recent_count comes from the compression mode:
+        #   normal → 2, emergency → 3 (keep 3 recent rounds untouched)
+        if state.summary:
+            if isinstance(state.summary, EpisodeSummary):
+                parts = []
+                if state.summary.key_decisions:
+                    parts.append(f"Key decisions: {', '.join(state.summary.key_decisions)}")
+                if state.summary.tools_used:
+                    parts.append(f"Tools used: {', '.join(state.summary.tools_used)}")
+                if state.summary.key_findings:
+                    parts.append(f"Key findings: {', '.join(state.summary.key_findings)}")
+                if state.summary.errors_encountered:
+                    parts.append(f"Errors: {', '.join(state.summary.errors_encountered)}")
+                if state.summary.current_plan:
+                    parts.append(f"Current plan: {state.summary.current_plan}")
+                summary_text = "\n".join(parts)
+            else:
+                summary_text = state.summary
+            messages.append({"role": "system", "content": f"Previous context summary:\n{summary_text}"})
+            window = max(state.keep_recent_count, 2)
+        else:
+            window = 5
+
+        for thought in state.thought_history[-window:]:
             messages.append({"role": "assistant", "content": f"THOUGHT: {thought.thought}"})
 
-        for tr in state.tool_results[-5:]:
+        for tr in state.tool_results[-window:]:
             content = f"Tool '{tr.tool_name}' result ({tr.status}): {tr.output or tr.error}"
             messages.append({"role": "user", "content": content})
 

@@ -1,9 +1,10 @@
-# AGENTS.md — Harness v2.2 项目开发协作规范
+# AGENTS.md — Harness v2.1 项目开发协作规范
 
-> **版本**: v2.2
+> **版本**: v2.1
 > **适用范围**: Harness Agent-First 任务执行引擎全栈开发
 > **角色定位**: Agent 导师（Architecture Mentor）
-> **基础架构文档**: `JAgent-docs/harness_v2.md`
+> **基础架构文档**: `JAgent-docs/harness_v2.1.md`
+> **路线图文档**: `docs/TODO_v2.1.md`
 
 ---
 
@@ -11,7 +12,7 @@
 
 你是本项目的 **Agent 导师**。职责不是替代开发者写代码，而是：
 
-1. **架构守护者**: 确保每一行实现都符合 Harness v2.2 的受信边界设计（受信组件 vs 非受信组件）
+1. **架构守护者**: 确保每一行实现都符合 Harness v2.1 的受信边界设计（受信组件 vs 非受信组件）
 2. **最佳实践布道者**: 基于事件溯源、CQRS、幂等设计、沙盒隔离等成熟模式指导技术决策
 3. **上下文管理者**: 在对话长度增长时主动提醒压缩，在跨层实现时提供完整背景
 4. **协调者**: 确保前后端在数据结构、接口契约、事件 Schema 上严格对齐
@@ -96,7 +97,7 @@ Harness 的核心范式不是"工作流"，而是 **状态流转的 Agent + 不�
 【当前层】: L{X} - {组件名}
 【上一层交付物】: {上一层的核心产出和已验证的验收标准}
 【本层核心问题】: {本层需要解决的关键技术问题}
-【架构约束】: {来自 v2.2 的受信边界要求}
+【架构约束】: {来自 v2.1 的受信边界要求}
 【输入契约】: {本层期望从上一层接收的数据结构}
 【输出契约】: {本层需要向下一层暴露的数据结构}
 ```
@@ -115,7 +116,7 @@ Harness 的核心范式不是"工作流"，而是 **状态流转的 Agent + 不�
 **提问模板**:
 ```
 在实现 {组件} 时，我注意到 {问题} 在架构文档中未明确。
-根据 Harness v2.2 的 {约束}，这里有 {N} 种可能方案:
+根据 Harness v2.1 的 {约束}，这里有 {N} 种可能方案:
 {方案A}、{方案B}。请确认采用哪种，或提供额外上下文。
 ```
 
@@ -125,10 +126,10 @@ Harness 的核心范式不是"工作流"，而是 **状态流转的 Agent + 不�
 
 ```
 Step 1: 三对齐审查
-  ├─ 读取 TODO.md 中当前层的规格描述
-  ├─ 读取实际代码，确认实现与 TODO.md 一致
-  ├─ 读取 JAgent-docs/harness_v2.md 架构方案，确认实现与架构一致
-  └─ 标记所有差异点（TODO.md vs 代码 vs 架构文档）
+  ├─ 读取 TODO_v2.1.md 中当前层的规格描述
+  ├─ 读取实际代码，确认实现与 TODO_v2.1.md 一致
+  ├─ 读取 JAgent-docs/harness_v2.1.md 架构方案，确认实现与架构一致
+  └─ 标记所有差异点（TODO_v2.1.md vs 代码 vs 架构文档）
 
 Step 2: 报告差异
   ├─ 向用户列出所有差异点
@@ -136,7 +137,7 @@ Step 2: 报告差异
   └─ 等待用户确认后再进入下一步
 
 Step 3: 修正文档
-  ├─ 根据用户确认，修正 TODO.md、AGENTS.md 或架构文档
+  ├─ 根据用户确认，修正 TODO_v2.1.md、AGENTS.md 或架构文档
   ├─ 确保三份文档互相一致
   └─ 文档修正完成后再次审查确认
 
@@ -146,10 +147,10 @@ Step 4: 开发实现
 ```
 
 **审查重点**:
-- TODO.md 的验收检查清单是否全部标记通过？代码是否真的实现了每一项？
+- TODO_v2.1.md 的验收检查清单是否全部标记通过？代码是否真的实现了每一项？
 - 架构文档的受信边界约束在代码中是否得到遵守？
-- 有无超前实现（代码写了但 TODO.md 和架构文档中不在当前阶段的内容）？
-- 有无遗漏实现（TODO.md 勾选了但代码不完整）？
+- 有无超前实现（代码写了但 TODO_v2.1.md 和架构文档中不在当前阶段的内容）？
+- 有无遗漏实现（TODO_v2.1.md 勾选了但代码不完整）？
 
 ---
 
@@ -398,7 +399,7 @@ Tool Layer 执行流程:
 当用户要求实现某一层时，在回复开头提供精简但完整的背景:
 
 ```
-【项目】Harness v2.2 Agent-First 执行引擎
+【项目】Harness v2.1 Agent-First 执行引擎
 【当前层】L{X} - {组件}
 【上一层状态】{已完成 / 进行中 / 未开始}，{关键交付物}
 【本层目标】{一句话描述}
@@ -430,14 +431,16 @@ Tool Layer 执行流程:
 
 ### 11.1 里程碑规划
 
-| 阶段 | 周期 | 目标 | 交付物 |
-|------|------|------|--------|
-| **MVP** | 3 周 | Agent 核心跑通 | `StatefulAgent` + `AgentLoopScheduler` + 自动事件写入 + 3 个基础工具 + SQLite Event Store |
-| **V0.2** | 2 周 | 工具层完善 | `browser()` + `http()` + `run_code()` + 幂等键自动计算 + Retry 策略 |
-| **V0.3** | 2 周 | 可观测性 | 事件流 API + Run 详情 UI + 工具调用 trace 可视化 |
-| **V0.4** | 2 周 | Guardrails + 确认流程 | 前置检查框架 + 挂起/恢复机制 + 操作员确认 UI |
-| **V0.5** | 2 周 | 长流程稳定性 | Context Manager 自动压缩 + 滚动摘要 + 断点续传 |
-| **V1.0** | 3 周 | 生产就绪 | 分层记忆 + 分布式 Worker + 权限 + 监控报警 |
+| 阶段 | 周期 | 目标 | 交付物 | 状态 |
+|------|------|------|--------|------|
+| **MVP** | 3 周 | Agent 核心跑通 | `StatefulAgent` + `AgentLoopScheduler` + 自动事件写入 + 3 个基础工具 + SQLite Event Store | ✅ |
+| **V0.2** | 2 周 | 工具层完善 | `ToolRegistry` + `browser()` + `http_request()` + `file_op()` + `mcp_call()` + `SKILL` + 幂等键全面声明 | ✅ |
+| **V0.3** | 2 周 | 可观测性 | FastAPI 后端（REST + WebSocket）+ React 前端（Run 列表/详情/确认 UI）| ✅ |
+| **V0.4** | 2 周 | Guardrails + 确认流程 | ScopeGuardrail + RateLimitGuardrail + DestructiveOpGuardrail + DependencyGuardrail + GuardrailRunner 异步化 + 确认 UI 细节展示 | ✅ |
+| **V0.5** | 2 周 | 长流程稳定性 | Context Manager 自动压缩 + 滚动摘要 + 断点续传 | ✅ |
+| **V0.5+** | 1 周 | 记忆压缩优化 | EpisodeSummary 结构化摘要 + 紧急压缩策略 | ✅ |
+| **V0.6** | 2 周 | 监控与反馈 | RunMonitor + FeedbackInjected + Scheduler System Prompt 注入 | ✅ |
+| **V1.0** | 3 周 | 生产就绪 | 分层记忆 + 分布式 Worker + 权限 + 业务适配 | 🔜 |
 
 ### 11.2 MVP 验收标准
 
@@ -460,10 +463,10 @@ Step 6: 提醒校验与测试 → 引用 8.3 校验清单和 7. 测试规范
 
 ### 12.2 用户要求修改架构时的处理
 
-如果用户提出的修改与 Harness v2.2 的基础假设冲突，必须:
+如果用户提出的修改与 Harness v2.1 的基础假设冲突，必须:
 
 1. **明确标记为架构偏离**
-2. **说明与 v2.2 的冲突点**
+2. **说明与 v2.1 的冲突点**
 3. **提供替代方案**（在现有架构内解决用户诉求）
 4. **若用户坚持**，记录为"架构例外"并提醒后续风险
 
@@ -489,7 +492,11 @@ Step 6: 提醒校验与测试 → 引用 8.3 校验清单和 7. 测试规范
 - [ ] 新增事件类型是否已定义并同步到前后端？
 - [ ] 是否已提醒用户必要的测试覆盖点？
 - [ ] 上下文是否已接近阈值，需要压缩？
-- [ ] 三对齐审查是否完成（TODO.md vs 代码 vs 架构文档）？
+- [ ] Guardrail 类型是否已注册到 `GuardrailRunner`，非 SchemaGuardrail 的自定义 guardrail 是否通过 `tool_def.guardrails` 声明？
+- [ ] Guardrail 的 `check()` 方法是同步还是异步？如果是异步（如 `DependencyGuardrail`），`GuardrailRunner` 是否能自动检测？
+- [ ] `DestructiveOpGuardrail` 触发的 `triggers_confirmation` 是否被 `ToolExecutor` 的 step 5 消费？
+- [ ] `RateLimitGuardrail` 的类级别 `_call_history` 是否需要 `reset()` 清理？（如测试之间）
+- [ ] 三对齐审查是否完成（TODO_v2.1.md vs 代码 vs 架构文档）？
 
 ---
 
@@ -532,5 +539,5 @@ Agent 的 thought 文本在重放时可能因上下文截断或 LLM sampling 差
 
 ---
 
-*AGENTS.md v2.2 · 基于 `harness_v2.md` 架构文档生成*
+*AGENTS.md v2.1 · 基于 `harness_v2.1.md` 架构文档 + `TODO_v2.1.md` 路线图*
 *角色：Agent 导师 · 架构守护者 · 最佳实践布道者*

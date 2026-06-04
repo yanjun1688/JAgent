@@ -2,6 +2,8 @@ import React, { useState } from 'react'
 
 interface Props {
   toolName: string
+  input?: Record<string, unknown>
+  riskLevel?: string
   onConfirm: (operatorId: string) => void
   onDeny: (operatorId: string) => void
   onClose: () => void
@@ -29,7 +31,7 @@ const dialogStyle: React.CSSProperties = {
   boxShadow: '0 4px 24px rgba(0,0,0,0.2)',
 }
 
-export default function ConfirmDialog({ toolName, onConfirm, onDeny, onClose }: Props) {
+export default function ConfirmDialog({ toolName, input, riskLevel, onConfirm, onDeny, onClose }: Props) {
   const [operatorId, setOperatorId] = useState('')
   const [error, setError] = useState('')
 
@@ -58,7 +60,15 @@ export default function ConfirmDialog({ toolName, onConfirm, onDeny, onClose }: 
             fontFamily: 'monospace',
           }}
         >
-          Tool: <strong>{toolName}</strong>
+          <div style={{ marginBottom: riskLevel ? 4 : 0 }}>
+            Tool: <strong>{toolName}</strong>
+            {riskLevel ? <span style={{ marginLeft: 8, fontSize: 12, color: riskLevel === 'high' ? '#d32f2f' : '#f57c00' }}>(risk: {riskLevel})</span> : null}
+          </div>
+          {input && Object.keys(input).length > 0 ? (
+            <pre style={{ margin: '8px 0 0', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+              {JSON.stringify(input, null, 2)}
+            </pre>
+          ) : null}
         </div>
         <div style={{ marginBottom: 16 }}>
           <label style={{ display: 'block', marginBottom: 4, fontSize: 13, color: '#666' }}>

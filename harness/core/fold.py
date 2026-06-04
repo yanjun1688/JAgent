@@ -9,14 +9,21 @@ from harness.models.events import (
     ConfirmationRequestedPayload,
     ContextCheckpointedPayload,
     ContextCompressedPayload,
+    EpisodeSummary,
     Event,
     EventType,
+    FeedbackInjectedPayload,
     GuardrailTriggeredPayload,
+    OrchestrationCompletedPayload,
+    OrchestrationFailedPayload,
+    OrchestrationStartedPayload,
     RunCompletedPayload,
     RunFailedPayload,
     RunPausedPayload,
     RunResumedPayload,
     RunStartedPayload,
+    StepCompletedPayload,
+    StepFailedPayload,
     ToolCalledPayload,
     ToolCompletedPayload,
     ToolFailedPayload,
@@ -61,10 +68,14 @@ class RunState:
     tool_calls: list[ToolCalledPayload] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)
     last_error: str | None = None
-    summary: str | None = None
+    summary: EpisodeSummary | str | None = None
+    keep_recent_count: int = 0
     pause_reason: str | None = None
     pending_confirmations: list[ConfirmationRequestedPayload] = field(default_factory=list)
     last_checkpoint_seq: int | None = None
+    orchestration_history: list = field(default_factory=list)
+    latest_orchestration: dict | None = None
+    feedbacks: list[FeedbackInjectedPayload] = field(default_factory=list)
 
 
 def fold_events(events: list[Event]) -> RunState:
@@ -160,6 +171,7 @@ def fold_events(events: list[Event]) -> RunState:
             case EventType.CONTEXT_COMPRESSED:
                 p = ContextCompressedPayload(**event.payload)
                 state.summary = p.summary_ref
+                state.keep_recent_count = p.keep_recent_count
 
             case EventType.CONTEXT_CHECKPOINTED:
                 p = ContextCheckpointedPayload(**event.payload)
@@ -184,5 +196,37 @@ def fold_events(events: list[Event]) -> RunState:
                 p = RunFailedPayload(**event.payload)
                 state.status = RunStatus.FAILED
                 state.last_error = p.final_error
+
+            case EventType.ORCHESTRATION_STARTED:
+                p = OrchestrationStartedPayload(**event.payload)
+                entry = {"plan_id": p.plan_id, "intent": p.intent, "steps_summary": p.steps_summary, "steps": []}
+                state.orchestration_history.append(entry)
+                state.latest_orchestration = entry
+
+            case EventType.STEP_COMPLETED:
+                p = StepCompletedPayload(**event.payload)
+                if state.latest_orchestration and state.latest_orchestration["plan_id"] == p.plan_id:
+                    state.latest_orchestration["steps"].append({"status": "completed", "step_index": p.step_index})
+
+            case EventType.STEP_FAILED:
+                p = StepFailedPayload(**event.payload)
+                if state.latest_orchestration and state.latest_orchestration["plan_id"] == p.plan_id:
+                    state.latest_orchestration["steps"].append({"status": "failed", "step_index": p.step_index, "error": p.error})
+
+            case EventType.ORCHESTRATION_COMPLETED:
+                p = OrchestrationCompletedPayload(**event.payload)
+                if state.latest_orchestration and state.latest_orchestration["plan_id"] == p.plan_id:
+                    state.latest_orchestration["status"] = "completed"
+                    state.latest_orchestration["summary"] = p.summary
+
+            case EventType.ORCHESTRATION_FAILED:
+                p = OrchestrationFailedPayload(**event.payload)
+                if state.latest_orchestration and state.latest_orchestration["plan_id"] == p.plan_id:
+                    state.latest_orchestration["status"] = "failed"
+                    state.latest_orchestration["final_error"] = p.final_error
+
+            case EventType.FEEDBACK_INJECTED:
+                p = FeedbackInjectedPayload(**event.payload)
+                state.feedbacks.append(p)
 
     return state

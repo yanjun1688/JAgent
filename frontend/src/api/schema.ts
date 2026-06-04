@@ -13,12 +13,12 @@ export interface CreateRunRequest {
 
 export interface EventListResponse {
   events: EventResponse[]
-  total: number
+  total: integer
 }
 
 export interface EventResponse {
   run_id: string
-  seq: number
+  seq: integer
   event_type: string
   payload: Record<string, unknown>
   idempotency_key: unknown | undefined
@@ -33,28 +33,36 @@ export interface PauseRequest {
   reason: string | undefined
 }
 
+export interface PendingConfirmationItem {
+  confirmation_id: string
+  tool_name: string
+  tool_call_id: string
+  input: Record<string, unknown>
+  risk_level: string
+}
+
 export interface RunDetailResponse {
   run_id: string
   status: string
   intent: string
-  seq: number
-  event_count: number
-  last_error: string | undefined
-  summary: string | undefined
-  pause_reason: string | undefined
-  pending_confirmations: object[] | undefined
+  seq: integer
+  event_count: integer
+  last_error: unknown | undefined
+  summary: unknown | undefined
+  pause_reason: unknown | undefined
+  pending_confirmations: PendingConfirmationItem[] | undefined
 }
 
 export interface RunListResponse {
   runs: RunSummary[]
-  total: number
+  total: integer
 }
 
 export interface RunSummary {
   run_id: string
   intent: string | undefined
   status: string | undefined
-  event_count: number | undefined
+  event_count: integer | undefined
   created_at: number | undefined
   updated_at: number | undefined
 }
