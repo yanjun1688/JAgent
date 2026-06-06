@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
-if TYPE_CHECKING:
-    from harness.monitoring.run_monitor import RunMonitor
-
 from harness.core.context_manager import ContextManager
 from harness.core.fold import RunState, RunStatus, fold_events
+from harness.core.logger import agent_logger, guard_logger
 from harness.models.events import (
     AgentThoughtPayload,
     EventType,
@@ -26,7 +24,16 @@ from harness.models.tools import ToolDefinition
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ExecutionStatus, ToolExecutor
 
-_logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from harness.monitoring.run_monitor import RunMonitor
+
+_agent_log = agent_logger("scheduler")
+_guard_log = guard_logger("scheduler")
+_sched_iter = agent_logger("scheduler.iter")
+_sched_think = agent_logger("scheduler.think")
+_sched_act = agent_logger("scheduler.act")
+_sched_ctrl = agent_logger("scheduler.control")
+_sched_breaker = guard_logger("scheduler.breaker")
 
 
 @dataclass
@@ -35,6 +42,7 @@ class ThinkResult:
     tool_name: str | None = None
     tool_input: dict[str, Any] | None = None
     token_count: int = 0
+    direct_answer: str | None = None
 
 
 class AgentKernel(ABC):
@@ -55,6 +63,7 @@ class SchedulerConfig:
     max_iterations: int = 50
     max_consecutive_failures: int = 5
     pause_timeout_ms: int = 300_000
+
 
 
 class AgentLoopScheduler:
@@ -116,40 +125,57 @@ class AgentLoopScheduler:
             if self.context_manager:
                 last_cp = self.context_manager.find_resume_seq(events)
                 if last_cp > 0:
-                    _logger.info("Resuming run %s from seq %d (checkpoint)", run_id, last_cp)
+                    _sched_ctrl.info("Resuming from seq %d (checkpoint)", last_cp)
                 else:
-                    _logger.info("Resuming run %s from beginning (no checkpoint)", run_id)
+                    _sched_ctrl.info("No checkpoint found, starting from beginning")
 
         consecutive_failures = 0
+        _last_iter_time = time.monotonic()
 
         try:
             for _iteration in range(1, self.config.max_iterations + 1):
+                _iter_elapsed = (time.monotonic() - _last_iter_time) * 1000
+                if _iteration > 1:
+                    _sched_iter.info("[iter %d] ← iteration %d completed in %dms",
+                                     _iteration - 1, _iteration - 1, _iter_elapsed)
+                _last_iter_time = time.monotonic()
+
                 if self._cancel_flags.get(run_id, asyncio.Event()).is_set():
                     await self._fail(run_id, "Run cancelled by user")
                     return fold_events(await self.store.get_events(run_id))
 
+                _sched_iter.info("[iter %d/%d] Starting iteration", _iteration, self.config.max_iterations)
+
                 events = await self.store.get_events(run_id)
                 state = fold_events(events)
+                _sched_iter.info("[observe] Read %d events → seq=%d, thoughts=%d, results=%d, feedbacks=%d",
+                                 len(events), state.seq, len(state.thought_history),
+                                 len(state.tool_results), len(state.feedbacks))
 
                 if self.context_manager:
                     await self.context_manager.maybe_compress(run_id, _iteration, state)
                     await self.context_manager.try_checkpoint(run_id, _iteration, state)
 
                 if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
+                    _sched_iter.info("[terminal] Run is %s, exiting loop", state.status.value)
                     return state
 
                 if state.status == RunStatus.PAUSED:
+                    _sched_ctrl.info("[ctrl] Paused, waiting for resume...")
                     event = self._pause_events.setdefault(run_id, asyncio.Event())
                     event.clear()
+                    _pause_start = time.monotonic()
                     try:
                         await asyncio.wait_for(event.wait(), timeout=self.config.pause_timeout_ms / 1000.0)
                     except asyncio.TimeoutError:
-                        pass
+                        _sched_ctrl.warning("[ctrl] Pause timed out (%dms)", self.config.pause_timeout_ms)
                     finally:
                         event.clear()
+                    _pause_ms = (time.monotonic() - _pause_start) * 1000
                     if self._cancel_flags.get(run_id, asyncio.Event()).is_set():
                         await self._fail(run_id, "Run cancelled by user")
                         return fold_events(await self.store.get_events(run_id))
+                    _sched_ctrl.info("[ctrl] Resumed after %dms pause", _pause_ms)
                     events = await self.store.get_events(run_id)
                     state = fold_events(events)
                     if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
@@ -160,8 +186,17 @@ class AgentLoopScheduler:
                     feedbacks = state.feedbacks[-5:]
                     if feedbacks:
                         feedback_text = "\n".join(f.feedback_text for f in feedbacks)
+                        _sched_think.info("[think] %d feedback(s) injected into context", len(feedbacks))
 
+                _sched_think.info("[think] Calling LLM%s", " with feedback" if feedback_text else "")
+                _think_start = time.monotonic()
                 think_result = await self.kernel.think(intent, self.tool_defs, state, feedback=feedback_text)
+                _think_ms = (time.monotonic() - _think_start) * 1000
+                if think_result.tool_name:
+                    _sched_think.info("[think] LLM → tool=%s (%dms)", think_result.tool_name, _think_ms)
+                else:
+                    _sched_think.info("[think] LLM → stop (\"%.80s\", %dms)",
+                                      (think_result.thought or "")[:80], _think_ms)
                 await self.store.append_event(
                     run_id,
                     EventType.AGENT_THOUGHT,
@@ -172,7 +207,19 @@ class AgentLoopScheduler:
                     ).model_dump(),
                 )
 
+                if think_result.direct_answer:
+                    _sched_think.info("[answer] Agent answered directly: \"%.120s\"", think_result.direct_answer)
+                    await self.store.append_event(
+                        run_id,
+                        EventType.RUN_COMPLETED,
+                        RunCompletedPayload(
+                            result_summary=think_result.direct_answer,
+                        ).model_dump(),
+                    )
+                    return fold_events(await self.store.get_events(run_id))
+
                 if think_result.tool_name is None:
+                    _sched_think.info("[stop] Agent chose to stop, writing RunCompleted")
                     await self.store.append_event(
                         run_id,
                         EventType.RUN_COMPLETED,
@@ -182,33 +229,58 @@ class AgentLoopScheduler:
 
                 tool_def = self._find_tool_def(think_result.tool_name)
                 if tool_def is None:
+                    _sched_act.error("[act] Unknown tool: '%s'", think_result.tool_name)
                     await self._fail(run_id, f"Unknown tool: '{think_result.tool_name}'")
                     return fold_events(await self.store.get_events(run_id))
 
                 tool_fn = self.tool_fns.get(think_result.tool_name)
                 if tool_fn is None:
+                    _sched_act.error("[act] No handler registered for tool '%s'", think_result.tool_name)
                     await self._fail(run_id, f"Tool '{think_result.tool_name}' has no handler registered")
                     return fold_events(await self.store.get_events(run_id))
 
-                result = await self.executor.execute(
-                    run_id,
-                    think_result.tool_name,
-                    think_result.tool_input or {},
-                    tool_def,
-                    tool_fn,
-                )
+                _sched_act.info("[act] Executing tool '%s' with input=%.150s",
+                                think_result.tool_name, str(think_result.tool_input)[:150])
+                try:
+                    result = await self.executor.execute(
+                        run_id,
+                        think_result.tool_name,
+                        think_result.tool_input or {},
+                        tool_def,
+                        tool_fn,
+                    )
+                except Exception as exc:
+                    _sched_act.error("[act] Unexpected exception: %s", exc)
+                    consecutive_failures += 1
+                    _sched_breaker.warning("[breaker] run=%s iter=%d tool=%s failures=%d/%d event=exception",
+                                           run_id, _iteration, think_result.tool_name,
+                                           consecutive_failures, self.config.max_consecutive_failures)
+                    if consecutive_failures >= self.config.max_consecutive_failures:
+                        _sched_breaker.error("[breaker] TRIP run=%s iter=%d tool=%s reason=exception count=%d",
+                                             run_id, _iteration, think_result.tool_name, consecutive_failures)
+                        await self._fail(
+                            run_id,
+                            f"Circuit breaker: {consecutive_failures} consecutive failures",
+                        )
+                        return fold_events(await self.store.get_events(run_id))
+                    continue
+                _sched_act.info("[act] Tool '%s' → %s", think_result.tool_name, result.status.value)
 
                 match result.status:
                     case ExecutionStatus.COMPLETED | ExecutionStatus.IDEMPOTENCY_HIT:
+                        _sched_breaker.info("[breaker] run=%s iter=%d tool=%s RESET consecutive_failures=0",
+                                            run_id, _iteration, think_result.tool_name)
                         consecutive_failures = 0
 
                     case ExecutionStatus.CONFIRMATION_NEEDED:
+                        _sched_act.info("[act] Tool needs human confirmation, pausing")
                         await self.store.append_event(
                             run_id,
                             EventType.RUN_PAUSED,
                             RunPausedPayload(reason="waiting_confirmation").model_dump(),
                         )
                         await self._wait_for_resume(run_id)
+                        _sched_act.info("[act] Confirmation received, re-executing tool")
                         result = await self.executor.execute(
                             run_id,
                             think_result.tool_name,
@@ -218,10 +290,18 @@ class AgentLoopScheduler:
                         )
                         match result.status:
                             case ExecutionStatus.COMPLETED | ExecutionStatus.IDEMPOTENCY_HIT:
+                                _sched_breaker.info("[breaker] run=%s iter=%d tool=%s RESET (after_confirm) consecutive_failures=0",
+                                                    run_id, _iteration, think_result.tool_name)
                                 consecutive_failures = 0
                             case ExecutionStatus.FAILED | ExecutionStatus.TIMEOUT | ExecutionStatus.GUARDRAIL_BLOCKED:
                                 consecutive_failures += 1
+                                _sched_breaker.warning("[breaker] run=%s iter=%d tool=%s failures=%d/%d event=confirm_fail",
+                                                       run_id, _iteration, think_result.tool_name,
+                                                       consecutive_failures,
+                                                       self.config.max_consecutive_failures)
                                 if consecutive_failures >= self.config.max_consecutive_failures:
+                                    _sched_breaker.error("[breaker] TRIP run=%s iter=%d tool=%s reason=confirm_fail count=%d",
+                                                         run_id, _iteration, think_result.tool_name, consecutive_failures)
                                     await self._fail(
                                         run_id,
                                         f"Circuit breaker: {consecutive_failures} consecutive failures",
@@ -230,13 +310,20 @@ class AgentLoopScheduler:
 
                     case ExecutionStatus.FAILED | ExecutionStatus.TIMEOUT | ExecutionStatus.GUARDRAIL_BLOCKED:
                         consecutive_failures += 1
+                        _sched_breaker.warning("[breaker] run=%s iter=%d tool=%s failures=%d/%d event=%s",
+                                               run_id, _iteration, think_result.tool_name,
+                                               consecutive_failures,
+                                               self.config.max_consecutive_failures, result.status.value)
                         if consecutive_failures >= self.config.max_consecutive_failures:
+                            _sched_breaker.error("[breaker] TRIP run=%s iter=%d tool=%s reason=failures_exceeded count=%d",
+                                                 run_id, _iteration, think_result.tool_name, consecutive_failures)
                             await self._fail(
                                 run_id,
                                 f"Circuit breaker: {consecutive_failures} consecutive failures",
                             )
                             return fold_events(await self.store.get_events(run_id))
 
+            _sched_iter.error("[exhaust] Exceeded max iterations (%d)", self.config.max_iterations)
             await self._fail(run_id, f"Exceeded max iterations ({self.config.max_iterations})")
             return fold_events(await self.store.get_events(run_id))
         finally:
@@ -293,6 +380,7 @@ class AgentLoopScheduler:
         try:
             await asyncio.wait_for(event.wait(), timeout=self.config.pause_timeout_ms / 1000.0)
         except asyncio.TimeoutError:
+            _sched_ctrl.warning("Confirmation timed out (%dms)", self.config.pause_timeout_ms)
             if self._cancel_flags.get(run_id, asyncio.Event()).is_set():
                 return
             await self._fail(run_id, "Confirmation timed out")

@@ -267,7 +267,7 @@
 | 7.1 | ScopeGuardrail | `harness/tools/guardrails.py::ScopeGuardrail` | 支持 `allowed_directories`/`allowed_domains`/`allowed_commands` 白名单 | 1d | ✅ |
 | 7.2 | RateLimitGuardrail | `harness/tools/guardrails.py::RateLimitGuardrail` | 可配置 `max_calls`/`window_seconds`/`scope`（tool/run）；类级别调用历史 + `reset()` | 1d | ✅ |
 | 7.3 | DestructiveOpGuardrail | `harness/tools/guardrails.py::DestructiveOpGuardrail` | `file_op delete`/`run_code` 自动设 `triggers_confirmation=true`；Executor 联动确认流 | 1d | ✅ |
-| 7.4 | DependencyGuardrail | `harness/tools/guardrails.py::DependencyGuardrail` | 通过 Event Store 查询 `required_events`；异步 check；无 store 时跳过 | 1d | ✅ |
+| 7.4 | DependencyGuardrail | `harness/tools/guardrails.py::DependencyGuardrail` | 通过 Event Store 查询 `required_events`；异步 check；无 store 时跳过；**V2.1+ 新增 `depends_on` 声明式依赖路径** | 1d | ✅ |
 | 7.5 | GuardrailRunner 异步化 | `run()` 改为 `async`，自动检测 sync/async guardrail | 向后兼容现有 sync guardrail（SchemaGuardrail/FakeGuardrail） | 0.5d | ✅ |
 | 7.6 | 确认 UI 完善 | ConfirmDialog 展示 `input` 参数 + `risk_level`；API 返回 `tool_call_id`+`input` | 操作员可在确认前看到完整的工具调用参数 | 1.5d | ✅ |
 | 7.7 | Guardrail 测试 | `tests/test_guardrails_v04.py`（32 项） | 7 Scope + 5 RateLimit + 6 DestructiveOp + 5 Dependency + 2 Runner + 7 Executor 集成 | 1d | ✅ |

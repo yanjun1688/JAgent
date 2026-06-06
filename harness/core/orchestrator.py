@@ -20,7 +20,7 @@ from harness.models.events import (
     StepCompletedPayload,
     StepFailedPayload,
 )
-from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
+from harness.models.tools import DependencyConstraint, RetryPolicy, SideEffect, ToolDefinition
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ExecutionStatus, ToolExecutor, current_run_id
 from harness.tools.guardrails import SchemaGuardrail
@@ -58,6 +58,9 @@ ORCHESTRATE_DEF = ToolDefinition(
     timeout_ms=600_000,
     retry_policy=RetryPolicy(max_retries=0),
     requires_confirmation=False,
+    depends_on=[
+        DependencyConstraint(event_type="RunStarted", message="Run must be started before orchestration"),
+    ],
 )
 
 

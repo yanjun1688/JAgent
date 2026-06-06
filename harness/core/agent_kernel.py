@@ -8,23 +8,30 @@ from typing import Any
 
 from harness.core.fold import RunState
 from harness.core.llm_client import LLMClient
+from harness.core.logger import agent_logger
 from harness.core.scheduler import AgentKernel, ThinkResult
 from harness.core.system_prompt import build_system_prompt, build_tool_schemas
 from harness.models.events import EpisodeSummary
 from harness.models.tools import ToolDefinition
 
+_logger = agent_logger("kernel")
+
 _STOP_MARKER = "<STOP>"
-_THOUGHT_RE = re.compile(r"THOUGHT:\s*(.+?)(?:\nTOOL:|\n<STOP>|$)", re.DOTALL)
+_ANSWER_RE = re.compile(r"ANSWER:\s*(.+?)(?:\n|$)")
+_THOUGHT_RE = re.compile(r"THOUGHT:\s*(.+?)(?:\nTOOL:|\nANSWER:|\n<STOP>|$)", re.DOTALL)
 _TOOL_RE = re.compile(r"TOOL:\s*(\S+)")
 _ARGS_RE = re.compile(r"ARGS:\s*(\{.+\})", re.DOTALL)
 
 
 def _parse_response(response: str) -> ThinkResult:
+    answer_match = _ANSWER_RE.search(response)
+    if answer_match:
+        answer = answer_match.group(1).strip()
+        thought = f"Answered directly: {answer[:80]}"
+        return ThinkResult(thought=thought, tool_name=None, direct_answer=answer)
+
     thought_match = _THOUGHT_RE.search(response)
     thought = thought_match.group(1).strip() if thought_match else response.strip()
-
-    if _STOP_MARKER in response:
-        return ThinkResult(thought=thought, tool_name=None)
 
     tool_match = _TOOL_RE.search(response)
     args_match = _ARGS_RE.search(response)
@@ -37,7 +44,13 @@ def _parse_response(response: str) -> ThinkResult:
         except json.JSONDecodeError:
             pass
 
-    return ThinkResult(thought=thought, tool_name=tool_name, tool_input=tool_input)
+    if tool_name:
+        return ThinkResult(thought=thought, tool_name=tool_name, tool_input=tool_input)
+
+    if _STOP_MARKER in response:
+        return ThinkResult(thought=thought, tool_name=None)
+
+    return ThinkResult(thought=thought, tool_name=None)
 
 
 class MockAgentKernel(AgentKernel):
@@ -123,12 +136,28 @@ class LLMAgentKernel(AgentKernel):
         else:
             window = 5
 
-        for thought in state.thought_history[-window:]:
-            messages.append({"role": "assistant", "content": f"THOUGHT: {thought.thought}"})
-
+        timeline: list[tuple[str, Any]] = []
+        for t in state.thought_history[-window:]:
+            if hasattr(t, "seq"):
+                timeline.append(("thought", t))
         for tr in state.tool_results[-window:]:
-            content = f"Tool '{tr.tool_name}' result ({tr.status}): {tr.output or tr.error}"
-            messages.append({"role": "user", "content": content})
+            if hasattr(tr, "event_seq"):
+                timeline.append(("result", tr))
+        timeline.sort(key=lambda x: x[1].seq if x[0] == "thought" else x[1].event_seq)
+
+        for kind, item in timeline:
+            if kind == "thought":
+                choice = f" ({item.tool_choice})" if item.tool_choice else ""
+                messages.append({"role": "assistant", "content": f"THOUGHT{choice}: {item.thought}"})
+            else:
+                content = f"Tool '{item.tool_name}' result ({item.status}): {item.output or item.error}"
+                messages.append({"role": "user", "content": content})
 
         response = await self.client.chat(messages, tools=schemas)
-        return _parse_response(response)
+        result = _parse_response(response)
+        if result.tool_name:
+            _logger.info("[PARSE] → tool=%s args=%s thought=%.120s",
+                         result.tool_name, result.tool_input, result.thought)
+        else:
+            _logger.info("[PARSE] → stop (thought: %.120s)", result.thought)
+        return result

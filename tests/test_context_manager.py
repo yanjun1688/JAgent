@@ -19,6 +19,7 @@ from harness.core.fold import RunState, fold_events
 from harness.models.events import (
     ContextCheckpointedPayload,
     ContextCompressedPayload,
+    EpisodeSummary,
 )
 from harness.core.scheduler import AgentLoopScheduler, SchedulerConfig
 
@@ -114,7 +115,7 @@ class TestCompressionTrigger:
         assert len(compressed) == 1
         p = ContextCompressedPayload.model_validate(compressed[0].payload)
         assert p.original_tokens > 0
-        assert len(p.summary_ref) > 0
+        assert p.summary_ref.current_plan is not None
 
     @pytest.mark.asyncio
     async def test_compression_not_triggered_under_threshold(self, store):
@@ -149,7 +150,8 @@ class TestCompressionTrigger:
         events = await store.get_events("run-c4")
         compressed = [e for e in events if e.event_type == EventType.CONTEXT_COMPRESSED]
         p = ContextCompressedPayload.model_validate(compressed[0].payload)
-        assert len(p.summary_ref) > 0
+        assert isinstance(p.summary_ref, EpisodeSummary)
+        assert p.summary_ref.current_plan is not None
 
     @pytest.mark.asyncio
     async def test_compression_cooldown_prevents_repeat(self, store):
@@ -193,7 +195,7 @@ class TestCompressionTrigger:
         events = await store.get_events("run-c5")
         compressed = [e for e in events if e.event_type == EventType.CONTEXT_COMPRESSED]
         p = ContextCompressedPayload.model_validate(compressed[0].payload)
-        assert "COMPRESSED SUMMARY" in p.summary_ref
+        assert "COMPRESSED SUMMARY" in p.summary_ref.current_plan
         assert mock_llm.calls  # LLM was actually called
 
 
@@ -423,7 +425,7 @@ class TestStructuredSummary:
 
     @pytest.mark.asyncio
     async def test_llm_non_json_degrades_to_text(self, store):
-        """When LLM returns non-JSON, summary_ref degrades to plain text."""
+        """When LLM returns non-JSON, content stored in current_plan field."""
         mock_llm = MockLLMClient(["Plain text summary of agent activity"])
         cm = ContextManagerCls(
             store, llm_client=mock_llm,
@@ -438,8 +440,8 @@ class TestStructuredSummary:
         events = await store.get_events("run-ss2")
         compressed = [e for e in events if e.event_type == EventType.CONTEXT_COMPRESSED]
         p = ContextCompressedPayload.model_validate(compressed[0].payload)
-        assert isinstance(p.summary_ref, str)
-        assert "Plain text summary" in p.summary_ref
+        assert isinstance(p.summary_ref, EpisodeSummary)
+        assert "Plain text summary" in p.summary_ref.current_plan
 
 
 # ── Emergency compression ────────────────────────────────────────────
@@ -588,14 +590,13 @@ class TestKernelSummaryConsumption:
     async def test_kernel_uses_keep_recent_count_for_window(self):
         """LLMAgentKernel uses keep_recent_count as window when summary present."""
         from harness.core.agent_kernel import LLMAgentKernel
-        from harness.core.fold import RunState
+        from harness.core.fold import RunState, ThoughtEntry
 
         mock_llm = MockLLMClient(["THOUGHT: doing work\nTOOL: echo\nARGS: {}\n<STOP>"])
         kernel = LLMAgentKernel(mock_llm)
         state = RunState(run_id="r", summary="test summary", keep_recent_count=3)
         for i in range(5):
-            t = type("obj", (), {"thought": f"thought {i}"})()
-            state.thought_history.append(t)
+            state.thought_history.append(ThoughtEntry(seq=i+1, thought=f"thought {i}"))
         td = _make_tool("echo")
 
         await kernel.think("test task", [td], state)

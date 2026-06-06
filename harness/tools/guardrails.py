@@ -9,13 +9,17 @@ Includes:
 """
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import jsonschema
 
-from harness.models.tools import ToolDefinition
+from harness.core.logger import guard_logger
+from harness.models.tools import DependencyConstraint, ToolDefinition
+
+_log_guard = guard_logger("executor.guardrails")
 
 
 @dataclass
@@ -60,6 +64,9 @@ class ScopeGuardrail:
 
     GUARDRAIL_ID = "scope"
 
+    def __init__(self, **kwargs):
+        pass
+
     @staticmethod
     def check(tool_def: ToolDefinition, input: dict, config: dict[str, Any]) -> GuardrailResult:
         allowed_dirs = config.get("allowed_directories", [])
@@ -68,12 +75,27 @@ class ScopeGuardrail:
 
         if tool_def.name == "file_op":
             path = (input.get("path") or "").replace("\\", "/")
-            if allowed_dirs and not any(path.startswith(d.rstrip("/")) for d in allowed_dirs):
-                return GuardrailResult(
-                    passed=False,
-                    guardrail_id=ScopeGuardrail.GUARDRAIL_ID,
-                    reason=f"Path '{path}' is outside allowed directories: {allowed_dirs}",
-                )
+            dirs = list(allowed_dirs) if allowed_dirs else []
+            source = "allowed directories"
+            if not dirs:
+                # 无显式配置时，回退到 file_op 的沙箱根目录。
+                # 后期可扩展为服务器安全目录白名单、用户 home 目录等来源。
+                from harness.tools.file_op import _SANDBOX_BASE
+                sb = _SANDBOX_BASE
+                if sb is not None:
+                    dirs = [str(sb.resolve()).replace("\\", "/")]
+                    source = "sandbox root"
+            if dirs:
+                resolved = path
+                if not os.path.isabs(path):
+                    resolved = os.path.join(dirs[0], path).replace("\\", "/")
+                    resolved = os.path.abspath(resolved).replace("\\", "/")
+                if not any(resolved.startswith(d) for d in dirs):
+                    return GuardrailResult(
+                        passed=False,
+                        guardrail_id=ScopeGuardrail.GUARDRAIL_ID,
+                        reason=f"Path '{path}' is outside {source}: {dirs}",
+                    )
 
         if tool_def.name in ("http_request", "browser"):
             url = input.get("url") or input.get("arguments", {}).get("url", "")
@@ -113,6 +135,9 @@ class RateLimitGuardrail:
     """
 
     GUARDRAIL_ID = "rate_limit"
+
+    def __init__(self, **kwargs):
+        pass
 
     _call_history: dict[str, list[float]] = {}
 
@@ -161,6 +186,9 @@ class DestructiveOpGuardrail:
 
     GUARDRAIL_ID = "destructive_op"
 
+    def __init__(self, **kwargs):
+        pass
+
     @staticmethod
     def check(tool_def: ToolDefinition, input: dict, config: dict[str, Any]) -> GuardrailResult:
         destructive_ops = config.get("destructive_operations", ["delete"])
@@ -200,8 +228,11 @@ class DestructiveOpGuardrail:
 class DependencyGuardrail:
     """Check that prerequisite events exist in the Event Store.
 
-    Requires EventStore reference. Config:
-        required_events: list[str]  — event types that must exist (e.g. ["RunStarted", "AgentThought"])
+    Two constraint sources (checked in this order):
+      1. tool_def.depends_on  — declarative list of DependencyConstraint (recommended)
+      2. config["required_events"] — legacy list of event type strings
+
+    If tool_def.depends_on is non-empty, config["required_events"] is ignored.
     """
 
     GUARDRAIL_ID = "dependency"
@@ -219,8 +250,8 @@ class DependencyGuardrail:
                 reason="EventStore not available — skipping dependency check",
             )
 
-        required = config.get("required_events", [])
-        if not required:
+        constraints = self._resolve_constraints(tool_def, config)
+        if not constraints:
             return GuardrailResult(passed=True, guardrail_id=DependencyGuardrail.GUARDRAIL_ID, reason="")
 
         rid = run_id or config.get("run_id", "")
@@ -228,17 +259,35 @@ class DependencyGuardrail:
             return GuardrailResult(passed=True, guardrail_id=DependencyGuardrail.GUARDRAIL_ID, reason="")
 
         events = await self._store.get_events(rid)
-        existing = {e.event_type.value for e in events}
-        missing = [ev for ev in required if ev not in existing]
 
-        if missing:
-            return GuardrailResult(
-                passed=False,
-                guardrail_id=DependencyGuardrail.GUARDRAIL_ID,
-                reason=f"Required events not found: {', '.join(missing)}",
+        for constraint in constraints:
+            matched = any(
+                e.event_type.value == constraint.event_type
+                and self._matches_payload(e.payload, constraint.payload_filter)
+                for e in events
             )
+            if not matched:
+                reason = constraint.message or f"Prerequisite event '{constraint.event_type}' not found"
+                return GuardrailResult(
+                    passed=False,
+                    guardrail_id=DependencyGuardrail.GUARDRAIL_ID,
+                    reason=reason,
+                )
 
         return GuardrailResult(passed=True, guardrail_id=DependencyGuardrail.GUARDRAIL_ID, reason="")
+
+    @staticmethod
+    def _matches_payload(payload: dict[str, Any], filter_: dict[str, Any]) -> bool:
+        """Check that all filter key-value pairs are present (and match) in payload."""
+        return all(payload.get(k) == v for k, v in filter_.items())
+
+    @staticmethod
+    def _resolve_constraints(tool_def: ToolDefinition, config: dict[str, Any]) -> list[DependencyConstraint]:
+        """Return constraints from tool_def.depends_on (preferred) or legacy config."""
+        if tool_def.depends_on:
+            return tool_def.depends_on
+        required = config.get("required_events", [])
+        return [DependencyConstraint(event_type=ev) for ev in required]
 
 
 # ── GuardrailRunner (V0.4: async, store-aware) ────────────────────
@@ -246,7 +295,14 @@ class DependencyGuardrail:
 
 class GuardrailRunner:
     def __init__(self, custom_guardrails: dict[str, type] | None = None, store=None):
-        self._registry: dict[str, type] = custom_guardrails.copy() if custom_guardrails else {}
+        self._registry: dict[str, type] = {
+            "destructive": DestructiveOpGuardrail,
+            "scope": ScopeGuardrail,
+            "rate_limit": RateLimitGuardrail,
+            "dependency": DependencyGuardrail,
+        }
+        if custom_guardrails:
+            self._registry.update(custom_guardrails)
         self._store = store
 
     def register(self, guardrail_type: str, guardrail_cls: type):
@@ -254,16 +310,35 @@ class GuardrailRunner:
 
     async def run(self, tool_def: ToolDefinition, input: dict, *, run_id: str | None = None) -> list[GuardrailResult]:
         results: list[GuardrailResult] = []
+        _t0 = time.monotonic()
 
+        _t1 = time.monotonic()
         schema_result = SchemaGuardrail.check(tool_def, input)
+        _ms1 = (time.monotonic() - _t1) * 1000
+        _log_guard.debug("  schema → %s (%dms)", "pass" if schema_result.passed else "FAIL", _ms1)
         results.append(schema_result)
         if not schema_result.passed:
+            _log_guard.warning("Blocked by schema guardrail: %s (%.1fms)", schema_result.reason,
+                               (time.monotonic() - _t0) * 1000)
             return results
+
+        # Auto-check depends_on — always runs if declared, regardless of guardrails list
+        dep_result = await self._auto_check_depends_on(tool_def, input, run_id=run_id)
+        if dep_result is not None:
+            _ms_dep = (time.monotonic() - _t0) * 1000
+            _log_guard.info("  depends_on → %s%s (%dms)",
+                            "pass" if dep_result.passed else "FAIL",
+                            f" — {dep_result.reason}" if not dep_result.passed else "",
+                            _ms_dep)
+            results.append(dep_result)
+            if not dep_result.passed:
+                return results
 
         if tool_def.guardrails:
             for gr in tool_def.guardrails:
                 guardrail_cls = self._registry.get(gr.guardrail_type)
                 if guardrail_cls is None:
+                    _log_guard.warning("Unknown guardrail type '%s', blocking execution", gr.guardrail_type)
                     results.append(
                         GuardrailResult(
                             passed=False,
@@ -275,13 +350,33 @@ class GuardrailRunner:
 
                 instance = guardrail_cls(store=self._store) if self._store else guardrail_cls()
 
+                _t_gr = time.monotonic()
                 if asyncio.iscoroutinefunction(instance.check):
                     result = await instance.check(tool_def, input, gr.config, run_id=run_id)
                 else:
                     result = instance.check(tool_def, input, gr.config)
+                _ms_gr = (time.monotonic() - _t_gr) * 1000
 
+                detail = ""
+                if not result.passed:
+                    detail = f" — {result.reason}"
+                elif result.triggers_confirmation:
+                    detail = " (triggers confirmation)"
+                _log_guard.info("  %s → %s%s (%dms)",
+                                gr.guardrail_type, "pass" if result.passed else "FAIL",
+                                detail, _ms_gr)
                 results.append(result)
                 if not result.passed:
                     return results
 
+        _log_guard.info("All %d guardrails passed (%.1fms)", len(results), (time.monotonic() - _t0) * 1000)
         return results
+
+    async def _auto_check_depends_on(
+        self, tool_def: ToolDefinition, input: dict, *, run_id: str | None = None
+    ) -> GuardrailResult | None:
+        """Run DependencyGuardrail if tool_def.depends_on is declared, without needing guardrails list entry."""
+        if not tool_def.depends_on:
+            return None
+        dep = DependencyGuardrail(store=self._store)
+        return await dep.check(tool_def, input, {}, run_id=run_id)

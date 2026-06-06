@@ -9,7 +9,12 @@ from typing import Any
 
 import aiosqlite
 
+from harness.core.logger import guard_logger
 from harness.models.events import PAYLOAD_MODEL_MAP, Event, EventType
+
+_log_write = guard_logger("store.write")
+_log_query = guard_logger("store.query")
+_log_idem = guard_logger("store.idem")
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS events (
@@ -67,8 +72,6 @@ class EventStore:
     def __init__(self, db_path: str = ":memory:") -> None:
         self.db_path = db_path
         self._conn: aiosqlite.Connection | None = None
-        # 写入后回调列表：每次新事件成功入库后，依次调用所有注册的回调
-        # EventStore 不关心谁在听、为什么听——这是受信组件的边界原则
         self._post_append: list[Callable[[Event], Awaitable[None]]] = []
 
     async def __aenter__(self) -> EventStore:
@@ -96,11 +99,6 @@ class EventStore:
             self._conn = None
 
     def on_append(self, callback: Callable[[Event], Awaitable[None]]) -> None:
-        """注册事件写入后的通知回调。
-
-        每次 append_event 成功写入一条新事件（非幂等缓存命中）后，
-        会依次调用所有已注册的 callback(event)。常用于 WebSocket 广播。
-        """
         self._post_append.append(callback)
 
     @property
@@ -120,23 +118,22 @@ class EventStore:
         idempotency_key: str | None = None,
         max_retries: int = 3,
     ) -> Event:
-        """Append a new event to the store.
-
-        Validates payload against the Pydantic model for the event type,
-        auto-computes the next seq, and enforces idempotency via unique index.
-
-        Retries on PRIMARY KEY (run_id, seq) conflicts (up to max_retries),
-        re-computing latest seq each attempt.
-        """
+        """Append a new event to the store."""
+        _t0 = time.monotonic()
         _validate_payload(event_type, payload)
 
         if idempotency_key is not None:
             existing = await self.find_by_idempotency_key(run_id, event_type, idempotency_key)
             if existing is not None:
+                _log_idem.info("Idempotency cache hit: %s @ seq=%d (run=%s)",
+                               event_type.value, existing.seq, run_id)
                 return existing
 
         last_error: Exception | None = None
         for attempt in range(max_retries + 1):
+            if attempt > 0:
+                _log_write.warning("Append retry %d/%d for run=%s event_type=%s: %s",
+                                   attempt, max_retries, run_id, event_type.value, last_error)
             next_seq = await self.get_latest_seq(run_id) + 1
             created_at = time.time()
 
@@ -160,7 +157,9 @@ class EventStore:
                     idempotency_key=idempotency_key,
                     created_at=created_at,
                 )
-                # 通知外部监听者（如 WebSocket 广播），EventStore 不感知谁在听
+                _ms = (time.monotonic() - _t0) * 1000
+                _log_write.info("Written event @ seq=%d: %s (run=%s, %dms)",
+                             next_seq, event_type.value, run_id, _ms)
                 for cb in self._post_append:
                     await cb(event)
                 return event
@@ -184,11 +183,14 @@ class EventStore:
 
     async def get_events(self, run_id: str) -> list[Event]:
         """Return all events for a run, ordered by seq."""
+        _start = time.monotonic()
         cursor = await self.conn.execute(
             "SELECT * FROM events WHERE run_id = ? ORDER BY seq ASC",
             (run_id,),
         )
         rows = await cursor.fetchall()
+        _ms = (time.monotonic() - _start) * 1000
+        _log_query.debug("get_events(run=%s): %d rows, %dms", run_id, len(rows), _ms)
         return [_row_to_event(dict(r)) for r in rows]
 
     async def get_event_range(
@@ -198,6 +200,7 @@ class EventStore:
         to_seq: int | None = None,
     ) -> list[Event]:
         """Return events in [from_seq, to_seq] range (inclusive)."""
+        _t0 = time.monotonic()
         if to_seq is not None:
             cursor = await self.conn.execute(
                 "SELECT * FROM events WHERE run_id = ? AND seq >= ? AND seq <= ? ORDER BY seq ASC",
@@ -209,18 +212,23 @@ class EventStore:
                 (run_id, from_seq),
             )
         rows = await cursor.fetchall()
+        _ms = (time.monotonic() - _t0) * 1000
+        _log_query.debug("get_event_range(run=%s, from=%s): %d rows, %dms",
+                         run_id, from_seq, len(rows), _ms)
         return [_row_to_event(dict(r)) for r in rows]
 
     async def get_latest_seq(self, run_id: str) -> int:
         """Return the highest seq for a run, or 0 if no events exist."""
+        _t0 = time.monotonic()
         cursor = await self.conn.execute(
             "SELECT MAX(seq) AS max_seq FROM events WHERE run_id = ?",
             (run_id,),
         )
         row = await cursor.fetchone()
-        if row is None or row["max_seq"] is None:
-            return 0
-        return row["max_seq"]
+        _ms = (time.monotonic() - _t0) * 1000
+        result = row["max_seq"] if row is not None and row["max_seq"] is not None else 0
+        _log_query.debug("get_latest_seq(run=%s): %d, %dms", run_id, result, _ms)
+        return result
 
     async def event_count(self, run_id: str) -> int:
         """Return the total number of events for a run."""
@@ -239,13 +247,19 @@ class EventStore:
         event_type: EventType,
         idempotency_key: str,
     ) -> Event | None:
+        _t0 = time.monotonic()
         cursor = await self.conn.execute(
             "SELECT * FROM events WHERE run_id = ? AND event_type = ? AND idempotency_key = ?",
             (run_id, event_type.value, idempotency_key),
         )
         row = await cursor.fetchone()
+        _ms = (time.monotonic() - _t0) * 1000
         if row is None:
+            _log_idem.debug("IK lookup miss: run=%s type=%s ik=%.16s (%dms)",
+                            run_id, event_type.value, idempotency_key, _ms)
             return None
+        _log_idem.debug("IK lookup hit: run=%s type=%s ik=%.16s seq=%d (%dms)",
+                        run_id, event_type.value, idempotency_key, row["seq"], _ms)
         return _row_to_event(dict(row))
 
     async def list_runs(
@@ -253,6 +267,7 @@ class EventStore:
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
+        _t0 = time.monotonic()
         cursor = await self.conn.execute(
             """
             SELECT run_id, MIN(seq) AS seq, MIN(created_at) AS created_at,
@@ -266,37 +281,56 @@ class EventStore:
             (limit, offset),
         )
         rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
+        _ms = (time.monotonic() - _t0) * 1000
+        result = [dict(r) for r in rows]
+        _log_query.debug("list_runs(limit=%d, offset=%d): %d rows, %dms",
+                         limit, offset, len(result), _ms)
+        return result
 
     async def total_run_count(self) -> int:
+        _t0 = time.monotonic()
         cursor = await self.conn.execute(
             "SELECT COUNT(DISTINCT run_id) AS cnt FROM events"
         )
         row = await cursor.fetchone()
-        return row["cnt"] if row else 0
+        _ms = (time.monotonic() - _t0) * 1000
+        result = row["cnt"] if row else 0
+        _log_query.debug("total_run_count: %d, %dms", result, _ms)
+        return result
 
     async def get_events_for_runs(self, run_ids: list[str]) -> list[Event]:
         if not run_ids:
             return []
+        _t0 = time.monotonic()
         placeholders = ",".join("?" * len(run_ids))
         cursor = await self.conn.execute(
             f"SELECT * FROM events WHERE run_id IN ({placeholders}) ORDER BY run_id, seq ASC",
             run_ids,
         )
         rows = await cursor.fetchall()
-        return [_row_to_event(dict(r)) for r in rows]
+        _ms = (time.monotonic() - _t0) * 1000
+        result = [_row_to_event(dict(r)) for r in rows]
+        _log_query.debug("get_events_for_runs(%d runs): %d rows, %dms",
+                         len(run_ids), len(result), _ms)
+        return result
 
     async def find_confirmation_by_id(self, run_id: str, confirmation_id: str) -> Event | None:
+        _t0 = time.monotonic()
         cursor = await self.conn.execute(
             "SELECT * FROM events WHERE run_id = ? AND event_type = ?",
             (run_id, EventType.CONFIRMATION_RECEIVED.value),
         )
         rows = await cursor.fetchall()
+        _ms = (time.monotonic() - _t0) * 1000
         for row in rows:
             event = _row_to_event(dict(row))
             payload = json.loads(row["payload"])
             if payload.get("confirmation_id") == confirmation_id:
+                _log_query.debug("find_confirmation(run=%s, id=%s): hit, %dms",
+                                 run_id, confirmation_id, _ms)
                 return event
+        _log_query.debug("find_confirmation(run=%s, id=%s): miss, %dms",
+                         run_id, confirmation_id, _ms)
         return None
 
 

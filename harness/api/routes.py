@@ -7,6 +7,7 @@ for frontend type generation.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections import defaultdict
 
@@ -14,6 +15,9 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
 from harness.api.deps import HarnessAPI, get_hapi
+from harness.core.logger import guard_logger
+
+_log = guard_logger("serve")
 from harness.api.schemas import (
     ConfirmRequest,
     CreateRunRequest,
@@ -79,13 +83,16 @@ async def create_run(body: CreateRunRequest, api: HarnessAPI = Depends(get_hapi)
     API 响应不等待 Scheduler 完成——循环运行在 asyncio.Task 中。
     """
     run_id = str(uuid.uuid4())[:8]
+    _log.info("Creating run — intent: %.120s", body.intent)
+    _t0 = time.monotonic()
     await api.store.append_event(
         run_id,
         EventType.RUN_STARTED,
         RunStartedPayload(intent=body.intent).model_dump(),
     )
-    # 拉起后台循环：Scheduler 在 asyncio.Task 中运行，不阻塞返回
     await api.start_run(run_id, body.intent)
+    _ms = (time.monotonic() - _t0) * 1000
+    _log.info("Run %s started in %dms", run_id, _ms)
     return {"run_id": run_id}
 
 

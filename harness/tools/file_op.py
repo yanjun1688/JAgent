@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from harness.models.tools import SideEffect, ToolDefinition
+from harness.models.tools import Guardrail, SideEffect, ToolDefinition
 
 _SANDBOX_BASE: Path | None = None
 
@@ -56,6 +56,10 @@ FILE_OP_DEF = ToolDefinition(
     },
     idempotency_key_fields=["operation", "path", "content"],
     side_effects=[SideEffect.WRITE, SideEffect.DELETE],
+    guardrails=[
+        Guardrail(guardrail_type="destructive", config={}),
+        Guardrail(guardrail_type="scope", config={}),
+    ],
     timeout_ms=30000,
 )
 

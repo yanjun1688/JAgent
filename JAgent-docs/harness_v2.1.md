@@ -223,8 +223,14 @@ class ContextManager:
 │  └─ 输出格式化（符合业务系统的数据格式）  │
 ├─────────────────────────────────────────┤
 │  多租户隔离层（Multi-tenancy）           │  ← 新增，V1.0
-│  ├─ 用户角色与权限（RBAC）               │
-│  ├─ 用户记忆隔离（每个用户独立语义记忆）  │
+│  ├─ 用户角色与权限（RBAC / ToolACL）     │
+│  ├─ 数据隔离（Event Store 多租户）       │
+│  │  ├─ 表加 `tenant_id` 列，查询自动过滤  │
+│  │  ├─ 拆分 Reader/Writer 接口：         │
+│  │  │  ├─ Writer：完整 EventStore（受信组件）│
+│  │  │  └─ Reader：只读 ScopedEventStore   │
+│  │  └─ API 层注入当前租户上下文           │
+│  ├─ 用户记忆隔离（每用户独立语义记忆）    │
 │  └─ 资源配额（token 预算、并发限制）      │
 ├─────────────────────────────────────────┤
 │  你的现有架构（MVP→V0.5）               │
@@ -347,7 +353,46 @@ class OrderSkill(Skill):
 
 ---
 
-## 总结：你的问题优先级建议
+## 5. 声明式事件前置条件（`depends_on`）——V0.6+ 强化
+
+### 概念
+
+工具可以声明"我需要哪些事件已经发生"，系统在 `GuardrailRunner` 中自动校验——**不依赖 Agent 配合，不写在工具代码里**。
+
+### 模型
+
+```python
+class DependencyConstraint(BaseModel):
+    event_type: str                    # 必须存在的事件类型（匹配 EventType.value）
+    payload_filter: dict[str, Any]     # 可选：过滤 payload 字段
+    message: str = ""                  # 检查失败时的提示
+
+class ToolDefinition(BaseModel):
+    ...
+    depends_on: list[DependencyConstraint] = []
+```
+
+### 执行链路
+
+```
+GuardrailRunner.run()
+  ├─ SchemaGuardrail                     ✅ 硬编码
+  ├─ _auto_check_depends_on()            ✅ 新增，自动运行
+  │    └─ DependencyGuardrail.check()
+  │         └─ 读 tool_def.depends_on
+  │              └─ 扫描 Event Store 匹配 (event_type + payload_filter)
+  └─ tool_def.guardrails[]               ✅ 已有路径
+```
+
+- **两条路径并存**：`depends_on`（推荐，类型安全）和 `config["required_events"]`（向后兼容）
+- `depends_on` 非空时，`required_events` 被忽略
+
+### 设计原则
+
+1. **声明式**：工具注册时一次性声明依赖，零运行时检查代码
+2. **基于事件溯源**：唯一可信状态 = 事件流，不维护独立状态表
+3. **受信组件强制**：`GuardrailRunner` 自动执行，Agent 无法绕过/感知
+4. **与编排工具正交**：`orchestrate` 的 `depends_on=[RunStarted]` 只在入口检查一次，内部步骤由 Orchestrator 代码保证顺序
 
 | 你的想法 | 建议优先级 | 实现位置 | 关键决策 |
 |----------|-----------|----------|----------|

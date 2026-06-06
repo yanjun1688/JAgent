@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from harness.models.tools import SideEffect, ToolDefinition
+from harness.models.tools import Guardrail, SideEffect, ToolDefinition
 
 CLIENT = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
 
@@ -51,8 +51,9 @@ HTTP_REQUEST_DEF = ToolDefinition(
             "elapsed_ms": {"type": "integer"},
         },
     },
-    idempotency_key_fields=["url", "method", "body"],
+    idempotency_key_fields=["url", "method", "headers", "body"],
     side_effects=[SideEffect.EXTERNAL],
+    guardrails=[Guardrail(guardrail_type="scope", config={})],
     timeout_ms=60000,
 )
 

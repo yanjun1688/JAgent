@@ -12,6 +12,7 @@ from harness import (
     ToolDefinition,
     ToolExecutor,
 )
+from harness.models.tools import DependencyConstraint
 from harness.tools.guardrails import (
     DependencyGuardrail,
     DestructiveOpGuardrail,
@@ -45,7 +46,7 @@ class TestScopeGuardrail:
         config = {"allowed_directories": ["/home/user/sandbox"]}
         result = ScopeGuardrail.check(td, {"operation": "read", "path": "/etc/passwd"}, config)
         assert not result.passed
-        assert "outside allowed directories" in result.reason
+        assert result.reason.startswith("Path")
 
     def test_allows_inside_directory(self):
         td = _make_tool(name="file_op")
@@ -216,6 +217,80 @@ class TestDependencyGuardrail:
         td = _make_tool(name="some_tool")
         result = await g.check(td, {}, {"required_events": ["RunStarted"]})
         assert result.passed
+
+    # ── depends_on path (V2.1+) ────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_depends_on_missing_event_blocks(self, store):
+        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}})
+        g = DependencyGuardrail(store=store)
+        td = _make_tool(
+            name="plan_tool",
+            depends_on=[DependencyConstraint(event_type="OrchestrationStarted")],
+        )
+        result = await g.check(td, {}, {}, run_id="run-1")
+        assert not result.passed
+        assert "OrchestrationStarted" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_depends_on_all_exist_passes(self, store):
+        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}})
+        g = DependencyGuardrail(store=store)
+        td = _make_tool(
+            name="plan_tool",
+            depends_on=[DependencyConstraint(event_type="RunStarted")],
+        )
+        result = await g.check(td, {}, {}, run_id="run-1")
+        assert result.passed
+
+    @pytest.mark.asyncio
+    async def test_depends_on_payload_filter(self, store):
+        await store.append_event("run-1", EventType.STEP_COMPLETED, {"plan_id": "p-1", "step_index": 0, "tool_call_id": "tc-1", "output": {}})
+        g = DependencyGuardrail(store=store)
+        td = _make_tool(
+            name="step_tool",
+            depends_on=[
+                DependencyConstraint(
+                    event_type="StepCompleted",
+                    payload_filter={"step_index": 0},
+                    message="Step 0 must be completed first",
+                ),
+            ],
+        )
+        result = await g.check(td, {}, {}, run_id="run-1")
+        assert result.passed
+
+    @pytest.mark.asyncio
+    async def test_depends_on_payload_filter_mismatch_blocks(self, store):
+        await store.append_event("run-1", EventType.STEP_COMPLETED, {"plan_id": "p-1", "step_index": 0, "tool_call_id": "tc-1", "output": {}})
+        g = DependencyGuardrail(store=store)
+        td = _make_tool(
+            name="step_tool",
+            depends_on=[
+                DependencyConstraint(
+                    event_type="StepCompleted",
+                    payload_filter={"step_index": 1},
+                    message="Step 1 must be completed first",
+                ),
+            ],
+        )
+        result = await g.check(td, {}, {}, run_id="run-1")
+        assert not result.passed
+        assert "Step 1" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_depends_on_takes_precedence_over_required_events(self, store):
+        g = DependencyGuardrail(store=store)
+        td = _make_tool(
+            name="prefer_depends_on",
+            depends_on=[DependencyConstraint(event_type="RunStarted")],
+        )
+        # Even though required_events says StepCompleted, depends_on takes precedence
+        result = await g.check(td, {}, {"required_events": ["StepCompleted"]}, run_id="run-1")
+        assert not result.passed
+        assert "RunStarted" in result.reason
+        # Verify required_events was NOT consulted (StepCompleted should not be in reason)
+        assert "StepCompleted" not in result.reason
 
 
 # ── GuardrailRunner async + mixed guardrails ──────────────────────

@@ -6,6 +6,7 @@ import pytest
 
 from harness import (
     AgentLoopScheduler,
+    ContextManager,
     EventStore,
     EventType,
     MockAgentKernel,
@@ -17,6 +18,7 @@ from harness import (
     ToolDefinition,
     ToolExecutor,
 )
+from harness.monitoring.run_monitor import RunMonitor
 
 
 @pytest.fixture
@@ -575,3 +577,42 @@ async def test_guardrail_blocked_counts_toward_circuit_breaker(store: EventStore
     state = await scheduler.run("run-1", "Guardrail test")
     assert state.status == RunStatus.FAILED
     assert "Circuit breaker" in (state.last_error or "")
+
+
+# ── 3.x Scheduler + Monitor + ContextManager integration ──────
+
+
+class TestSchedulerWithFullWiring:
+    """Verify scheduler runs correctly when monitor AND context_manager are wired."""
+
+    @pytest.mark.asyncio
+    async def test_scheduler_with_monitor_and_context_manager(self, store: EventStore):
+        cm = ContextManager(store, token_limit=1000, compression_threshold_ratio=0.5, checkpoint_interval=2)
+        monitor = RunMonitor(store, max_tokens=100, token_warning_ratio=0.5)
+        monitor.attach()
+
+        def dummy_fn(input):
+            return {"ok": True}
+
+        tool_def = ToolDefinition(
+            name="dummy", description="", idempotency_key_fields=[],
+            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(),
+        )
+        kernel = MockAgentKernel([
+            ThinkResult(thought="call tool", tool_name="dummy", tool_input={}, token_count=5),
+            ThinkResult(thought="call tool again", tool_name="dummy", tool_input={}, token_count=5),
+            ThinkResult(thought="done"),
+        ])
+        executor = ToolExecutor(store)
+        scheduler = AgentLoopScheduler(
+            store=store, executor=executor, kernel=kernel,
+            tool_defs=[tool_def], tool_fns={"dummy": dummy_fn},
+            config=SchedulerConfig(max_iterations=5),
+            context_manager=cm, monitor=monitor,
+        )
+
+        state = await scheduler.run("run-wired", "test full wiring")
+        assert state.status == RunStatus.COMPLETED
+
+        events = await store.get_events("run-wired")
+        assert any(e.event_type == EventType.CONTEXT_CHECKPOINTED for e in events)

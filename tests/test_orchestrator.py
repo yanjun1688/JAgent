@@ -20,11 +20,14 @@ from harness import (
     ToolExecutor,
     ToolRegistry,
 )
+from harness.tools.guardrails import DestructiveOpGuardrail
 from harness.models.events import (
     ConfirmationReceivedPayload,
+    ConfirmationRequestedPayload,
     OrchestrationCompletedPayload,
     OrchestrationFailedPayload,
     OrchestrationStartedPayload,
+    RunResumedPayload,
     StepCompletedPayload,
     StepFailedPayload,
 )
@@ -401,3 +404,70 @@ class TestOrchestratorEventIntegrity:
         assert len(state.orchestration_history) == 1
         assert state.orchestration_history[0]["intent"] == "no regression"
         assert state.orchestration_history[0]["status"] == "completed"
+
+
+# ── Orchestrator + Guardrails ────────────────────────────────
+
+
+class TestOrchestratorGuardrails:
+    """Orchestrator should respect guardrails defined on tools."""
+
+    @pytest.mark.asyncio
+    async def test_destructive_guardrail_blocks_in_orchestrator(self, orch_store):
+        """Orchestrator steps with destructive guardrail triggers confirmation.
+        The orchestrator pauses on CONFIRMATION_NEEDED; after operator confirms,
+        the step completes and the plan continues.
+        """
+        registry = ToolRegistry()
+        registry.register(
+            _make_tool(
+                name="file_op",
+                input_schema={
+                    "type": "object",
+                    "properties": {"operation": {"type": "string"}, "path": {"type": "string"}},
+                    "required": ["operation", "path"],
+                },
+                idempotency_key_fields=["operation", "path"],
+                side_effects=[SideEffect.DELETE],
+                guardrails=[Guardrail(guardrail_type="destructive", config={})],
+            ),
+            _noop_fn,
+        )
+
+        runner = GuardrailRunner({"destructive": DestructiveOpGuardrail}, store=orch_store)
+        executor = ToolExecutor(orch_store, guardrail_runner=runner)
+        orch = Orchestrator(orch_store, executor, registry, max_steps=10)
+
+        execute_task = asyncio.create_task(orch.execute("run-gr1", {
+            "intent": "delete file",
+            "steps": [{"tool": "file_op", "input": {"operation": "delete", "path": "/tmp/x"}}],
+        }))
+
+        await asyncio.sleep(0.3)
+
+        events = await orch_store.get_events("run-gr1")
+        assert any(e.event_type == EventType.CONFIRMATION_REQUESTED for e in events)
+
+        cf = None
+        for e in events:
+            if e.event_type == EventType.CONFIRMATION_REQUESTED:
+                cf = ConfirmationRequestedPayload.model_validate(e.payload)
+                break
+        assert cf is not None
+
+        await orch_store.append_event(
+            "run-gr1",
+            EventType.CONFIRMATION_RECEIVED,
+            ConfirmationReceivedPayload(
+                confirmation_id=cf.confirmation_id, confirmed=True, operator_id="op-test",
+            ).model_dump(),
+        )
+        await orch_store.append_event(
+            "run-gr1",
+            EventType.RUN_RESUMED,
+            RunResumedPayload(resume_from_seq=5).model_dump(),
+        )
+
+        result = await asyncio.wait_for(execute_task, timeout=5.0)
+        assert result["status"] == "completed"
+        assert result["completed_steps"] == 1

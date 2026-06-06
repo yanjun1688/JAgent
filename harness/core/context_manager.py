@@ -8,10 +8,11 @@ Agent is never aware of compression — it is pure infrastructure behavior.
 from __future__ import annotations
 
 import json
-import logging
+import time
 
 from harness.core.fold import RunState
 from harness.core.llm_client import LLMClient
+from harness.core.logger import guard_logger
 from harness.models.events import (
     ContextCheckpointedPayload,
     ContextCompressedPayload,
@@ -20,7 +21,9 @@ from harness.models.events import (
     EventType,
 )
 
-_logger = logging.getLogger(__name__)
+_log_monitor = guard_logger("context.monitor")
+_log_compress = guard_logger("context.compress")
+_log_checkpoint = guard_logger("context.checkpoint")
 
 _SUMMARY_PROMPT = (
     'You are a context compression system. Summarize the following agent activity log. '
@@ -70,9 +73,14 @@ class ContextManager:
         """
         estimate = precomputed_estimate if precomputed_estimate is not None else self._estimate_context_tokens(state)
         if estimate < self.compression_threshold:
+            _log_monitor.debug("~%d tokens < %d threshold, skipping compression", estimate, self.compression_threshold)
             return None
 
         if estimate < self.emergency_threshold:
+            _log_compress.info("~%d tokens exceeds %d threshold → normal compression "
+                               "(keep %d recent, compress %d thoughts + %d results)",
+                               estimate, self.compression_threshold, 2,
+                               len(state.thought_history), len(state.tool_results))
             return {
                 "compress_thoughts": state.thought_history,
                 "compress_results": state.tool_results,
@@ -81,16 +89,16 @@ class ContextManager:
 
         mid = len(state.thought_history) // 2
         if mid < 1:
+            _log_compress.info("~%d tokens exceeds emergency threshold → normal compression (mid<1)", estimate)
             return {
                 "compress_thoughts": state.thought_history,
                 "compress_results": state.tool_results,
                 "keep_count": 2,
             }
 
-        _logger.info(
-            "Emergency compression for %s: compressing oldest %d thoughts, keeping recent 3 rounds",
-            state.run_id, mid,
-        )
+        _log_compress.info("~%d tokens exceeds %d emergency threshold → emergency compression "
+                           "(compress oldest %d, keep %d recent)",
+                           estimate, self.emergency_threshold, mid, 3)
         return {
             "compress_thoughts": state.thought_history[:mid],
             "compress_results": state.tool_results[:mid],
@@ -107,16 +115,15 @@ class ContextManager:
         on the next iteration when fold_events sets state.summary from the event.
         """
         estimate = self._estimate_context_tokens(state)
+        _log_monitor.debug("Token estimate: ~%d tokens (threshold: %d)", estimate, self.compression_threshold)
         if estimate < self.compression_threshold:
             return
 
         last = self._last_compressed_iteration.get(run_id, 0)
         cooldown = self.checkpoint_interval
         if last > 0 and iteration - last < cooldown:
-            _logger.debug(
-                "Skipping compress for %s (iteration %d, last %d, cooldown %d)",
-                run_id, iteration, last, cooldown,
-            )
+            _log_monitor.debug("Skipping: last compression at iter %d (cooldown %d, current iter %d)",
+                               last, cooldown, iteration)
             return
         self._last_compressed_iteration[run_id] = iteration
 
@@ -124,19 +131,30 @@ class ContextManager:
         if window is None:
             return
 
-        _logger.info(
-            "Context compression triggered for %s: ~%d tokens (threshold %d)",
-            run_id, estimate, self.compression_threshold,
-        )
+        _log_compress.info("Compressing context at iteration %d (~%d tokens)", iteration, estimate)
 
+        compress_thoughts = window["compress_thoughts"]
+        compress_results = window["compress_results"]
+
+        thought_seqs = [t.seq for t in compress_thoughts if hasattr(t, "seq")]
+        result_seqs = [tr.event_seq for tr in compress_results if hasattr(tr, "event_seq")]
+        all_seqs = sorted(set(thought_seqs + result_seqs))
+        episode_range = (all_seqs[0], all_seqs[-1]) if all_seqs else (0, 0)
+        original_event_refs = all_seqs
+
+        _t_gen = time.monotonic()
         summary = await self._generate_summary(
             state,
-            compress_thoughts=window["compress_thoughts"],
-            compress_results=window["compress_results"],
+            episode_range=episode_range,
+            original_event_refs=original_event_refs,
+            original_tokens=estimate,
+            compress_thoughts=compress_thoughts,
+            compress_results=compress_results,
         )
-        summary_tokens = self._estimate_text_tokens(
-            summary if isinstance(summary, str) else summary.model_dump_json()
-        )
+        _gen_ms = (time.monotonic() - _t_gen) * 1000
+        summary_tokens = self._estimate_text_tokens(summary.model_dump_json())
+        _log_compress.info("Compressed: %d → %d tokens (%dms, keep=%d recent)",
+                           estimate, summary_tokens, _gen_ms, window["keep_count"])
 
         await self.store.append_event(
             run_id,
@@ -156,6 +174,7 @@ class ContextManager:
 
         token_count = self._estimate_context_tokens(state)
 
+        _log_checkpoint.info("Checkpoint at iter %d: seq=%d, ~%d tokens", iteration, state.seq, token_count)
         await self.store.append_event(
             run_id,
             EventType.CONTEXT_CHECKPOINTED,
@@ -205,20 +224,24 @@ class ContextManager:
     async def _generate_summary(
         self,
         state: RunState,
+        episode_range: tuple[int, int] = (0, 0),
+        original_event_refs: list[int] | None = None,
+        original_tokens: int = 0,
         compress_thoughts: list | None = None,
         compress_results: list | None = None,
-    ) -> EpisodeSummary | str:
+    ) -> EpisodeSummary:
         """Call LLM to generate a compressed summary of activity.
 
-        With LLM: asks for JSON output matching EpisodeSummary content fields,
-        returns a fully populated EpisodeSummary (non-content fields filled by caller).
-        Without LLM: returns a plain-text concatenation as fallback.
+        Returns an EpisodeSummary with full fields:
+          - Content fields (key_decisions, tools_used, ...) populated by LLM
+          - Metadata fields (episode_range, original_tokens, ...) passed in by caller
 
-        The optional compress_thoughts/compress_results parameters limit which
-        events are summarized (used by emergency compression).
+        Without LLM: content fields are empty, raw text stored in current_plan.
+        LLM non-JSON response: similarly degraded to current_plan.
         """
         thoughts = compress_thoughts if compress_thoughts is not None else state.thought_history
         results = compress_results if compress_results is not None else state.tool_results
+        refs = sorted(original_event_refs) if original_event_refs else []
 
         activity_lines = []
         for t in thoughts:
@@ -230,9 +253,19 @@ class ContextManager:
         activity_text = "\n".join(activity_lines)
 
         if self.llm_client is None:
-            if len(activity_text) <= 2000:
-                return activity_text or "No activity recorded."
-            return activity_text[:1000] + "\n...(truncated)...\n" + activity_text[-1000:]
+            if len(activity_text) > 2000:
+                activity_text = activity_text[:1000] + "\n...(truncated)...\n" + activity_text[-1000:]
+            return EpisodeSummary(
+                episode_range=episode_range,
+                original_tokens=original_tokens,
+                compressed_tokens=self._estimate_text_tokens(activity_text),
+                key_decisions=[],
+                tools_used=list(dict.fromkeys(tr.tool_name for tr in results)) if results else [],
+                key_findings=[],
+                errors_encountered=[str(tr.error) for tr in results if tr.error] if results else [],
+                current_plan=activity_text or None,
+                original_event_refs=refs,
+            )
 
         response = await self.llm_client.chat(
             [
@@ -245,19 +278,30 @@ class ContextManager:
 
         try:
             data = json.loads(response)
-            # NOTE: episode_range and original_event_refs are placeholders
-            # (not yet populated by caller). They are defined in the model for
-            # future traceability but not relied on by any consumer today.
-            return EpisodeSummary(
-                episode_range=(0, 0),
-                original_tokens=0,
-                compressed_tokens=0,
-                key_decisions=data.get("key_decisions", []),
-                tools_used=data.get("tools_used", []),
-                key_findings=data.get("key_findings", []),
-                errors_encountered=data.get("errors_encountered", []),
-                current_plan=data.get("current_plan"),
-                original_event_refs=[],
-            )
         except (json.JSONDecodeError, TypeError, ValueError):
-            return response.strip()
+            data = None
+
+        if data is None:
+            return EpisodeSummary(
+                episode_range=episode_range,
+                original_tokens=original_tokens,
+                compressed_tokens=self._estimate_text_tokens(response.strip()),
+                key_decisions=[],
+                tools_used=list(dict.fromkeys(tr.tool_name for tr in results)) if results else [],
+                key_findings=[],
+                errors_encountered=[],
+                current_plan=response.strip(),
+                original_event_refs=refs,
+            )
+
+        return EpisodeSummary(
+            episode_range=episode_range,
+            original_tokens=original_tokens,
+            compressed_tokens=self._estimate_text_tokens(response),
+            key_decisions=data.get("key_decisions", []),
+            tools_used=data.get("tools_used", []),
+            key_findings=data.get("key_findings", []),
+            errors_encountered=data.get("errors_encountered", []),
+            current_plan=data.get("current_plan"),
+            original_event_refs=refs,
+        )

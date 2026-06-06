@@ -50,6 +50,7 @@ class HarnessAPI:
         self.tool_defs: list[ToolDefinition] = []
         self.tool_fns: dict[str, Callable] = {}
         self.context_manager = None  # V0.5: ContextManager 实例，由 serve.py 注入
+        self.monitor = None  # RunMonitor 实例，由 serve.py 注入
         self.scheduler_config: SchedulerConfig | None = None  # Scheduler 配置，默认 max_iterations=50
 
     def wire_broadcast(self) -> None:
@@ -79,8 +80,9 @@ class HarnessAPI:
             kernel=self.kernel_factory(),
             tool_defs=self.tool_defs,
             tool_fns=self.tool_fns,
-            config=self.scheduler_config,  # 可选：自定义 max_iterations 等
-            context_manager=self.context_manager,  # V0.5: 自动上下文压缩
+            config=self.scheduler_config,
+            context_manager=self.context_manager,
+            monitor=self.monitor,
         )
         self.register_scheduler(run_id, scheduler)
         asyncio.create_task(scheduler.run(run_id, intent))
