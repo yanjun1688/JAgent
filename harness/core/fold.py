@@ -46,6 +46,14 @@ class ToolResultStatus(str, Enum):
 
 
 @dataclass
+class ThoughtEntry:
+    seq: int
+    thought: str
+    tool_choice: str | None = None
+    token_count: int = 0
+
+
+@dataclass
 class ToolResult:
     tool_call_id: str
     tool_name: str
@@ -54,6 +62,7 @@ class ToolResult:
     error: str | None = None
     duration_ms: int = 0
     idempotency_key: str | None = None
+    event_seq: int = 0
 
 
 @dataclass
@@ -63,8 +72,8 @@ class RunState:
     seq: int = 0
     intent: str = ""
     context_snapshot: dict = field(default_factory=dict)
-    thought_history: list[AgentThoughtPayload] = field(default_factory=list)
-    latest_thought: AgentThoughtPayload | None = None
+    thought_history: list[ThoughtEntry] = field(default_factory=list)
+    latest_thought: ThoughtEntry | None = None
     tool_calls: list[ToolCalledPayload] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)
     last_error: str | None = None
@@ -104,8 +113,13 @@ def fold_events(events: list[Event]) -> RunState:
 
             case EventType.AGENT_THOUGHT:
                 p = AgentThoughtPayload(**event.payload)
-                state.thought_history.append(p)
-                state.latest_thought = p
+                state.thought_history.append(ThoughtEntry(
+                    seq=event.seq,
+                    thought=p.thought,
+                    tool_choice=p.tool_choice,
+                    token_count=p.token_count,
+                ))
+                state.latest_thought = state.thought_history[-1]
 
             case EventType.TOOL_CALLED:
                 p = ToolCalledPayload(**event.payload)
@@ -120,6 +134,7 @@ def fold_events(events: list[Event]) -> RunState:
                         status=ToolResultStatus.COMPLETED,
                         output=p.output,
                         duration_ms=p.duration_ms,
+                        event_seq=event.seq,
                     )
                 )
 
@@ -131,6 +146,7 @@ def fold_events(events: list[Event]) -> RunState:
                         tool_name=p.tool_name,
                         status=ToolResultStatus.FAILED,
                         error=p.error,
+                        event_seq=event.seq,
                     )
                 )
                 state.last_error = p.error
@@ -143,6 +159,7 @@ def fold_events(events: list[Event]) -> RunState:
                         tool_name=p.tool_name,
                         status=ToolResultStatus.TIMEOUT,
                         error=f"Timeout after {p.timeout_ms}ms",
+                        event_seq=event.seq,
                     )
                 )
                 state.last_error = f"Tool '{p.tool_name}' timed out"
@@ -155,6 +172,7 @@ def fold_events(events: list[Event]) -> RunState:
                         tool_name=p.tool_name,
                         status=ToolResultStatus.GUARDRAIL_BLOCKED,
                         error=f"Guardrail '{p.guardrail_id}': {p.reason}",
+                        event_seq=event.seq,
                     )
                 )
 

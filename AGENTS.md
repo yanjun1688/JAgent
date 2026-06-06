@@ -3,8 +3,8 @@
 > **版本**: v2.1
 > **适用范围**: Harness Agent-First 任务执行引擎全栈开发
 > **角色定位**: Agent 导师（Architecture Mentor）
-> **基础架构文档**: `JAgent-docs/harness_v2.1.md`
-> **路线图文档**: `docs/TODO_v2.1.md`
+> **基础架构文档**: `D:\Project\JAgent\JAgent-docs`
+> **路线图文档**: `D:\Project\JAgent\JAgent-docs`
 
 ---
 
@@ -126,10 +126,10 @@ Harness 的核心范式不是"工作流"，而是 **状态流转的 Agent + 不�
 
 ```
 Step 1: 三对齐审查
-  ├─ 读取 TODO_v2.1.md 中当前层的规格描述
-  ├─ 读取实际代码，确认实现与 TODO_v2.1.md 一致
-  ├─ 读取 JAgent-docs/harness_v2.1.md 架构方案，确认实现与架构一致
-  └─ 标记所有差异点（TODO_v2.1.md vs 代码 vs 架构文档）
+  ├─ 读取 D:\Project\JAgent\JAgent-docs当前层的规格描述
+  ├─ 读取实际代码，确认实现与D:\Project\JAgent\JAgent-docs里的Todo 一致
+  ├─ 读取D:\Project\JAgent\JAgent-docs架构方案，确认实现与架构一致
+  └─ 标记所有差异点（TODO文档vs 代码 vs 架构文档）
 
 Step 2: 报告差异
   ├─ 向用户列出所有差异点
@@ -137,7 +137,7 @@ Step 2: 报告差异
   └─ 等待用户确认后再进入下一步
 
 Step 3: 修正文档
-  ├─ 根据用户确认，修正 TODO_v2.1.md、AGENTS.md 或架构文档
+  ├─ 根据用户确认，修正 D:\Project\JAgent\JAgent-docs、AGENTS.md 或架构文档
   ├─ 确保三份文档互相一致
   └─ 文档修正完成后再次审查确认
 
@@ -147,10 +147,10 @@ Step 4: 开发实现
 ```
 
 **审查重点**:
-- TODO_v2.1.md 的验收检查清单是否全部标记通过？代码是否真的实现了每一项？
+- D:\Project\JAgent\JAgent-docs的验收检查清单是否全部标记通过？代码是否真的实现了每一项？
 - 架构文档的受信边界约束在代码中是否得到遵守？
-- 有无超前实现（代码写了但 TODO_v2.1.md 和架构文档中不在当前阶段的内容）？
-- 有无遗漏实现（TODO_v2.1.md 勾选了但代码不完整）？
+- 有无超前实现（代码写了但 D:\Project\JAgent\JAgent-docs 和架构文档中不在当前阶段的内容）？
+- 有无遗漏实现（D:\Project\JAgent\JAgent-docs 勾选了但代码不完整）？
 
 ---
 
@@ -162,6 +162,7 @@ Step 4: 开发实现
 - **系统强制写入**: 每个 think/act/observe 的产物由 Scheduler 和 Tool Layer 自动写入，不依赖 Agent 主动调用
 - **全局有序**: 复合主键 `(run_id, sequence_number)`，seq 严格递增不可跳过
 - **可折叠**: 任意时刻状态 = `fold(events[0..t])`，无需维护独立状态表
+- **折叠保留 seq**: fold 时 `AgentThoughtPayload` 转为 `ThoughtEntry(seq, thought, tool_choice, token_count)` 存入 `state.thought_history`；`ToolResult` 记录 `event_seq`，确保压缩时可追溯原始事件序列
 
 ### 4.2 事件类型清单
 

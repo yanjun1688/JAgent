@@ -18,6 +18,15 @@ node_modules/
 .vscode/
 .idea/
 
+# Environment
+.env
+
+# Runtime / Temp
+harness/.sandbox_tmp/
+harness/tools/fanghu.txt
+harness/tools/xx.py
+harness/tools/r*.txt
+
 # OS
 *.DS_Store
 Thumbs.db

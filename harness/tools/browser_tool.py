@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from harness.models.tools import SideEffect, ToolDefinition
+from harness.models.tools import Guardrail, SideEffect, ToolDefinition
 
 BROWSER_DEF = ToolDefinition(
     name="browser",
@@ -47,6 +47,7 @@ BROWSER_DEF = ToolDefinition(
     },
     idempotency_key_fields=["action", "url", "selector", "value"],
     side_effects=[SideEffect.EXTERNAL],
+    guardrails=[Guardrail(guardrail_type="scope", config={})],
     timeout_ms=60000,
 )
 
@@ -96,7 +97,12 @@ class BrowserManager:
 
         from playwright.async_api import async_playwright
         p = await async_playwright().start()
-        self._browser = await p.chromium.launch(headless=True)
+        try:
+            self._browser = await asyncio.wait_for(
+                p.chromium.launch(headless=True), timeout=15.0
+            )
+        except (asyncio.TimeoutError, NotImplementedError, Exception) as e:
+            raise RuntimeError(f"Playwright init failed: {type(e).__name__}: {e}")
         self._context = await self._browser.new_context()
         self._page = await self._context.new_page()
         return self._page
@@ -195,7 +201,5 @@ async def browser_fn(input: dict[str, Any]) -> dict[str, Any]:
 
             case _:
                 return {"success": False, "error": f"Unknown action: {action}"}
-    except asyncio.TimeoutError:
-        return {"success": False, "error": f"Browser action '{action}' timed out after {timeout_ms}ms"}
     except Exception as exc:
-        return {"success": False, "error": f"Browser action '{action}' failed: {exc}"}
+        return {"success": False, "error": f"Browser action '{action}' failed: {type(exc).__name__}: {exc}"}

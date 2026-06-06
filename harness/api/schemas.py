@@ -4,6 +4,8 @@ All response models define the OpenAPI schema shapes consumed by the frontend.
 Every publicly readable field has an explicit type — no bare dicts crossing the API boundary.
 """
 
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -45,7 +47,7 @@ class RunDetailResponse(BaseModel):
     seq: int
     event_count: int
     last_error: str | None = None
-    summary: str | None = None
+    summary: Any = None
     pause_reason: str | None = None
     pending_confirmations: list[PendingConfirmationItem] = []
 

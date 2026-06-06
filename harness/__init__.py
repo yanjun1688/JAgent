@@ -1,7 +1,7 @@
 from harness.core.agent_kernel import LLMAgentKernel, MockAgentKernel
 from harness.core.context_manager import ContextManager
-from harness.core.fold import RunState, RunStatus, ToolResult, ToolResultStatus, fold_events
-from harness.core.llm_client import LLMClient, MockLLMClient
+from harness.core.fold import RunState, RunStatus, ThoughtEntry, ToolResult, ToolResultStatus, fold_events
+from harness.core.llm_client import LLMClient, MockLLMClient, OpenAILLMClient
 from harness.core.orchestrator import ORCHESTRATE_DEF, Orchestrator, PlanGuardrail, make_orchestrate_fn
 from harness.core.scheduler import AgentKernel, AgentLoopScheduler, SchedulerConfig, ThinkResult
 from harness.models.events import (
@@ -134,6 +134,7 @@ __all__ = [
     # Core
     "RunState",
     "RunStatus",
+    "ThoughtEntry",
     "ToolResult",
     "ToolResultStatus",
     "fold_events",
@@ -143,6 +144,7 @@ __all__ = [
     "SchedulerConfig",
     "LLMClient",
     "MockLLMClient",
+    "OpenAILLMClient",
     "MockAgentKernel",
     "LLMAgentKernel",
     # V0.4+

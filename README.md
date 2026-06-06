@@ -234,7 +234,7 @@ asyncio.run(main())
 uvicorn harness.api.serve:app --reload --port 8000
 
 # 终端 2: 启动前端
-cd frontend && npm run dev   # http://localhost:3000
+cd frontend && npm run dev   # http://localhost:5173
 
 # 创建 run 观察事件自动流转
 curl -X POST http://localhost:8000/api/v1/runs \
@@ -242,7 +242,7 @@ curl -X POST http://localhost:8000/api/v1/runs \
   -d '{"intent":"echo count to 3"}'
 ```
 
-打开 `http://localhost:3000` → 点击 Run ID 进入详情 → F12 控制台观察 WebSocket 实时推送：
+打开 `http://localhost:5173` → 点击 Run ID 进入详情 → F12 控制台观察 WebSocket 实时推送：
 
 ```
 [WS] #1 RunStarted {intent: "echo count to 3"}

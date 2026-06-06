@@ -17,6 +17,9 @@ from harness.tools import (
     set_sandbox_root,
 )
 from harness.tools.skill import Skill
+from harness.tools.executor import ToolExecutor, current_run_id
+from harness.storage.event_store import EventStore
+from harness.models.events import EventType
 
 # ── ToolRegistry ──────────────────────────────────────────────────
 
@@ -133,7 +136,7 @@ class TestToolRegistry:
 class TestHttpRequestDefinition:
     def test_definition_fields(self):
         assert HTTP_REQUEST_DEF.name == "http_request"
-        assert HTTP_REQUEST_DEF.idempotency_key_fields == ["url", "method", "body"]
+        assert HTTP_REQUEST_DEF.idempotency_key_fields == ["url", "method", "headers", "body"]
         assert SideEffect.EXTERNAL in HTTP_REQUEST_DEF.side_effects
         assert HTTP_REQUEST_DEF.timeout_ms == 60000
 
@@ -286,6 +289,108 @@ class TestSkill:
         import asyncio
         result = asyncio.run(fn({"query": "opencode"}))
         assert result["result"]["data"] == "Found: opencode"
+
+
+# ── Skill with Executor wiring ────────────────────────────────────
+
+
+class TestSkillWithExecutor:
+    @pytest.mark.asyncio
+    async def test_executor_wired_skill_records_events(self, store):
+        def search_step(ctx, tool_fns):
+            search_fn = tool_fns.get("search")
+            if search_fn:
+                return search_fn({"q": ctx["input"]["query"]})
+            return {"data": "mock"}
+
+        skill = Skill(
+            name="research",
+            description="Research a topic",
+            input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
+            steps=[search_step],
+        )
+
+        executor = ToolExecutor(store)
+        search_td = ToolDefinition(
+            name="search", description="Search",
+            idempotency_key_fields=["q"],
+            side_effects=[],
+            input_schema={"type": "object", "properties": {"q": {"type": "string"}}},
+        )
+
+        def tool_defs_provider():
+            return [search_td]
+
+        search_fn_calls = []
+
+        async def search_fn(input):
+            search_fn_calls.append(input)
+            return {"data": f"Found: {input['q']}"}
+
+        fn = skill.build_fn(
+            lambda: {"search": search_fn},
+            executor=executor,
+            tool_defs_provider=tool_defs_provider,
+        )
+
+        store2 = store
+        run_id = "skill-exec-test"
+        await store2.append_event(run_id, EventType.RUN_STARTED, {"intent": "test"})
+
+        token = current_run_id.set(run_id)
+        try:
+            result = await fn({"query": "opencode"})
+        finally:
+            current_run_id.reset(token)
+
+        assert result["result"]["data"] == "Found: opencode"
+        assert len(search_fn_calls) == 1
+
+        events = await store2.get_events(run_id)
+        event_types = [e.event_type for e in events]
+        assert EventType.TOOL_CALLED in event_types
+        assert EventType.TOOL_COMPLETED in event_types
+
+    @pytest.mark.asyncio
+    async def test_executor_wired_skill_fallback_no_run_id(self):
+        """Without a run_id context, executor-wired skill calls tool_fn directly."""
+        def noop_step(ctx, tool_fns):
+            fn = tool_fns.get("echo")
+            return fn({"msg": "hello"}) if fn else {}
+
+        skill = Skill(
+            name="noop_skill",
+            description="Noop",
+            input_schema={"type": "object", "properties": {"x": {"type": "string"}}},
+            steps=[noop_step],
+        )
+
+        store = EventStore(":memory:")
+        await store.initialize()
+        executor = ToolExecutor(store)
+        echo_td = ToolDefinition(
+            name="echo", description="Echo",
+            idempotency_key_fields=["msg"],
+            side_effects=[],
+        )
+
+        echo_calls = []
+
+        async def echo_fn(input):
+            echo_calls.append(input)
+            return {"echo": input}
+
+        fn = skill.build_fn(
+            lambda: {"echo": echo_fn},
+            executor=executor,
+            tool_defs_provider=lambda: [echo_td],
+        )
+
+        result = await fn({"x": "test"})
+
+        assert result["result"]["echo"]["msg"] == "hello"
+        assert len(echo_calls) == 1
+        await store.close()
 
 
 # ── ToolRegistry + real tool defs integration ─────────────────────

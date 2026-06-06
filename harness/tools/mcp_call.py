@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from harness.models.tools import SideEffect, ToolDefinition
+from harness.models.tools import Guardrail, SideEffect, ToolDefinition
 
 MCP_CALL_DEF = ToolDefinition(
     name="mcp_call",
@@ -36,6 +36,7 @@ MCP_CALL_DEF = ToolDefinition(
     },
     idempotency_key_fields=["server_name", "tool_name", "arguments"],
     side_effects=[SideEffect.EXTERNAL],
+    guardrails=[Guardrail(guardrail_type="scope", config={})],
     timeout_ms=60000,
 )
 

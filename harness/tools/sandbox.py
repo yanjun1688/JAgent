@@ -22,6 +22,13 @@ class Sandbox:
         *,
         timeout_ms: int = 30000,
     ) -> Any:
+        """Execute a tool function with timeout control.
+
+        NOTE: This is a PUBLIC method accessible to all components.
+        Trusted callers should route through ToolExecutor.execute() to get
+        guardrails, idempotency, event recording, and confirmation support.
+        Direct use of Sandbox.invoke() bypasses all trust boundary protections.
+        """
         call = tool_fn(input)
         if asyncio.iscoroutine(call):
             return await asyncio.wait_for(call, timeout=timeout_ms / 1000.0)

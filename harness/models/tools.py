@@ -14,6 +14,12 @@ class SideEffect(str, Enum):
     EXTERNAL = "external"
 
 
+class DependencyConstraint(BaseModel):
+    """Declarative dependency: require a specific event type (with optional payload filter) to exist."""
+    event_type: str
+    payload_filter: dict[str, Any] = Field(default_factory=dict)
+    message: str = ""
+
 class Guardrail(BaseModel):
     guardrail_type: str
     config: dict[str, Any] = Field(default_factory=dict)
@@ -36,3 +42,4 @@ class ToolDefinition(BaseModel):
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
     guardrails: list[Guardrail] | None = None
     requires_confirmation: bool = False
+    depends_on: list[DependencyConstraint] = []

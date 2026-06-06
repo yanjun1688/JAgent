@@ -11,13 +11,15 @@ The Agent never knows about the monitoring mechanism — feedback appears like
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
+from harness.core.logger import monitor_logger
 from harness.models.events import Event, EventType, FeedbackInjectedPayload
 from harness.storage.event_store import EventStore
 
-_logger = logging.getLogger(__name__)
+_log_observe = monitor_logger("monitor.observe")
+_log_anomaly = monitor_logger("monitor.anomaly")
+_log_inject = monitor_logger("monitor.inject")
 
 
 class RunMonitor:
@@ -43,28 +45,33 @@ class RunMonitor:
         self._token_warning_sent: set[str] = set()
         self._failure_feedback_sent: set[str] = set()
 
+        self._pending_calls: dict[str, dict[str, tuple[str, int]]] = {}
+        self._last_sig: dict[str, tuple[str, int, int] | None] = {}
+        self._repeated_call_count: dict[str, int] = {}
+        self._stuck_feedback_sent: dict[str, int] = {}
+
     def attach(self) -> None:
         """Register this monitor as an EventStore on_append listener."""
+        _log_observe.info("Monitor attached")
         self.store.on_append(self._on_event)
 
     async def _on_event(self, event: Event) -> None:
-        """Real-time event handler — called synchronously on each event append.
-
-        Must never throw: any exception propagates back through EventStore.append_event
-        and would corrupt the original event write. All failures are logged and swallowed.
-        """
+        """Real-time event handler — called synchronously on each event append."""
         try:
             await self._on_event_impl(event)
         except Exception:
-            _logger.exception("RunMonitor._on_event failed for %s (event=%s)", event.run_id, event.event_type)
+            _log_observe.exception("Monitor handler crashed for %s event", event.event_type)
 
     async def _on_event_impl(self, event: Event) -> None:
         rid = event.run_id
+        _log_observe.debug("Event: seq=%d type=%s", event.seq, event.event_type.value)
 
         if event.event_type == EventType.TOOL_FAILED:
             count = self._consecutive_failures.get(rid, 0) + 1
             self._consecutive_failures[rid] = count
             if count >= 3 and rid not in self._failure_feedback_sent:
+                _log_anomaly.warning("Anomaly: %d consecutive tool failures (threshold=3), injecting high-priority feedback",
+                                     count)
                 self._failure_feedback_sent.add(rid)
                 await self._inject_feedback(
                     rid,
@@ -73,14 +80,55 @@ class RunMonitor:
                     "Consider checking input parameters or terminating the task.",
                 )
 
-        elif event.event_type in (EventType.TOOL_COMPLETED, EventType.TOOL_TIMEOUT):
+        elif event.event_type == EventType.TOOL_CALLED:
+            tc_id = event.payload.get("tool_call_id", "")
+            t_name = event.payload.get("tool_name", "")
+            inp_hash = hash(str(event.payload.get("input", {})))
+            self._pending_calls.setdefault(rid, {})[tc_id] = (t_name, inp_hash)
+
+        elif event.event_type == EventType.TOOL_COMPLETED:
+            was = self._consecutive_failures.get(rid, 0)
             self._consecutive_failures[rid] = 0
             self._failure_feedback_sent.discard(rid)
+            if was > 0:
+                _log_anomaly.info("Failure streak reset (was %d)", was)
+
+            tc_id = event.payload.get("tool_call_id", "")
+            tc_info = self._pending_calls.get(rid, {}).pop(tc_id, None)
+            if tc_info is not None:
+                tool_name, inp_hash = tc_info
+                out_hash = hash(str(event.payload.get("output")))
+                new_sig = (tool_name, inp_hash, out_hash)
+                last_sig = self._last_sig.get(rid)
+                if new_sig == last_sig:
+                    self._repeated_call_count[rid] = self._repeated_call_count.get(rid, 0) + 1
+                else:
+                    self._repeated_call_count[rid] = 0
+                    self._last_sig[rid] = new_sig
+                    self._stuck_feedback_sent[rid] = 0
+                count = self._repeated_call_count[rid]
+                if count >= 3 and count % 3 == 0:
+                    sent_cnt = self._stuck_feedback_sent.get(rid, 0)
+                    expected = count // 3
+                    if sent_cnt < expected:
+                        self._stuck_feedback_sent[rid] = expected
+                        _log_anomaly.warning(
+                            "Anomaly: %d repeated identical tool calls (tool=%s), injecting feedback",
+                            count + 1, tool_name,
+                        )
+                        await self._inject_feedback(
+                            rid,
+                            "high",
+                            f"Warning: repeated same tool call {count + 1} times ({tool_name}). "
+                            "Consider changing strategy or terminating.",
+                        )
 
         elif event.event_type == EventType.GUARDRAIL_TRIGGERED:
             count = self._consecutive_failures.get(rid, 0) + 1
             self._consecutive_failures[rid] = count
             if count >= 3 and rid not in self._failure_feedback_sent:
+                _log_anomaly.warning("Anomaly: %d consecutive failures (incl. guardrails), injecting high-priority feedback",
+                                     count)
                 self._failure_feedback_sent.add(rid)
                 await self._inject_feedback(
                     rid,
@@ -95,7 +143,10 @@ class RunMonitor:
             tokens = max(1, int(len(thought_text) * 0.25))
             self._token_totals[rid] = self._token_totals.get(rid, 0) + tokens
             threshold = int(self.max_tokens * self.token_warning_ratio)
+            _log_anomaly.debug("Token total: ~%d (threshold: %d)", self._token_totals[rid], threshold)
             if self._token_totals[rid] > threshold and rid not in self._token_warning_sent:
+                _log_anomaly.warning("Anomaly: ~%d tokens exceeds %d (%.0f%%), injecting medium-priority feedback",
+                                     self._token_totals[rid], threshold, self.token_warning_ratio * 100)
                 self._token_warning_sent.add(rid)
                 await self._inject_feedback(
                     rid,
@@ -110,16 +161,18 @@ class RunMonitor:
         try:
             payload = FeedbackInjectedPayload(feedback_text=feedback_text, priority=priority)
             await self.store.append_event(run_id, EventType.FEEDBACK_INJECTED, payload.model_dump())
-            _logger.info(
-                "Feedback injected for %s [%s]: %.60s",
-                run_id, priority, feedback_text,
-            )
+            _log_inject.info("Injected [%s] feedback: %.60s", priority, feedback_text)
         except Exception:
-            _logger.exception("Failed to persist FeedbackInjected event for %s", run_id)
+            _log_inject.exception("Failed to inject feedback for %s", run_id)
 
     def cleanup(self, run_id: str) -> None:
         """Release per-run state when a run finishes or is cancelled."""
-        self._consecutive_failures.pop(run_id, None)
-        self._token_totals.pop(run_id, None)
+        was_fail = self._consecutive_failures.pop(run_id, None)
+        was_tokens = self._token_totals.pop(run_id, None)
+        self._pending_calls.pop(run_id, None)
+        self._last_sig.pop(run_id, None)
+        self._repeated_call_count.pop(run_id, None)
+        self._stuck_feedback_sent.pop(run_id, None)
         self._token_warning_sent.discard(run_id)
         self._failure_feedback_sent.discard(run_id)
+        _log_observe.debug("Cleaned up run %s (failures=%s, tokens=%s)", run_id, was_fail, was_tokens)

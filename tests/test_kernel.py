@@ -136,10 +136,32 @@ ARGS: {"key": "value"}"""
     assert result.tool_input == {"key": "value"}
 
 
-def test_parse_stop_with_tool_ignored():
-    result = _parse_response("THOUGHT: Done.\n<STOP>\nTOOL: ignored_tool")
+def test_parse_tool_takes_priority_over_stop():
+    # When both TOOL: and <STOP> appear, the tool call takes priority
+    result = _parse_response("THOUGHT: Done.\n<STOP>\nTOOL: my_tool")
     assert result.thought == "Done."
+    assert result.tool_name == "my_tool"
+
+    # When TOOL: appears before <STOP>, it should be honored
+    result = _parse_response("THOUGHT: Doing work.\nTOOL: work_tool\nARGS: {}\n<STOP>")
+    assert result.tool_name == "work_tool"
+
+
+def test_parse_answer():
+    result = _parse_response("ANSWER: 我是你的 AI 助手。")
     assert result.tool_name is None
+    assert result.direct_answer == "我是你的 AI 助手。"
+
+def test_parse_answer_with_stop():
+    result = _parse_response("ANSWER: Hello!\n<STOP>")
+    assert result.tool_name is None
+    assert result.direct_answer == "Hello!"
+
+def test_parse_answer_takes_priority():
+    # ANSWER: should take priority even if TOOL: appears later
+    result = _parse_response("ANSWER: Hello\nTOOL: ignored_tool")
+    assert result.tool_name is None
+    assert result.direct_answer == "Hello"
 
 
 # ── 4.6 Parse fault tolerance ────────────────────────────────

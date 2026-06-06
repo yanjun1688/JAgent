@@ -7,7 +7,9 @@ import asyncio
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from harness import MockAgentKernel, RetryPolicy, SchedulerConfig, SideEffect, ThinkResult, ToolDefinition
 from harness.api.app import HarnessAPI, app, get_hapi
+from harness.monitoring.run_monitor import RunMonitor
 from harness.models.events import (
     AgentThoughtPayload,
     EventType,
@@ -248,3 +250,54 @@ class TestCORS:
         assert resp.status_code in (200, 405)  # OPTIONS may return 405 with cors headers
         has_cors = any(k.startswith("access-control-allow") for k in resp.headers)
         assert has_cors or True  # CORS middleware adds headers on all responses
+
+
+# ── Full wiring fixture: HarnessAPI with kernel, tools, monitor ─────
+
+
+class TestHarnessAPIFullWiring:
+    @pytest.fixture
+    async def full_api(self):
+        store = EventStore(":memory:")
+        await store.initialize()
+        executor = ToolExecutor(store)
+        hapi = HarnessAPI(store=store, executor=executor)
+        hapi.kernel_factory = lambda: MockAgentKernel([
+            ThinkResult(thought="done"),
+        ])
+        hapi.tool_defs = [
+            ToolDefinition(
+                name="echo", description="echo",
+                input_schema={}, idempotency_key_fields=[],
+                side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(),
+            ),
+        ]
+        hapi.tool_fns = {"echo": lambda x: {"ok": True}}
+        hapi.scheduler_config = SchedulerConfig(max_iterations=3)
+        hapi.monitor = RunMonitor(store)
+        hapi.monitor.attach()
+        hapi.wire_broadcast()
+        app.dependency_overrides[get_hapi] = lambda: hapi
+        yield hapi, store
+        app.dependency_overrides.clear()
+        await store.close()
+
+    @pytest.fixture
+    def full_client(self, full_api):
+        return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+    async def test_create_run_starts_scheduler(self, full_client, full_api):
+        """create_run with kernel_factory set actually starts a scheduler."""
+        resp = await full_client.post("/api/v1/runs", json={"intent": "full wiring test"})
+        assert resp.status_code == 200
+        data = resp.json()
+        run_id = data["run_id"]
+
+        import asyncio
+        await asyncio.sleep(1.0)
+
+        hapi, store = full_api
+        events = await store.get_events(run_id)
+        event_types = [e.event_type for e in events]
+        assert EventType.RUN_STARTED in event_types
+        assert EventType.RUN_COMPLETED in event_types
