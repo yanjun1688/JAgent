@@ -19,77 +19,75 @@ from typing import TYPE_CHECKING, Callable
 
 from fastapi import WebSocket
 
-from harness.core.scheduler import AgentLoopScheduler, SchedulerConfig
+from harness.core.scheduler import PlanningExecutorScheduler, SchedulerConfig
 
 if TYPE_CHECKING:
-    from harness.core.scheduler import AgentKernel
+    from harness.core.llm_client import LLMClient
     from harness.models.events import Event
     from harness.models.tools import ToolDefinition
     from harness.storage.event_store import EventStore
     from harness.tools.executor import ToolExecutor
+    from harness.tools.registry import ToolRegistry
 
 
 class HarnessAPI:
-    """依赖容器：持有 store/executor/scheduler 注册表/WS 客户端/kernel 工厂/工具配置。
+    """依赖容器：持有 store/executor/scheduler 注册表/WS 客户端/工具配置。
 
     装配流程（serve.py 调用）：
       1. 创建 HarnessAPI(store, executor)
-      2. 设置 kernel_factory / tool_defs / tool_fns
+      2. 设置 tool_defs / tool_fns / llm_client / registry
       3. wire_broadcast() 自动注册 EventStore 写入回调 → WS 推送
-      4. create_run 端点调 start_run() → 拉起 Scheduler 后台循环
+      4. create_run 端点调 start_run() → 拉起 V0.7 PlanningExecutorScheduler
     """
 
     def __init__(self, store: EventStore, executor: ToolExecutor | None = None):
         self.store = store
         self.executor = executor
-        self._schedulers: dict[str, AgentLoopScheduler] = {}
+        self._schedulers: dict[str, PlanningExecutorScheduler] = {}
         self._ws_clients: dict[str, list[WebSocket]] = {}
 
         # ── 运行时装配字段（serve.py 设置） ──────────────────────
-        self.kernel_factory: Callable[[], AgentKernel] | None = None
         self.tool_defs: list[ToolDefinition] = []
         self.tool_fns: dict[str, Callable] = {}
-        self.context_manager = None  # V0.5: ContextManager 实例，由 serve.py 注入
-        self.monitor = None  # RunMonitor 实例，由 serve.py 注入
-        self.scheduler_config: SchedulerConfig | None = None  # Scheduler 配置，默认 max_iterations=50
+        self.llm_client: LLMClient | None = None
+        self.registry: ToolRegistry | None = None
+        self.context_manager = None
+        self.monitor = None
+        self.scheduler_config: SchedulerConfig | None = None
 
     def wire_broadcast(self) -> None:
-        """订阅 Event Store 写入通知 → 自动推送给 WebSocket 客户端。
-
-        每次 append_event 写入一条新事件后，broadcast_event() 会被自动调用。
-        EventStore 不感知 WebSocket —— 它只提供回调注册，粘合由 HarnessAPI 完成。
-        """
+        """订阅 Event Store 写入通知 → 自动推送给 WebSocket 客户端。"""
         async def _on_event(event: Event) -> None:
             await self.broadcast_event(event.run_id, event.model_dump_json())
         self.store.on_append(_on_event)
 
     async def start_run(self, run_id: str, intent: str) -> None:
-        """创建 Scheduler 并在后台启动 think→act→observe 循环。
+        """创建 PlanningExecutorScheduler 并在后台启动 plan→execute→revise 循环。
 
         create_run 写入 RunStarted 事件后立即调用此方法。
         Scheduler 以 asyncio.Task 运行在后台，不阻塞 API 响应。
-        V0.5+：如果设置了 context_manager，自动注入 Scheduler 以实现
-        压缩和检查点。
         """
-        if self.kernel_factory is None:
-            return  # 无 kernel 配置，跳过（测试场景或无 LLM 环境）
+        if self.llm_client is None or self.registry is None:
+            return
 
-        scheduler = AgentLoopScheduler(
-            store=self.store,
-            executor=self.executor,
-            kernel=self.kernel_factory(),
-            tool_defs=self.tool_defs,
-            tool_fns=self.tool_fns,
+        from harness.core.dag_executor import DagExecutor
+        from harness.core.planner import Planner
+
+        planner = Planner(self.llm_client, self.registry, self.store, max_plan_retries=2)
+        dag = DagExecutor(self.executor, self.store, self.registry)
+        scheduler = PlanningExecutorScheduler(
+            store=self.store, executor=self.executor,
+            planner=planner, dag_executor=dag,
+            tool_defs=self.tool_defs, tool_fns=self.tool_fns,
             config=self.scheduler_config,
-            context_manager=self.context_manager,
-            monitor=self.monitor,
+            context_manager=self.context_manager, monitor=self.monitor,
         )
         self.register_scheduler(run_id, scheduler)
         asyncio.create_task(scheduler.run(run_id, intent))
 
     # ── Scheduler 注册 ───────────────────────────────────────
 
-    def register_scheduler(self, run_id: str, scheduler: AgentLoopScheduler) -> None:
+    def register_scheduler(self, run_id: str, scheduler: PlanningExecutorScheduler) -> None:
         self._schedulers[run_id] = scheduler
 
     def unregister_scheduler(self, run_id: str) -> None:

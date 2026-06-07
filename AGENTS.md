@@ -441,6 +441,7 @@ Tool Layer 执行流程:
 | **V0.5** | 2 周 | 长流程稳定性 | Context Manager 自动压缩 + 滚动摘要 + 断点续传 | ✅ |
 | **V0.5+** | 1 周 | 记忆压缩优化 | EpisodeSummary 结构化摘要 + 紧急压缩策略 | ✅ |
 | **V0.6** | 2 周 | 监控与反馈 | RunMonitor + FeedbackInjected + Scheduler System Prompt 注入 | ✅ |
+| **V0.7** | 2 周 | Planner-Executor + DAG | Planner（JSON Plan 生成）+ DagExecutor（拓扑并行）+ 风险管理（重试/摘要化/状态注入/危险组合）| 🔜 |
 | **V1.0** | 3 周 | 生产就绪 | 分层记忆 + 分布式 Worker + 权限 + 业务适配 | 🔜 |
 
 ### 11.2 MVP 验收标准
@@ -498,6 +499,11 @@ Step 6: 提醒校验与测试 → 引用 8.3 校验清单和 7. 测试规范
 - [ ] `DestructiveOpGuardrail` 触发的 `triggers_confirmation` 是否被 `ToolExecutor` 的 step 5 消费？
 - [ ] `RateLimitGuardrail` 的类级别 `_call_history` 是否需要 `reset()` 清理？（如测试之间）
 - [ ] 三对齐审查是否完成（TODO_v2.1.md vs 代码 vs 架构文档）？
+- [ ] DAG Plan 的 JSON Schema 是否与 PlanGuardrail 校验逻辑一致？
+- [ ] fold 白名单分级是否正确（不可 fold / 摘要化 / 可跳过）？
+- [ ] DagExecutor 的 `upstream_selectors` 路径提取是否覆盖了嵌套字段？
+- [ ] 系统状态注入文本是否标记了 `【系统状态 - 不可折叠】`？
+- [ ] Planner 重试失败后能否正确降级到旧串行路径？
 
 ---
 

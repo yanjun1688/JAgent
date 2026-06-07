@@ -37,7 +37,7 @@ HTTP_REQUEST_DEF = ToolDefinition(
             "max_response_bytes": {
                 "type": "integer",
                 "description": "Maximum response body size in bytes (0 = unlimited)",
-                "default": 1_048_576,
+                "default": 65536,
             },
         },
         "required": ["url"],
@@ -64,7 +64,7 @@ async def http_request_fn(input: dict[str, Any]) -> dict[str, Any]:
     headers = input.get("headers")
     body = input.get("body")
     timeout_ms = input.get("timeout_ms", 30000)
-    max_bytes = input.get("max_response_bytes", 1_048_576)
+    max_bytes = input.get("max_response_bytes", 65536)
 
     req_kwargs: dict[str, Any] = {}
     if headers:

@@ -4,11 +4,11 @@
 
   ① create_run 端点收到请求
   ② 写入 RunStarted 事件到 Event Store
-  ③ start_run() 创建 AgentLoopScheduler 并 asyncio.create_task 启动
-  ④ Scheduler 在后台开始 think→act→observe 循环:
-       THINK   → LLMAgentKernel (Qwen) 或 MockAgentKernel
-       ACT     → ToolExecutor 执行工具（走 Guardrails + 幂等校验）
-       OBSERVE → 结果写回 Event Store
+  ③ start_run() 创建 PlanningExecutorScheduler 并 asyncio.create_task 启动
+  ④ Scheduler 在后台开始 plan→execute→revise 循环:
+       PLAN    → Planner (LLM) 生成 DAG Plan
+       EXECUTE → DagExecutor 并行执行步骤
+       REVISE  → Planner 检查结果，决定是否继续
   ⑤ RunMonitor 监听事件流 → 异常检测 → FeedbackInjected
   ⑥ Event Store 每写入一条事件，自动推给 WebSocket 客户端
   ⑦ 前端 RunDetail 页面实时收到推过来的事件
@@ -19,16 +19,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 from pathlib import Path
 
 from harness.api.app import app  # noqa: F401
 from harness.api.deps import HarnessAPI, configure_hapi
-from harness.core.agent_kernel import LLMAgentKernel, MockAgentKernel
 from harness.core.logger import guard_logger
 from harness.core.context_manager import ContextManager
-from harness.core.llm_client import OpenAILLMClient
+from harness.core.llm_client import MockLLMClient, OpenAILLMClient
 from harness.core.scheduler import SchedulerConfig, ThinkResult
 from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
 from harness.monitoring.run_monitor import RunMonitor
@@ -38,6 +39,7 @@ from harness.tools.executor import ToolExecutor
 from harness.tools.file_op import FILE_OP_DEF, file_op_fn, set_sandbox_root
 from harness.tools.http_request import HTTP_REQUEST_DEF, http_request_fn
 from harness.tools.mcp_call import MCP_CALL_DEF, mcp_call_fn
+from harness.tools.registry import ToolRegistry
 
 _logger = guard_logger("serve")
 
@@ -100,7 +102,9 @@ sandbox_root.mkdir(exist_ok=True)
 set_sandbox_root(str(sandbox_root.resolve()))
 
 
-# ── 2. 装配 Agent Kernel ────────────────────────────────────
+# ── 2. 装配工具定义 + LLM ──────────────────────────────────
+
+api = HarnessAPI(store=store, executor=executor)
 
 if USE_REAL_LLM:
     _logger.info("Real LLM mode: using %s", os.environ.get("LLM_MODEL_NAME", "?"))
@@ -109,8 +113,6 @@ if USE_REAL_LLM:
         model=os.environ.get("LLM_MODEL_NAME", "qwen3.7-max-preview"),
         base_url=os.environ.get("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
     )
-    api = HarnessAPI(store=store, executor=executor)
-    api.kernel_factory = lambda: LLMAgentKernel(client)
     api.tool_defs = [HTTP_REQUEST_DEF, FILE_OP_DEF, BROWSER_DEF, MCP_CALL_DEF]
     api.tool_fns = {
         "http_request": http_request_fn,
@@ -124,7 +126,7 @@ if USE_REAL_LLM:
     monitor.attach()
     api.monitor = monitor
 else:
-    _logger.info("Mock mode: using MockAgentKernel with echo tool")
+    _logger.info("Mock mode: MockLLMClient with echo tool")
 
     async def echo_tool(input: dict) -> dict:
         import time
@@ -141,20 +143,30 @@ else:
         retry_policy=RetryPolicy(),
     )
 
-    api = HarnessAPI(store=store, executor=executor)
-    api.kernel_factory = lambda: MockAgentKernel([
-        *[ThinkResult(thought=f"iteration_{i}", tool_name="echo", tool_input={"msg": f"msg_{i}"})
-          for i in range(105)],
-        ThinkResult(thought="All 105 iterations complete", tool_name=None),
+    client = MockLLMClient(responses=[
+        json.dumps({"steps": [
+            {"id": "s1", "tool": "echo", "input": {"msg": "hello"}, "dependencies": []},
+            {"id": "s2", "tool": "echo", "input": {"msg": "world"}, "dependencies": ["s1"]},
+        ]}),
+        json.dumps({"steps": []}),
     ])
     api.tool_defs = [echo_def]
     api.tool_fns = {"echo": echo_tool}
     api.scheduler_config = SchedulerConfig(max_iterations=150)
 
+# 注册工具到 ToolRegistry
+registry = ToolRegistry()
+for td in api.tool_defs:
+    fn = api.tool_fns.get(td.name)
+    if fn:
+        registry.register(td, fn)
+api.registry = registry
+api.llm_client = client
+
 
 # ── 3. 装配 ContextManager ─────────────────────────────────
 
-cm = ContextManager(store, llm_client=None, token_limit=1000, checkpoint_interval=10)
+cm = ContextManager(store, llm_client=None, token_limit=0, checkpoint_interval=10)
 api.context_manager = cm
 
 

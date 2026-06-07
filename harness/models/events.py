@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -22,12 +22,14 @@ class EventType(str, Enum):
     RUN_RESUMED = "RunResumed"
     RUN_COMPLETED = "RunCompleted"
     RUN_FAILED = "RunFailed"
-    ORCHESTRATION_STARTED = "OrchestrationStarted"
-    STEP_COMPLETED = "StepCompleted"
-    STEP_FAILED = "StepFailed"
-    ORCHESTRATION_COMPLETED = "OrchestrationCompleted"
-    ORCHESTRATION_FAILED = "OrchestrationFailed"
     FEEDBACK_INJECTED = "FeedbackInjected"
+    PLAN_CREATED = "PlanCreated"
+    DAG_STEP_STARTED = "DagStepStarted"
+    DAG_STEP_COMPLETED = "DagStepCompleted"
+    DAG_STEP_FAILED = "DagStepFailed"
+    PLAN_REVISED = "PlanRevised"
+    PLAN_COMPLETED = "PlanCompleted"
+    PLAN_FAILED = "PlanFailed"
 
 
 # ── Payload Models ──────────────────────────────────────────────
@@ -42,6 +44,7 @@ class AgentThoughtPayload(BaseModel):
     thought: str
     tool_choice: str | None = None
     token_count: int = 0
+    tool_calls: list[str] | None = None
 
 
 class ToolCalledPayload(BaseModel):
@@ -133,46 +136,59 @@ class RunCompletedPayload(BaseModel):
 class RunFailedPayload(BaseModel):
     final_error: str
     event_count: int
-
-
-class OrchestrationStartedPayload(BaseModel):
-    plan_id: str
-    intent: str
-    steps_summary: str
-
-
-class StepCompletedPayload(BaseModel):
-    plan_id: str
-    step_index: int
-    tool_call_id: str
-    output: Any
-
-
-class StepFailedPayload(BaseModel):
-    plan_id: str
-    step_index: int
-    tool_call_id: str
-    error: str
-
-
-class OrchestrationCompletedPayload(BaseModel):
-    plan_id: str
-    completed_steps: int
-    summary: str
-
-
-class OrchestrationFailedPayload(BaseModel):
-    plan_id: str
-    completed_steps: int
-    final_error: str
-
-
-from typing import Literal
+    result_summary: str | None = None
 
 
 class FeedbackInjectedPayload(BaseModel):
     feedback_text: str
     priority: Literal["high", "medium"] = "medium"
+
+
+class PlanCreatedPayload(BaseModel):
+    plan_id: str
+    intent: str
+    steps_summary: str
+    layer_count: int = 0
+
+
+class DagStepStartedPayload(BaseModel):
+    plan_id: str
+    step_id: str
+    tool_name: str
+    depends_on: list[str] = Field(default_factory=list)
+
+
+class DagStepCompletedPayload(BaseModel):
+    plan_id: str
+    step_id: str
+    output_summary: str = ""
+
+
+class DagStepFailedPayload(BaseModel):
+    plan_id: str
+    step_id: str
+    error: str
+    retryable: bool = False
+
+
+class PlanRevisedPayload(BaseModel):
+    plan_id: str
+    revision_reason: str
+    remaining_steps_summary: str = ""
+
+
+class PlanCompletedPayload(BaseModel):
+    plan_id: str
+    completed_steps: int
+    total_layers: int = 0
+    summary: str = ""
+
+
+class PlanFailedPayload(BaseModel):
+    plan_id: str
+    completed_steps: int
+    total_layers: int = 0
+    final_error: str
 
 
 # ── Payload model registry ─────────────────────────────────────
@@ -193,12 +209,14 @@ PAYLOAD_MODEL_MAP: dict[EventType, type[BaseModel]] = {
     EventType.RUN_RESUMED: RunResumedPayload,
     EventType.RUN_COMPLETED: RunCompletedPayload,
     EventType.RUN_FAILED: RunFailedPayload,
-    EventType.ORCHESTRATION_STARTED: OrchestrationStartedPayload,
-    EventType.STEP_COMPLETED: StepCompletedPayload,
-    EventType.STEP_FAILED: StepFailedPayload,
-    EventType.ORCHESTRATION_COMPLETED: OrchestrationCompletedPayload,
-    EventType.ORCHESTRATION_FAILED: OrchestrationFailedPayload,
     EventType.FEEDBACK_INJECTED: FeedbackInjectedPayload,
+    EventType.PLAN_CREATED: PlanCreatedPayload,
+    EventType.DAG_STEP_STARTED: DagStepStartedPayload,
+    EventType.DAG_STEP_COMPLETED: DagStepCompletedPayload,
+    EventType.DAG_STEP_FAILED: DagStepFailedPayload,
+    EventType.PLAN_REVISED: PlanRevisedPayload,
+    EventType.PLAN_COMPLETED: PlanCompletedPayload,
+    EventType.PLAN_FAILED: PlanFailedPayload,
 }
 
 

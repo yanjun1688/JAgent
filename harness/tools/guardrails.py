@@ -132,6 +132,9 @@ class RateLimitGuardrail:
         max_calls: int         — max calls allowed (default 10)
         window_seconds: int    — sliding window in seconds (default 60)
         scope: str             — "tool" (per tool name) or "run" (per run_id+tool)
+
+    Note: _call_history is a class-level dict. Call reset() between test cases
+    to prevent cross-test pollution.
     """
 
     GUARDRAIL_ID = "rate_limit"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -62,17 +63,18 @@ class EventStore:
     - PRIMARY KEY (run_id, seq) ensures global ordering per run.
     - UNIQUE INDEX on (run_id, event_type, idempotency_key) ensures idempotency.
 
-    Known MVP limitations:
-    - seq generation (get_latest_seq + 1) is not atomic; concurrent writers
-      on the same run_id may hit the PK constraint. The DB-level PRIMARY KEY
-      serves as a last-resort guard. Production should use RETURNING or a
-      sequence table.
+    seq allocation:
+    - Uses per-run_id asyncio.Lock to ensure atomic MAX(seq)+1 under concurrent
+      asyncio tasks on the same connection. Locks are cleaned up after each
+      append_event to prevent memory accumulation.
     """
 
     def __init__(self, db_path: str = ":memory:") -> None:
         self.db_path = db_path
         self._conn: aiosqlite.Connection | None = None
         self._post_append: list[Callable[[Event], Awaitable[None]]] = []
+        self._seq_locks: dict[str, asyncio.Lock] = {}
+        self._append_count: int = 0
 
     async def __aenter__(self) -> EventStore:
         await self.initialize()
@@ -116,7 +118,7 @@ class EventStore:
         payload: dict[str, Any],
         *,
         idempotency_key: str | None = None,
-        max_retries: int = 3,
+        _max_retries: int = 3,
     ) -> Event:
         """Append a new event to the store."""
         _t0 = time.monotonic()
@@ -129,57 +131,66 @@ class EventStore:
                                event_type.value, existing.seq, run_id)
                 return existing
 
-        last_error: Exception | None = None
-        for attempt in range(max_retries + 1):
-            if attempt > 0:
-                _log_write.warning("Append retry %d/%d for run=%s event_type=%s: %s",
-                                   attempt, max_retries, run_id, event_type.value, last_error)
-            next_seq = await self.get_latest_seq(run_id) + 1
-            created_at = time.time()
+        created_at = time.time()
+        payload_json = json.dumps(payload, ensure_ascii=False)
 
-            sql = (
-                "INSERT INTO events (run_id, seq, event_type, payload, idempotency_key, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)"
-            )
-            payload_json = json.dumps(payload, ensure_ascii=False)
+        sql = (
+            "INSERT INTO events (run_id, seq, event_type, payload, idempotency_key, created_at) "
+            "SELECT ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE run_id = ?), "
+            "?, ?, ?, ?"
+        )
 
-            try:
-                await self.conn.execute(
-                    sql,
-                    (run_id, next_seq, event_type.value, payload_json, idempotency_key, created_at),
-                )
-                await self.conn.commit()
-                event = Event(
-                    run_id=run_id,
-                    seq=next_seq,
-                    event_type=event_type,
-                    payload=payload,
-                    idempotency_key=idempotency_key,
-                    created_at=created_at,
-                )
-                _ms = (time.monotonic() - _t0) * 1000
-                _log_write.info("Written event @ seq=%d: %s (run=%s, %dms)",
-                             next_seq, event_type.value, run_id, _ms)
-                for cb in self._post_append:
-                    await cb(event)
-                return event
-            except sqlite3.IntegrityError as exc:
-                error_str = str(exc)
-                if "UNIQUE constraint" in error_str and "events.idempotency_key" in error_str:
-                    existing = await self.find_by_idempotency_key(run_id, event_type, idempotency_key)
-                    if existing is not None:
-                        return existing
-                    raise DuplicateIdempotencyKeyError(
-                        f"Duplicate idempotency key '{idempotency_key}' for run '{run_id}'"
+        lock = self._seq_locks.setdefault(run_id, asyncio.Lock())
+        async with lock:
+            for attempt in range(_max_retries + 1):
+                try:
+                    await self.conn.execute(
+                        sql,
+                        (run_id, run_id, event_type.value, payload_json, idempotency_key, created_at),
+                    )
+                    await self.conn.commit()
+                    break
+                except sqlite3.IntegrityError as exc:
+                    error_str = str(exc)
+                    if "UNIQUE constraint" in error_str and "events.idempotency_key" in error_str:
+                        existing = await self.find_by_idempotency_key(run_id, event_type, idempotency_key)
+                        if existing is not None:
+                            return existing
+                        raise DuplicateIdempotencyKeyError(
+                            f"Duplicate idempotency key '{idempotency_key}' for run '{run_id}'"
+                        ) from exc
+                    if attempt < _max_retries:
+                        _log_write.warning("Seq conflict on attempt %d/%d for run=%s, retrying...",
+                                           attempt + 1, _max_retries + 1, run_id)
+                        continue
+                    raise SequenceConflictError(
+                        f"PK conflict on (run_id='{run_id}', seq): {exc}"
                     ) from exc
-                if "PRIMARY KEY" in error_str or "events.run_id" in error_str.lower():
-                    last_error = exc
-                    continue
-                raise
 
-        raise SequenceConflictError(
-            f"PK conflict on (run_id='{run_id}', seq) after {max_retries} retries"
-        ) from last_error
+        self._append_count += 1
+        if self._append_count % 50 == 0:
+            stale = [rid for rid, lk in self._seq_locks.items() if not lk.locked()]
+            for rid in stale:
+                self._seq_locks.pop(rid, None)
+
+        next_seq = await self.get_latest_seq(run_id)
+        event = Event(
+            run_id=run_id,
+            seq=next_seq,
+            event_type=event_type,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            created_at=created_at,
+        )
+        _ms = (time.monotonic() - _t0) * 1000
+        _log_write.info("Written event @ seq=%d: %s (run=%s, %dms)",
+                     next_seq, event_type.value, run_id, _ms)
+        for cb in self._post_append:
+            try:
+                await cb(event)
+            except Exception as exc:
+                _log_write.error("on_append callback failed: %s", exc)
+        return event
 
     async def get_events(self, run_id: str) -> list[Event]:
         """Return all events for a run, ordered by seq."""
@@ -332,6 +343,25 @@ class EventStore:
         _log_query.debug("find_confirmation(run=%s, id=%s): miss, %dms",
                          run_id, confirmation_id, _ms)
         return None
+
+
+    # ── Read-only query helpers (for analysis/reporting) ─────────
+
+    async def execute_query(self, sql: str, params: list | tuple | None = None) -> list[dict]:
+        """Execute a read-only SELECT and return rows as dicts.
+
+        This is the sanctioned escape hatch for analysis queries that
+        are not covered by the public API.  Only SELECT is permitted —
+        the caller owns the query, EventStore provides the connection.
+        """
+        cursor = await self.conn.execute(sql, params or [])
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def execute_query_one(self, sql: str, params: list | tuple | None = None) -> dict | None:
+        """Like execute_query but returns a single row (or None)."""
+        rows = await self.execute_query(sql, params)
+        return rows[0] if rows else None
 
 
 # ── Helpers ────────────────────────────────────────────────────

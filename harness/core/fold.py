@@ -14,20 +14,22 @@ from harness.models.events import (
     EventType,
     FeedbackInjectedPayload,
     GuardrailTriggeredPayload,
-    OrchestrationCompletedPayload,
-    OrchestrationFailedPayload,
-    OrchestrationStartedPayload,
     RunCompletedPayload,
     RunFailedPayload,
     RunPausedPayload,
     RunResumedPayload,
     RunStartedPayload,
-    StepCompletedPayload,
-    StepFailedPayload,
     ToolCalledPayload,
     ToolCompletedPayload,
     ToolFailedPayload,
     ToolTimeoutPayload,
+    PlanCreatedPayload,
+    PlanCompletedPayload,
+    PlanFailedPayload,
+    PlanRevisedPayload,
+    DagStepStartedPayload,
+    DagStepCompletedPayload,
+    DagStepFailedPayload,
 )
 
 
@@ -82,9 +84,10 @@ class RunState:
     pause_reason: str | None = None
     pending_confirmations: list[ConfirmationRequestedPayload] = field(default_factory=list)
     last_checkpoint_seq: int | None = None
-    orchestration_history: list = field(default_factory=list)
-    latest_orchestration: dict | None = None
     feedbacks: list[FeedbackInjectedPayload] = field(default_factory=list)
+    plan_history: list[dict] = field(default_factory=list)
+    latest_plan: dict | None = None
+    plan_boundary_seqs: list[int] = field(default_factory=list)
 
 
 def fold_events(events: list[Event]) -> RunState:
@@ -214,37 +217,69 @@ def fold_events(events: list[Event]) -> RunState:
                 p = RunFailedPayload(**event.payload)
                 state.status = RunStatus.FAILED
                 state.last_error = p.final_error
-
-            case EventType.ORCHESTRATION_STARTED:
-                p = OrchestrationStartedPayload(**event.payload)
-                entry = {"plan_id": p.plan_id, "intent": p.intent, "steps_summary": p.steps_summary, "steps": []}
-                state.orchestration_history.append(entry)
-                state.latest_orchestration = entry
-
-            case EventType.STEP_COMPLETED:
-                p = StepCompletedPayload(**event.payload)
-                if state.latest_orchestration and state.latest_orchestration["plan_id"] == p.plan_id:
-                    state.latest_orchestration["steps"].append({"status": "completed", "step_index": p.step_index})
-
-            case EventType.STEP_FAILED:
-                p = StepFailedPayload(**event.payload)
-                if state.latest_orchestration and state.latest_orchestration["plan_id"] == p.plan_id:
-                    state.latest_orchestration["steps"].append({"status": "failed", "step_index": p.step_index, "error": p.error})
-
-            case EventType.ORCHESTRATION_COMPLETED:
-                p = OrchestrationCompletedPayload(**event.payload)
-                if state.latest_orchestration and state.latest_orchestration["plan_id"] == p.plan_id:
-                    state.latest_orchestration["status"] = "completed"
-                    state.latest_orchestration["summary"] = p.summary
-
-            case EventType.ORCHESTRATION_FAILED:
-                p = OrchestrationFailedPayload(**event.payload)
-                if state.latest_orchestration and state.latest_orchestration["plan_id"] == p.plan_id:
-                    state.latest_orchestration["status"] = "failed"
-                    state.latest_orchestration["final_error"] = p.final_error
+                if p.result_summary:
+                    state.summary = p.result_summary
 
             case EventType.FEEDBACK_INJECTED:
                 p = FeedbackInjectedPayload(**event.payload)
                 state.feedbacks.append(p)
+
+            case EventType.PLAN_CREATED:
+                p = PlanCreatedPayload(**event.payload)
+                entry = {"plan_id": p.plan_id, "intent": p.intent, "steps_summary": p.steps_summary,
+                         "layer_count": p.layer_count, "steps": []}
+                state.plan_history.append(entry)
+                state.latest_plan = entry
+
+            case EventType.DAG_STEP_STARTED:
+                p = DagStepStartedPayload(**event.payload)
+                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                    existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
+                    if existing:
+                        existing["status"] = "started"
+                        existing["tool_name"] = p.tool_name
+                    else:
+                        state.latest_plan["steps"].append({"step_id": p.step_id, "tool_name": p.tool_name, "status": "started"})
+
+            case EventType.DAG_STEP_COMPLETED:
+                p = DagStepCompletedPayload(**event.payload)
+                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                    existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
+                    if existing:
+                        existing["status"] = "completed"
+                        existing["output_summary"] = p.output_summary
+                    else:
+                        state.latest_plan["steps"].append({"step_id": p.step_id, "status": "completed",
+                                                           "output_summary": p.output_summary})
+
+            case EventType.DAG_STEP_FAILED:
+                p = DagStepFailedPayload(**event.payload)
+                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                    existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
+                    if existing:
+                        existing["status"] = "failed"
+                        existing["error"] = p.error
+                    else:
+                        state.latest_plan["steps"].append({"step_id": p.step_id, "status": "failed", "error": p.error})
+
+            case EventType.PLAN_REVISED:
+                p = PlanRevisedPayload(**event.payload)
+                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                    state.latest_plan["revision_reason"] = p.revision_reason
+                    state.latest_plan["remaining_steps_summary"] = p.remaining_steps_summary
+
+            case EventType.PLAN_COMPLETED:
+                p = PlanCompletedPayload(**event.payload)
+                state.plan_boundary_seqs.append(event.seq)
+                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                    state.latest_plan["status"] = "completed"
+                    state.latest_plan["summary"] = p.summary
+
+            case EventType.PLAN_FAILED:
+                p = PlanFailedPayload(**event.payload)
+                state.plan_boundary_seqs.append(event.seq)
+                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                    state.latest_plan["status"] = "failed"
+                    state.latest_plan["final_error"] = p.final_error
 
     return state

@@ -407,3 +407,88 @@ GuardrailRunner.run()
 2. **反馈注入实验**：在 Scheduler 的 THINK 前注入一条反馈，观察 Agent 行为变化
 
 这些可以并行推进，不影响 V0.5 的已有功能。
+
+---
+
+## 6. Planner-Executor + DAG 执行引擎（V0.7）
+
+### 架构动机
+
+当前 `AgentLoopScheduler` 的串行 think→act→observe 循环有三个核心瓶颈：
+
+1. **LLM 认知负荷过重**: 每轮 think 既要规划步骤序列，又要选择具体工具和参数
+2. **串行执行**: LLM 输出的多个工具逐一 `await`，无法利用 asyncio 并行能力
+3. **多轮失忆**: 进度状态完全依赖 LLM 上下文中的事件流折叠结果，压缩或截断后会幻觉
+
+### 架构变更
+
+```
+旧循环:                             新循环:
+                                    ┌─────────────┐
+                                    │  Planner     │ ← LLM 生成 JSON Plan
+                                    │  (非受信)     │   含 DAG 依赖关系
+                                    └──────┬──────┘
+                                           ↓ Plan
+                                    ┌─────────────┐
+think → act(串行) → observe        │  DagExecutor │ ← 拓扑排序，同层并行
+  ↑ 每轮 1 个 think                │  (受信)      │   完整 Tool Layer 安全
+  ↑ LLM 既要规划又要执行            └──────┬──────┘
+                                           ↓ Results
+                                    ┌─────────────┐
+                                    │  Planner     │ ← Revise: 继续/修/终止
+                                    │  (非受信)     │   系统注入 DAG 状态摘要
+                                    └─────────────┘
+```
+
+### 受信边界
+
+| 组件 | 受信 | 职责 | 约束方式 |
+|------|------|------|----------|
+| Planner | ❌ 非受信 | 调 LLM 生成/修订 JSON Plan | Plan 经受信组件校验后才执行 |
+| DagExecutor | ✅ 受信 | 拓扑执行、并行调度、上游结果摘要化 | 完整 Tool Layer 流程 |
+| PlanGuardrail | ✅ 受信 | Schema 校验、依赖无环、危险组合检测 | 独立于 Planner，不可绕过 |
+
+### 核心数据流
+
+```
+Planner.plan(intent, state)
+  → LLM 返回 JSON Plan
+  → PlanGuardrail 校验（工具存在 / schema / 无环 / 危险组合）
+  → 写入 PlanCreated 事件
+
+DagExecutor.execute(run_id, plan)
+  → topological_sort() 分层 [层0, 层1, ...]
+  → 逐层 asyncio.gather() 并行执行
+  → 每步写 DagStepStarted / DagStepCompleted / DagStepFailed
+  → 上游 output 通过 upstream_selectors 提取摘要后合并到下游 input
+  → 写入 PlanCompleted / PlanFailed
+
+Planner.revise(plan, results, system_state)
+  → 系统注入不可压缩 DAG 状态摘要
+  → LLM 决定: 继续（修订剩余步骤）/ 完成（写 RunCompleted）/ 终止（写 RunFailed）
+```
+
+### DAG 拓扑执行
+
+```
+         s1    s2             ← 层0: 并行
+          \   /
+           s3                 ← 层1: 等 s1+s2 完成
+          /
+         s4                   ← 层2: 等 s3 完成
+
+分层: [[s1, s2], [s3], [s4]]
+每层内 gather() 并行执行
+```
+
+### 风险管理对照
+
+| 风险 | 缓解方案 | 实现位置 |
+|------|----------|----------|
+| Plan 解析格式异常 | PlanParser 自动重试 2 次 + 降级旧串行 | `planner.py` |
+| 上游结果膨胀 | `upstream_selectors` 字段路径提取 + 截断 500 chars | `dag_executor.py` |
+| Revise 时 LLM 失忆 | 受信组件注入 `【系统状态 - 不可折叠】` 块 | `dag_executor.py` → planner |
+| 动态条件分支 | `DagPlan.dynamic: true` 退化为逐层串行 | `scheduler.py` |
+| 危险组合漏检 | PlanGuardrail 检测 `dangerous_with` | `planner.py` |
+| 并行超限 | PlanGuardrail 检测 `max_parallel` | `planner.py` |
+| 事件 fold 规则 | 按白名单分级（不可 fold / 摘要化 / 可跳过） | `fold.py` |

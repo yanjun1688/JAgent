@@ -43,3 +43,5 @@ class ToolDefinition(BaseModel):
     guardrails: list[Guardrail] | None = None
     requires_confirmation: bool = False
     depends_on: list[DependencyConstraint] = []
+    dangerous_with: list[str] = []
+    max_parallel: int = 3
