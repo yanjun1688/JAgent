@@ -212,7 +212,7 @@ class EventStore:
 | `RunResumed` | Scheduler | `resume_from_seq` |
 | `RunCompleted` | Scheduler | `result_summary` |
 | `RunFailed` | Scheduler/Tool | `final_error, event_count, result_summary` |
-| `FeedbackInjected` | RunMonitor / Operator API | `feedback_text, priority, category, affected_tool, error_type, suggestion, expires_at_seq, resolves_feedback_id` |
+| `FeedbackInjected` | RunMonitor / Operator API | `feedback_text, priority, source(monitor\|operator), category, affected_tool, error_type, error_detail, suggestion, expires_at_seq, resolves_feedback_id` |
 | **`PlanCreated`** | **V0.7** | `plan_id, intent, steps_summary, layer_count` |
 | **`DagStepStarted`** | **V0.7** | `plan_id, step_id, tool_name, depends_on` |
 | **`DagStepCompleted`** | **V0.7** | `plan_id, step_id, output_summary` |
