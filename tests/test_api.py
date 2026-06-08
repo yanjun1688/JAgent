@@ -7,8 +7,11 @@ import asyncio
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from harness import MockAgentKernel, RetryPolicy, SchedulerConfig, SideEffect, ThinkResult, ToolDefinition
+import json
+
+from harness import RetryPolicy, SchedulerConfig, SideEffect, ToolDefinition
 from harness.api.app import HarnessAPI, app, get_hapi
+from harness.core.llm_client import MockLLMClient
 from harness.monitoring.run_monitor import RunMonitor
 from harness.models.events import (
     AgentThoughtPayload,
@@ -18,6 +21,7 @@ from harness.models.events import (
 )
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ToolExecutor
+from harness.tools.registry import ToolRegistry
 
 
 @pytest.fixture
@@ -262,17 +266,22 @@ class TestHarnessAPIFullWiring:
         await store.initialize()
         executor = ToolExecutor(store)
         hapi = HarnessAPI(store=store, executor=executor)
-        hapi.kernel_factory = lambda: MockAgentKernel([
-            ThinkResult(thought="done"),
-        ])
-        hapi.tool_defs = [
-            ToolDefinition(
-                name="echo", description="echo",
-                input_schema={}, idempotency_key_fields=[],
-                side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(),
-            ),
-        ]
+
+        echo_def = ToolDefinition(
+            name="echo", description="echo",
+            input_schema={}, idempotency_key_fields=[],
+            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(),
+        )
+        hapi.tool_defs = [echo_def]
         hapi.tool_fns = {"echo": lambda x: {"ok": True}}
+
+        hapi.llm_client = MockLLMClient(responses=[
+            json.dumps({"steps": [{"id": "s1", "tool": "echo", "input": {}, "depends_on": []}]}),
+            json.dumps({"steps": []}),
+        ])
+        registry = ToolRegistry()
+        registry.register(echo_def, hapi.tool_fns["echo"])
+        hapi.registry = registry
         hapi.scheduler_config = SchedulerConfig(max_iterations=3)
         hapi.monitor = RunMonitor(store)
         hapi.monitor.attach()

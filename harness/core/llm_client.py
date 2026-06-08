@@ -117,22 +117,26 @@ class OpenAILLMClient(LLMClient):
         finish_reason = choice.get("finish_reason", "")
 
         if msg.get("tool_calls"):
-            tc = msg["tool_calls"][0]
-            fn = tc.get("function", {})
-            raw_args = fn.get("arguments", "{}")
-            try:
-                parsed = json.loads(raw_args)
-                args_str = json.dumps(parsed, ensure_ascii=False)
-            except json.JSONDecodeError:
-                args_str = raw_args
-
+            lines = []
             if content:
-                _logger.info("[LLM] → tool_call: %s(%s) [reason=%s] thought: %.200s",
-                             fn.get("name", "?"), args_str[:300], finish_reason, content)
-                return f"THOUGHT: {content}\nTOOL: {fn.get('name', '')}\nARGS: {args_str}"
-            _logger.info("[LLM] → tool_call: %s(%s) [reason=%s]",
-                         fn.get("name", "?"), args_str[:300], finish_reason)
-            return f"THOUGHT: Calling tool {fn.get('name', '')}\nTOOL: {fn.get('name', '')}\nARGS: {args_str}"
+                lines.append(f"THOUGHT: {content}")
+            tool_names = []
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                raw_args = fn.get("arguments", "{}")
+                try:
+                    parsed = json.loads(raw_args)
+                    args_str = json.dumps(parsed, ensure_ascii=False)
+                except json.JSONDecodeError:
+                    args_str = raw_args
+                lines.append(f"TOOL: {name}")
+                lines.append(f"ARGS: {args_str}")
+                tool_names.append(name)
+
+            _logger.info("[LLM] → tool_calls: %s [reason=%s]",
+                         ", ".join(tool_names), finish_reason)
+            return "\n".join(lines)
 
         _logger.info("[LLM] → text (%d chars) [reason=%s]: %.300s",
                      len(content), finish_reason, content)

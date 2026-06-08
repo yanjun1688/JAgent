@@ -429,3 +429,68 @@ class TestFoldContextCheckpointed:
         ]
         state = fold_events(events)
         assert state.last_checkpoint_seq == 4
+
+
+class TestFoldDagStepDedup:
+    """V0.7: DAG_STEP events should update by step_id, not append duplicates."""
+
+    def test_dag_step_started_completed_no_duplicate(self):
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.PLAN_CREATED, {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1}),
+            _event("r1", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []}),
+            _event("r1", 4, EventType.DAG_STEP_COMPLETED, {"plan_id": "p1", "step_id": "s1", "output_summary": "ok"}),
+        ]
+        state = fold_events(events)
+        assert state.latest_plan is not None
+        assert len(state.latest_plan["steps"]) == 1
+        assert state.latest_plan["steps"][0]["step_id"] == "s1"
+        assert state.latest_plan["steps"][0]["status"] == "completed"
+
+    def test_dag_step_started_failed_no_duplicate(self):
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.PLAN_CREATED, {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1}),
+            _event("r1", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []}),
+            _event("r1", 4, EventType.DAG_STEP_FAILED, {"plan_id": "p1", "step_id": "s1", "error": "boom", "retryable": False}),
+        ]
+        state = fold_events(events)
+        assert state.latest_plan is not None
+        assert len(state.latest_plan["steps"]) == 1
+        assert state.latest_plan["steps"][0]["step_id"] == "s1"
+        assert state.latest_plan["steps"][0]["status"] == "failed"
+
+    def test_multiple_steps_no_collision(self):
+        """Different step_ids should each have their own entry."""
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.PLAN_CREATED, {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1}),
+            _event("r1", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []}),
+            _event("r1", 4, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s2", "tool_name": "echo", "depends_on": []}),
+            _event("r1", 5, EventType.DAG_STEP_COMPLETED, {"plan_id": "p1", "step_id": "s1", "output_summary": "ok"}),
+            _event("r1", 6, EventType.DAG_STEP_FAILED, {"plan_id": "p1", "step_id": "s2", "error": "boom", "retryable": False}),
+        ]
+        state = fold_events(events)
+        assert state.latest_plan is not None
+        assert len(state.latest_plan["steps"]) == 2
+        statuses = {s["step_id"]: s["status"] for s in state.latest_plan["steps"]}
+        assert statuses["s1"] == "completed"
+        assert statuses["s2"] == "failed"
+
+    def test_dag_step_different_plan_no_interference(self):
+        """Steps from different plan_ids should not mix."""
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.PLAN_CREATED, {"plan_id": "p1", "intent": "first", "steps_summary": "1 step", "layer_count": 1}),
+            _event("r1", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []}),
+            _event("r1", 4, EventType.DAG_STEP_COMPLETED, {"plan_id": "p1", "step_id": "s1", "output_summary": "ok"}),
+            _event("r1", 5, EventType.PLAN_REVISED, {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"}),
+            _event("r1", 6, EventType.PLAN_CREATED, {"plan_id": "p2", "intent": "revised", "steps_summary": "1 step", "layer_count": 1}),
+            _event("r1", 7, EventType.DAG_STEP_STARTED, {"plan_id": "p2", "step_id": "s2", "tool_name": "echo", "depends_on": []}),
+            _event("r1", 8, EventType.DAG_STEP_COMPLETED, {"plan_id": "p2", "step_id": "s2", "output_summary": "done"}),
+        ]
+        state = fold_events(events)
+        assert state.latest_plan is not None
+        assert state.latest_plan["plan_id"] == "p2"
+        assert len(state.latest_plan["steps"]) == 1
+        assert state.latest_plan["steps"][0]["step_id"] == "s2"

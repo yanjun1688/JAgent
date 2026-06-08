@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from pathlib import Path
 
@@ -333,22 +334,22 @@ class TestAll15EventTypes:
             (EventType.RUN_RESUMED, {"resume_from_seq": 5}),
             (EventType.RUN_COMPLETED, {"result_summary": "all done"}),
             (EventType.RUN_FAILED, {"final_error": "max retries exceeded", "event_count": 10}),
-            (EventType.ORCHESTRATION_STARTED, {"plan_id": "p-1", "intent": "test", "steps_summary": "2 steps"}),
+            (EventType.PLAN_CREATED, {"plan_id": "p-1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1}),
             (
-                EventType.STEP_COMPLETED,
-                {"plan_id": "p-1", "step_index": 0, "tool_call_id": "tc-5", "output": {"ok": True}},
+                EventType.DAG_STEP_COMPLETED,
+                {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"},
             ),
             (
-                EventType.STEP_FAILED,
-                {"plan_id": "p-1", "step_index": 1, "tool_call_id": "tc-6", "error": "boom"},
+                EventType.DAG_STEP_FAILED,
+                {"plan_id": "p-1", "step_id": "s2", "error": "boom"},
             ),
             (
-                EventType.ORCHESTRATION_COMPLETED,
-                {"plan_id": "p-1", "completed_steps": 1, "summary": "partial success"},
+                EventType.PLAN_COMPLETED,
+                {"plan_id": "p-1", "completed_steps": 1, "total_layers": 1, "summary": "partial success"},
             ),
             (
-                EventType.ORCHESTRATION_FAILED,
-                {"plan_id": "p-1", "completed_steps": 1, "final_error": "step 1 failed"},
+                EventType.PLAN_FAILED,
+                {"plan_id": "p-1", "completed_steps": 1, "total_layers": 1, "final_error": "step 1 failed"},
             ),
         ]
 
@@ -359,3 +360,42 @@ class TestAll15EventTypes:
 
         events = await store.get_events("run-1")
         assert len(events) == 20
+
+
+class TestConcurrentSeqAllocation:
+    """Verify seq allocation is atomic under concurrent writes."""
+
+    async def test_concurrent_appends_produce_unique_seqs(self, store: EventStore):
+        N = 20
+        async def writer(idx: int) -> int:
+            event = await store.append_event(
+                "run-con", EventType.RUN_STARTED,
+                {"intent": f"task-{idx}", "context_snapshot": {}},
+            )
+            return event.seq
+
+        results = await asyncio.gather(*[writer(i) for i in range(N)])
+        seqs = sorted(results)
+        # Must be exactly 1..N, no gaps, no duplicates
+        assert seqs == list(range(1, N + 1)), f"Seqs not contiguous: {seqs}"
+        # Event store should have N events
+        events = await store.get_events("run-con")
+        assert len(events) == N
+
+    async def test_concurrent_appends_different_runs_independent(self, store: EventStore):
+        N = 10
+        async def writer(run_id: str, idx: int) -> tuple[str, int]:
+            event = await store.append_event(
+                run_id, EventType.RUN_STARTED,
+                {"intent": f"task-{idx}", "context_snapshot": {}},
+            )
+            return (run_id, event.seq)
+
+        results = await asyncio.gather(*[writer(f"run-{i % 3}", i) for i in range(N)])
+        # Group by run_id
+        seqs_by_run: dict[str, list[int]] = {}
+        for rid, seq in results:
+            seqs_by_run.setdefault(rid, []).append(seq)
+        for rid, seqs in seqs_by_run.items():
+            seqs.sort()
+            assert seqs == list(range(1, len(seqs) + 1)), f"Run {rid} seqs: {seqs}"

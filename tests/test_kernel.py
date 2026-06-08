@@ -2,7 +2,7 @@
 
 import pytest
 
-from harness.core.agent_kernel import MockAgentKernel, _parse_response
+from harness.core.agent_kernel import MockAgentKernel, _parse_response, _parse_results
 from harness.core.llm_client import MockLLMClient
 from harness.core.scheduler import ThinkResult
 from harness.core.system_prompt import build_system_prompt, build_tool_schemas
@@ -178,16 +178,77 @@ def test_parse_response_with_only_tool():
     assert result.tool_name == "direct_call"
 
 
+# ── 4.7 Multi-tool call parsing ────────────────────────────────
+
+
+def test_parse_multi_tool():
+    response = """THOUGHT: Do two things
+TOOL: search
+ARGS: {"q": "hello", "nested": {"inner": "value"}}
+TOOL: echo
+ARGS: {"msg": "world"}"""
+    results = _parse_results(response)
+    assert len(results) == 2
+    assert results[0].tool_name == "search"
+    assert results[0].tool_input == {"q": "hello", "nested": {"inner": "value"}}
+    assert results[1].tool_name == "echo"
+    assert results[1].tool_input == {"msg": "world"}
+
+
+def test_parse_multi_tool_nested_json():
+    """Nested JSON objects must not be truncated by non-greedy matching."""
+    response = """THOUGHT: Multi step
+TOOL: http_request
+ARGS: {"url": "https://api.example.com", "headers": {"Authorization": "Bearer tok"}}
+TOOL: file_op
+ARGS: {"operation": "write", "path": "/tmp/x"}"""
+    results = _parse_results(response)
+    assert len(results) == 2
+    assert results[0].tool_name == "http_request"
+    assert results[0].tool_input["url"] == "https://api.example.com"
+    assert results[0].tool_input["headers"]["Authorization"] == "Bearer tok"
+    assert results[1].tool_name == "file_op"
+    assert results[1].tool_input["operation"] == "write"
+
+
+def test_parse_multi_tool_malformed_args():
+    """One tool with malformed ARGS should not break the other."""
+    response = """THOUGHT: test
+TOOL: good
+ARGS: {"ok": true}
+TOOL: bad
+ARGS: not json"""
+    results = _parse_results(response)
+    assert len(results) == 2
+    assert results[0].tool_name == "good"
+    assert results[0].tool_input == {"ok": True}
+    assert results[1].tool_name == "bad"
+    assert results[1].tool_input == {}
+
+
+def test_parse_multi_tool_stop_ignored():
+    """TOOL blocks before <STOP> should be honored."""
+    response = """THOUGHT: finishing
+TOOL: cleanup
+ARGS: {"action": "flush"}
+<STOP>"""
+    results = _parse_results(response)
+    assert len(results) == 1
+    assert results[0].tool_name == "cleanup"
+    assert results[0].tool_input == {"action": "flush"}
+
+
 # ── MockAgentKernel ──────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_mock_kernel_returns_preprogrammed():
     kernel = MockAgentKernel([ThinkResult(thought="Test", tool_name="http", tool_input={"url": "a"})])
-    result = await kernel.think("intent", [], None)
-    assert result.thought == "Test"
-    assert result.tool_name == "http"
-    assert result.tool_input == {"url": "a"}
+    results = await kernel.think("intent", [], None)
+    assert len(results) == 1
+    assert results[0].thought == "Test"
+    assert results[0].tool_name == "http"
+    assert results[0].tool_input == {"url": "a"}
     assert len(kernel.think_calls) == 1
 
 
@@ -195,6 +256,7 @@ async def test_mock_kernel_returns_preprogrammed():
 async def test_mock_kernel_returns_stop_on_exhaustion():
     kernel = MockAgentKernel([ThinkResult(thought="Done", tool_name=None)])
     await kernel.think("intent", [], None)
-    result = await kernel.think("intent", [], None)
-    assert result.tool_name is None
-    assert "no more" in result.thought.lower()
+    results = await kernel.think("intent", [], None)
+    assert len(results) == 1
+    assert results[0].tool_name is None
+    assert "no more" in results[0].thought.lower()

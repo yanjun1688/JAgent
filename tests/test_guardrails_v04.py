@@ -226,11 +226,11 @@ class TestDependencyGuardrail:
         g = DependencyGuardrail(store=store)
         td = _make_tool(
             name="plan_tool",
-            depends_on=[DependencyConstraint(event_type="OrchestrationStarted")],
+            depends_on=[DependencyConstraint(event_type="PlanCreated")],
         )
         result = await g.check(td, {}, {}, run_id="run-1")
         assert not result.passed
-        assert "OrchestrationStarted" in result.reason
+        assert "PlanCreated" in result.reason
 
     @pytest.mark.asyncio
     async def test_depends_on_all_exist_passes(self, store):
@@ -245,15 +245,15 @@ class TestDependencyGuardrail:
 
     @pytest.mark.asyncio
     async def test_depends_on_payload_filter(self, store):
-        await store.append_event("run-1", EventType.STEP_COMPLETED, {"plan_id": "p-1", "step_index": 0, "tool_call_id": "tc-1", "output": {}})
+        await store.append_event("run-1", EventType.DAG_STEP_COMPLETED, {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"})
         g = DependencyGuardrail(store=store)
         td = _make_tool(
             name="step_tool",
             depends_on=[
                 DependencyConstraint(
-                    event_type="StepCompleted",
-                    payload_filter={"step_index": 0},
-                    message="Step 0 must be completed first",
+                    event_type="DagStepCompleted",
+                    payload_filter={"step_id": "s1"},
+                    message="Step s1 must be completed first",
                 ),
             ],
         )
@@ -262,7 +262,7 @@ class TestDependencyGuardrail:
 
     @pytest.mark.asyncio
     async def test_depends_on_payload_filter_mismatch_blocks(self, store):
-        await store.append_event("run-1", EventType.STEP_COMPLETED, {"plan_id": "p-1", "step_index": 0, "tool_call_id": "tc-1", "output": {}})
+        await store.append_event("run-1", EventType.DAG_STEP_COMPLETED, {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"})
         g = DependencyGuardrail(store=store)
         td = _make_tool(
             name="step_tool",

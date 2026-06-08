@@ -1,9 +1,11 @@
 from harness.core.agent_kernel import LLMAgentKernel, MockAgentKernel
 from harness.core.context_manager import ContextManager
+from harness.core.dag_executor import DagExecutor
 from harness.core.fold import RunState, RunStatus, ThoughtEntry, ToolResult, ToolResultStatus, fold_events
 from harness.core.llm_client import LLMClient, MockLLMClient, OpenAILLMClient
-from harness.core.orchestrator import ORCHESTRATE_DEF, Orchestrator, PlanGuardrail, make_orchestrate_fn
-from harness.core.scheduler import AgentKernel, AgentLoopScheduler, SchedulerConfig, ThinkResult
+from harness.core.planner import PlanGuardrail, Planner
+from harness.core.scheduler import AgentKernel, AgentLoopScheduler, PlanningExecutorScheduler, SchedulerConfig, ThinkResult
+from harness.models.plan import DagPlan, DagStep
 from harness.models.events import (
     PAYLOAD_MODEL_MAP,
     AgentThoughtPayload,
@@ -16,16 +18,11 @@ from harness.models.events import (
     EventType,
     FeedbackInjectedPayload,
     GuardrailTriggeredPayload,
-    OrchestrationCompletedPayload,
-    OrchestrationFailedPayload,
-    OrchestrationStartedPayload,
     RunCompletedPayload,
     RunFailedPayload,
     RunPausedPayload,
     RunResumedPayload,
     RunStartedPayload,
-    StepCompletedPayload,
-    StepFailedPayload,
     ToolCalledPayload,
     ToolCompletedPayload,
     ToolFailedPayload,
@@ -88,11 +85,6 @@ __all__ = [
     "RunResumedPayload",
     "RunCompletedPayload",
     "RunFailedPayload",
-    "OrchestrationStartedPayload",
-    "StepCompletedPayload",
-    "StepFailedPayload",
-    "OrchestrationCompletedPayload",
-    "OrchestrationFailedPayload",
     # Tool models
     "ToolDefinition",
     "SideEffect",
@@ -147,13 +139,15 @@ __all__ = [
     "OpenAILLMClient",
     "MockAgentKernel",
     "LLMAgentKernel",
-    # V0.4+
-    "Orchestrator",
-    "PlanGuardrail",
-    "ORCHESTRATE_DEF",
-    "make_orchestrate_fn",
     # V0.5
     "ContextManager",
     # V0.6
     "RunMonitor",
+    # V0.7
+    "PlanningExecutorScheduler",
+    "Planner",
+    "PlanGuardrail",
+    "DagExecutor",
+    "DagPlan",
+    "DagStep",
 ]

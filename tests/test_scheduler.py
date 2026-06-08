@@ -616,3 +616,41 @@ class TestSchedulerWithFullWiring:
 
         events = await store.get_events("run-wired")
         assert any(e.event_type == EventType.CONTEXT_CHECKPOINTED for e in events)
+
+
+# ── 3.x Inheritance & lifecycle ───────────────────────────────
+
+
+class TestInheritanceFromBaseScheduler:
+    """Verify AgentLoopScheduler properly inherits from BaseScheduler."""
+
+    def test_is_subclass(self):
+        from harness.core.scheduler import BaseScheduler
+        assert issubclass(AgentLoopScheduler, BaseScheduler)
+
+    def test_inherited_methods_exist(self):
+        """pause/cancel/resume/is_active/is_paused should not be defined in AgentLoopScheduler."""
+        assert "pause" not in AgentLoopScheduler.__dict__
+        assert "cancel" not in AgentLoopScheduler.__dict__
+        assert "resume" not in AgentLoopScheduler.__dict__
+        assert "is_active" not in AgentLoopScheduler.__dict__
+        assert "is_paused" not in AgentLoopScheduler.__dict__
+        assert "run" not in AgentLoopScheduler.__dict__
+
+    def test_own_methods_present(self):
+        assert "_run_loop" in AgentLoopScheduler.__dict__
+        assert "_run_tool_call" in AgentLoopScheduler.__dict__
+        assert "_find_tool_def" in AgentLoopScheduler.__dict__
+        assert "_wait_for_resume" in AgentLoopScheduler.__dict__
+
+    def test_fail_is_overridden(self):
+        """_fail should use 'thought(s)' terminology, not 'planning round(s)'."""
+        from harness.core.scheduler import BaseScheduler
+        assert AgentLoopScheduler._fail is not BaseScheduler._fail
+
+    @pytest.mark.asyncio
+    async def test_is_active_inherited(self, store: EventStore):
+        kernel = MockAgentKernel([ThinkResult(thought="done")])
+        executor = ToolExecutor(store)
+        s = AgentLoopScheduler(store, executor, kernel, [], {})
+        assert s.is_active("nonexistent") is False

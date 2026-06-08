@@ -5,9 +5,18 @@ from harness.models.events import (
     ConfirmationRequestedPayload,
     ContextCheckpointedPayload,
     ContextCompressedPayload,
+    DagStepCompletedPayload,
+    DagStepFailedPayload,
+    DagStepStartedPayload,
+    EpisodeSummary,
     Event,
     EventType,
+    FeedbackInjectedPayload,
     GuardrailTriggeredPayload,
+    PlanCompletedPayload,
+    PlanCreatedPayload,
+    PlanFailedPayload,
+    PlanRevisedPayload,
     RunCompletedPayload,
     RunFailedPayload,
     RunPausedPayload,
@@ -18,6 +27,7 @@ from harness.models.events import (
     ToolFailedPayload,
     ToolTimeoutPayload,
 )
+from harness.models.plan import DagPlan, DagStep
 from harness.models.tools import (
     Guardrail,
     RetryPolicy,
@@ -26,6 +36,12 @@ from harness.models.tools import (
 )
 
 __all__ = [
+    "DagPlan",
+    "DagStep",
+    "DagStepCompletedPayload",
+    "DagStepFailedPayload",
+    "DagStepStartedPayload",
+    "EpisodeSummary",
     "Event",
     "EventType",
     "AgentThoughtPayload",
@@ -33,8 +49,13 @@ __all__ = [
     "ConfirmationRequestedPayload",
     "ContextCheckpointedPayload",
     "ContextCompressedPayload",
+    "FeedbackInjectedPayload",
     "GuardrailTriggeredPayload",
     "PAYLOAD_MODEL_MAP",
+    "PlanCompletedPayload",
+    "PlanCreatedPayload",
+    "PlanFailedPayload",
+    "PlanRevisedPayload",
     "RunCompletedPayload",
     "RunFailedPayload",
     "RunPausedPayload",

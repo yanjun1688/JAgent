@@ -87,6 +87,7 @@ export default function RunList() {
               <th style={{ padding: 8 }}>Status</th>
               <th style={{ padding: 8 }}>Events</th>
               <th style={{ padding: 8 }}>Created</th>
+              <th style={{ padding: 8 }}></th>
             </tr>
           </thead>
           <tbody>
@@ -117,6 +118,14 @@ export default function RunList() {
                 </td>
                 <td style={{ padding: 8 }}>{run.event_count}</td>
                 <td style={{ padding: 8 }}>{formatTime(run.created_at ?? 0)}</td>
+                <td style={{ padding: 8 }}>
+                  <Link
+                    to={`/analysis/runs/${run.run_id}`}
+                    style={{ color: '#3ECF8E', textDecoration: 'none', fontSize: 12, fontWeight: 600 }}
+                  >
+                    Analyze
+                  </Link>
+                </td>
               </tr>
             ))}
           </tbody>

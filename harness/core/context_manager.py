@@ -96,6 +96,24 @@ class ContextManager:
                 "keep_count": 2,
             }
 
+        # ── Plan boundary alignment ──────────────────────────────────
+        if state.plan_boundary_seqs:
+            mid_seq = state.thought_history[mid].seq
+            span = state.thought_history[-1].seq - state.thought_history[0].seq
+            if span > 0:
+                nearest = min(state.plan_boundary_seqs, key=lambda s: abs(s - mid_seq))
+                if abs(nearest - mid_seq) < span * 0.2:
+                    new_mid = max(
+                        (i + 1 for i, t in enumerate(state.thought_history) if t.seq <= nearest),
+                        default=mid,
+                    )
+                    if 0 < new_mid < len(state.thought_history):
+                        _log_compress.info(
+                            "Aligned to plan boundary seq=%d: thought[%d] → thought[%d]",
+                            nearest, mid, new_mid,
+                        )
+                        mid = new_mid
+
         _log_compress.info("~%d tokens exceeds %d emergency threshold → emergency compression "
                            "(compress oldest %d, keep %d recent)",
                            estimate, self.emergency_threshold, mid, 3)
@@ -249,6 +267,25 @@ class ContextManager:
         for tr in results:
             out = str(tr.output or tr.error or "")[:300]
             activity_lines.append(f"Tool '{tr.tool_name}' → {out}")
+
+        # Preserve PlanCreated/PlanRevised event details (compression whitelist)
+        for plan_entry in state.plan_history:
+            plan_id = plan_entry.get("plan_id", "?")
+            plan_intent = plan_entry.get("intent", "")[:80]
+            activity_lines.append(f"[Plan] {plan_id}: {plan_intent}")
+            revision = plan_entry.get("revision_reason")
+            if revision:
+                activity_lines.append(f"[Plan] Revision reason: {revision}")
+            for step in plan_entry.get("steps", []):
+                sid = step.get("step_id", "?")
+                tool = step.get("tool_name", "?")
+                st = step.get("status", "?")
+                detail = ""
+                if st == "completed":
+                    detail = f" → {step.get('output_summary', '')[:100]}"
+                elif st == "failed":
+                    detail = f" ✗ {step.get('error', '')[:100]}"
+                activity_lines.append(f"  Step {sid}({tool}): {st}{detail}")
 
         activity_text = "\n".join(activity_lines)
 

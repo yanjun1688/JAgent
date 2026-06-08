@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from harness.api.analysis_routes import router as analysis_router
 from harness.api.deps import HarnessAPI, configure_hapi, get_hapi
 from harness.api.routes import router as routes_router
 from harness.api.ws import router as ws_router
@@ -62,3 +63,4 @@ app.add_middleware(
 
 app.include_router(routes_router)
 app.include_router(ws_router)
+app.include_router(analysis_router)

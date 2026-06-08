@@ -541,8 +541,8 @@ class TestKernelSummaryConsumption:
         state = RunState(run_id="r", summary="Agent did X then Y")
         td = _make_tool("echo")
 
-        result = await kernel.think("test task", [td], state)
-        assert result.thought == "using summary"
+        results = await kernel.think("test task", [td], state)
+        assert results[0].thought == "using summary"
 
         # The system prompt should mention the summary
         last_call = mock_llm.calls[-1]
@@ -572,8 +572,8 @@ class TestKernelSummaryConsumption:
         state = RunState(run_id="r", summary=ep, keep_recent_count=3)
         td = _make_tool("echo")
 
-        result = await kernel.think("test task", [td], state)
-        assert result.thought == "using structured summary"
+        results = await kernel.think("test task", [td], state)
+        assert results[0].thought == "using structured summary"
 
         last_call = mock_llm.calls[-1]
         msgs = last_call["messages"]

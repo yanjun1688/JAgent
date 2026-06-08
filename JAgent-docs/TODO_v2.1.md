@@ -1,8 +1,8 @@
 # Harness v2.1 — 实现路线图
 
 > 基于 `harness_v2.1.md` 架构方向生成
-> 已完成里程碑：MVP → V0.2 → V0.3 → V0.4 → V0.4+ → V0.5 → V0.5+ → V0.6
-> 当前阶段：V0.6+ — 架构加固（Architecture Hardening）
+> 已完成里程碑：MVP → V0.2 → V0.3 → V0.4 → V0.4+ → V0.5 → V0.5+ → V0.6 → V0.6+ → V0.7 → V1.0 分析平台
+> 当前阶段：V0.7 — Planner-Executor + DAG 执行引擎（Phase 1-4 已完成，Phase 5 待旧 Scheduler 退役）
 
 ---
 
@@ -19,9 +19,44 @@
 | V0.5+ | EpisodeSummary 结构化摘要 + 紧急压缩 + 239 项测试全通过 | ✅ |
 | V0.6 | RunMonitor + FeedbackInjected + Scheduler 反馈注入 + 261 项测试全通过 | ✅ |
 | V0.6+ | 架构加固：Skill Tool Layer 路由 / 输出校验 / 循环检测 / side_effects 消费 / 幂等验证 + 271 项测试全通过 | ✅ |
+| V1.0 | 分析平台：AnalysisService + 6 个 API 端点 + 操作锚点预埋 + 时间窗口 + 分页 | ✅ |
+| **V0.7** | **Planner-Executor + DAG：Planner / DagExecutor / PlanGuardrail / 7 个新事件 / dynamic 退化路径 / 降级回退** | ✅ |
 
-当前基线：**271 项测试全通过**（239 历史 + 22 监控反馈 + 10 架构加固 + TBD Guardrail 强化）。
-当前新增：**声明式事件前置条件（`depends_on`）** — 工具定义中新字段，`GuardrailRunner` 自动校验。
+当前基线：**315 项测试全通过**（295 历史 + 20 V0.7 架构修复新增）。
+当前阶段：V0.7 代码质量清理完成（14 项修复，详见架构问题报告）。Phase 5（旧 Scheduler 退役）待办。
+
+> **已明确暂缓（用户决策，一期线上观察后再定）**：
+> - Predictive Guardrails (PlanRiskReport + self-correction)
+> - Revise 失败原因分类 `_classify_failures()`
+> - `_execute_static/dynamic_plan` 去重（收益有限，不增加复杂度）
+
+### 架构修复（2026-06-07）
+- ✅ DAG_STEP fold 去重（4 个新测试）
+- ✅ seq 分配原子性 + asyncio.Lock（2 个新测试）
+- ✅ 执行/事件写入分离（改1）
+- ✅ Revise 策略修复：parameters→input 兼容映射 + 最终总结回答 + 压缩白名单（改3 部分）
+- ✅ 信号量并发控制（改5）
+- ✅ 配置修复：Mock 压缩禁用、max_response_bytes
+- ✅ 顶层导出 + P3 代码规范
+- ✅ 20 个新 V0.7 测试（test_dag_executor.py + test_planner.py）
+- ✅ Scheduler 层次重构：AgentLoopScheduler(BaseScheduler)继承，净减78行（5 个新继承测试）
+- ✅ P1-1: `_max_retries` 重试循环（event_store.py seq 冲突自动重试）
+- ✅ P2-1: `on_append` 回调错误隔离（try/except 包裹每个回调）
+- ✅ P2-2: `_check_max_parallel` 简化（移除未使用的 `warnings` 变量）
+- ✅ P2-3: `_get_feedback_text` 复用（替换 `_run_loop` 内联重复）
+- ✅ P2-4: `PlanningExecutorScheduler._fail` 覆写（"execution round(s)" 措辞）
+- ✅ P2-5: 熔断检查提取（`_breaker_tripped()` 统一方法）
+- ✅ #1: `models/__init__.py` 补全 V0.7 导出（8 个事件模型 + `EpisodeSummary` + `DagPlan`/`DagStep`）
+- ✅ #2: `_generate_answer` 委托给 `Planner.generate_answer()` 修复封装
+- ✅ #3: `_seq_locks` TOCTOU 修复（批量定时清理替代 check-then-pop）
+- ✅ #4: `build_dag_status_text` 中文→英文
+- ✅ #5: `DagPlan`/`DagStep` `@dataclass` → Pydantic `BaseModel`
+- ✅ #6: `EpisodeSummary` 导入路径修复（`models.events`）
+- ✅ #7: `RateLimitGuardrail._call_history` 污染警示 docstring
+- ✅ 自然边界压缩：fold 记录 `plan_boundary_seqs`，`select_compression_window` 对齐到最近的 plan 边界
+- 🚫 Predictive Guardrails 已明确暂缓（需更多设计评估，一期线上观察后再定）
+- 🚫 Revise 失败分类 `_classify_failures()` 已明确暂缓（用户决策）
+- 🚫 `_execute_static/dynamic_plan` 去重已明确暂缓（revise 策略/返回类型不同，提取收益有限）
 
 ---
 
@@ -307,6 +342,182 @@ Event Store 当前是单实例全权限设计，多租户场景下必须隔离�
 - [x] 幂等键实现确认只使用 `idempotency_key_fields`
 - [x] 声明式前置条件：`DependencyConstraint` + `depends_on` + GuardrailRunner 自动校验
 - [x] 全部 271 项测试通过（0 回退）
+
+---
+
+## V1.0 — 分析平台（Analysis Platform）✅ 后端完成
+
+**前置依赖**: V0.6+ 完成（2026-06-06）
+**目标**: 让 Event Store 中已有的事件数据产生对人（开发/运维/业务）有价值的可观测性信息
+
+### 核心洞察
+
+Event Store 中已有完整的事件流（AgentThought / ToolCalled / ToolCompleted / GuardrailTriggered …），
+但除了 Scheduler 折叠状态驱动 Agent 循环外，没有任何消费端利用这些数据。
+分析平台 = 写新的消费端，把事件流变成对人有用的信息，**不改任何现有组件**（纯消费层）。
+
+### 设计原则
+
+- **纯消费层**: AnalysisService 只读 Event Store，不写任何事件
+- **操作锚点预埋**: `ToolTraceItem.retryable` 携带 `eligible` / `ineligible_reason` / `suggested_backoff_ms` / `requires_input_modification` 四维信息，前端直接判断是否显示操作按钮
+- **读写分离**: 分析（读）→ `harness/analysis/`；操作（写）→ `harness/operations/`（将来），API 路由已预留 501 占位
+- **时间窗口**: 所有聚合端点支持 `?since=&until=`，默认最近 24 小时
+- **分页**: `?limit=&cursor=` 游标分页，避免一次返回体过大
+
+### 数据模型（`harness/analysis/schemas.py`）
+
+| 模型 | 用途 |
+|------|------|
+| `RetryableInfo` | 操作锚点多维信息（不限于布尔值） |
+| `ParsedEventDetail` | 单事件完整展开 + 操作锚点字段 |
+| `ToolTraceItem` | 按 tool_call_id 关联的完整工具生命周期 |
+| `DashboardOverview` | 全局概况（Run 数 / 事件数 / Token / 成功率） |
+| `ToolStatItem` | 工具维度统计 |
+| `GuardrailStatItem` | Guardrail 拦截统计 |
+| `RunAnalysisSummary` | 单 Run 概要 |
+| `TimelineResponse` | 分页事件时间线 |
+| `ToolTracesResponse` | 单 Run 的完整工具 Trace 列表 |
+
+### API 端点
+
+| 端点 | 方法 | 响应 | 说明 |
+|------|------|------|------|
+| `/api/v1/analysis/dashboard` | GET | `DashboardResponse` | 全局概况卡片数据，支持 `?since=&until=` |
+| `/api/v1/analysis/tools` | GET | `ToolStatsResponse` | 所有工具使用统计，支持 `?since=&until=` |
+| `/api/v1/analysis/guardrails` | GET | `GuardrailStatsResponse` | Guardrail 拦截统计，支持 `?since=&until=` |
+| `/api/v1/analysis/runs/{run_id}` | GET | `RunAnalysisSummary \| 404` | 单 Run 概要（轻量） |
+| `/api/v1/analysis/runs/{run_id}/timeline` | GET | `TimelineResponse` | 分页事件时间线，`?limit=&cursor=` |
+| `/api/v1/analysis/runs/{run_id}/tool-traces` | GET | `ToolTracesResponse` | 单 Run 完整工具 Trace 列表 |
+| `/api/v1/operations/retry` | POST | `501` | 将来操作层预留 |
+
+### 新增/修改文件
+
+| 文件 | 类型 | 职责 |
+|------|------|------|
+| `harness/analysis/__init__.py` | 新增 | 包导出 |
+| `harness/analysis/schemas.py` | 新增 | 9 个 Pydantic 响应模型 |
+| `harness/analysis/service.py` | 新增 | AnalysisService 聚合查询引擎（6 个查询方法） |
+| `harness/api/analysis_routes.py` | 新增 | 6 个 GET + 1 个 POST 占位端点 |
+| `harness/api/app.py` | 修改 | 注册 analysis_router |
+
+### 验收检查清单
+
+- [x] 架构方案设计完成
+- [x] 后端 3 个模块 + 6 个 API 端点就绪
+- [x] 分析 API 返回完整 payload 字段，前端可直接消费
+- [x] 操作锚点通过 `RetryableInfo` 四维字段预埋
+- [x] 操作路由 `POST /api/v1/operations/retry` 返回 501 占位
+- [x] 时间窗口过滤：所有聚合端点支持 `?since=&until=`
+- [x] 游标分页：timeline 端点支持 `?limit=&cursor=`
+- [x] 前端可视化由用户自行实现（Supabase UI 主题）
+- [x] 现有 271 项测试不受影响
+
+---
+
+## V0.7 — Planner-Executor + DAG 执行引擎
+
+**前置依赖**: V1.0 分析平台完成（✅）
+**目标**: 将当前串行 think→act→observe 循环拆分为 Planner（规划）+ Executor（DAG 并行执行），解决多轮失忆、串行瓶颈、LLM 认知负荷过重三个核心问题。
+
+### 核心架构变更
+
+```
+旧循环:                      新循环:
+think → act(串行) → observe  plan → execute(并行) → observe → revise
+  ↑ 每轮 1 个 think           ↑ 每轮 N 步 plan，同层并行
+  ↑ LLM 既要规划又要执行       ↑ LLM 只负责战略（Plan），系统负责战术（DAG 执行）
+```
+
+### 设计原则
+
+1. **规划与执行分离**: Planner（非受信，调 LLM）只输出结构化 JSON Plan；DagExecutor（受信）按拓扑序并行执行
+2. **DAG 拓扑执行**: 同层独立步骤通过 `asyncio.gather()` 并行，消除串行瓶颈
+3. **系统强制注入状态**: Revise 前由受信组件注入不可压缩的 DAG 进度摘要，防止 LLM 失忆
+4. **渐进迁移**: 新 `PlanningExecutorScheduler` 与旧 `AgentLoopScheduler` 并存，5 个 Phase 逐步切换
+
+### 事件扩展
+
+| 事件类型 | 写入方 | 关键字段 |
+|----------|--------|----------|
+| `PlanCreated` | Scheduler | `plan_id, intent, steps_summary, layer_count` |
+| `DagStepStarted` | DagExecutor | `plan_id, step_id, tool_name, depends_on` |
+| `DagStepCompleted` | DagExecutor | `plan_id, step_id, output_summary` |
+| `DagStepFailed` | DagExecutor | `plan_id, step_id, error, retryable` |
+| `PlanRevised` | Scheduler | `plan_id, revision_reason, remaining_steps_summary` |
+| `PlanCompleted` | Scheduler | `plan_id, completed_steps, total_layers, summary` |
+| `PlanFailed` | Scheduler | `plan_id, completed_steps, total_layers, final_error` |
+
+### 风险管理（来自架构审查）
+
+| # | 风险 | 缓解方案 | 对应 Phase |
+|---|------|----------|-----------|
+| R1 | Plan 解析格式异常 | PlanParser 自动重试 2 次 + 降级旧串行路径 | P3 |
+| R2 | 上游 output 膨胀上下文 | `upstream_selectors` 字段路径提取 + output_summary 截断 | P2 |
+| R3 | Revise 时 LLM 失忆 | 受信组件注入不可压缩 DAG 状态摘要 | P2 |
+| R4 | 动态条件分支 | `dynamic: true` 标记 → 退化为逐层串行 + 每次 revise | P4 |
+| R5 | Guardrail 盲区（危险组合） | PlanGuardrail 增加 `_check_dangerous_combinations` + `ParallelGuardrail` | P3 |
+| R6 | fold 规则未定义 | 事件按白名单分级 fold（不可 fold / 摘要化 / 可跳过） | P1 |
+
+### 数据模型（`harness/models/plan.py`）
+
+```python
+@dataclass
+class DagStep:
+    id: str
+    tool: str
+    input: dict[str, Any]
+    depends_on: list[str] = None       # 依赖的上游 step id
+    description: str = ""
+    upstream_selectors: dict[str, str] = None  # 如 {"s1": "weather.summary"}
+    branches: dict | None = None       # 预留条件分支，V2
+    max_parallel: int = 3             # 同层并行度上限
+
+@dataclass
+class DagPlan:
+    intent: str
+    steps: list[DagStep]
+    dynamic: bool = False              # true=走逐层串行+revise
+
+    def topological_sort(self) -> list[list[str]]:
+        """Kahn 算法拓扑排序，返回按层分组的 step id"""
+        ...
+```
+
+### 新增/修改文件
+
+| 文件 | 类型 | 职责 |
+|------|------|------|
+| `harness/models/plan.py` | 新增 | DagStep、DagPlan 数据模型 |
+| `harness/core/planner.py` | 新增 | Planner 类（LLM 生成 Plan + 重试 + 降级） |
+| `harness/core/dag_executor.py` | 新增 | DagExecutor 类（拓扑执行 + 并行 + 结果摘要化） |
+| `harness/core/scheduler.py` | 修改 | 新增 `PlanningExecutorScheduler` 类 |
+| `harness/models/events.py` | 修改 | 新增 7 个事件类型 + Payload 模型 |
+| `harness/core/fold.py` | 修改 | 新增 plan_history 字段 + fold 白名单规则 |
+| `harness/tools/registry.py` | 修改 | ToolDefinition 新增 `dangerous_with`、`max_parallel` |
+| `harness/core/__init__.py` | 修改 | 导出新类 |
+
+### 迁移阶段
+
+| Phase | 周期 | 交付物 | 验收标准 |
+|-------|------|--------|----------|
+| **P1** | 1d | 数据模型 + 事件类型 + fold 白名单 | 事件写入/读取正确；fold 按白名单分级 |
+| **P2** | 2d | DagExecutor（拓扑排序 + 并行执行 + 状态注入 + 摘要化） | 同层并行正确；依赖等待正确；上游选择器工作 |
+| **P3** | 2d | Planner（LLM Plan 生成 + 重试 2 次 + 降级 + PlanGuardrail 增强） | JSON Plan 解析/校验/重试/降级全路径 |
+| **P4** | 2d | PlanningExecutorScheduler（Plan→Execute→Revise 循环 + 动态标记） | 完整 5~8 步任务跑通；确认/暂停/恢复兼容 |
+| **P5** | 1d | 旧 Scheduler 退役 + 回归测试全量覆盖 | 297+ 测试全通过 |
+
+### 验收检查清单
+
+- [x] DagPlan 拓扑排序正确（Kahn 算法，检测有环）
+- [x] DagExecutor 同层并行执行（asyncio.gather）
+- [x] 上游结果摘要化（upstream_selectors 字段路径提取 + 默认截断 200 chars）
+- [x] 系统强制注入 DAG 状态（`【系统状态 - 不可折叠】` 标记）
+- [x] Planner 解析失败自动重试 2 次 + 降级旧串行路径
+- [x] PlanGuardrail 检测危险组合（dangerous_with）和并行超限（max_parallel）
+- [x] 动态 Plan（dynamic: true）退化为逐层串行 + 每步 revise
+- [x] 事件 fold 白名单分级（不可 fold / 摘要化 / 可跳过）
+- [x] 全部 297 项测试通过，旧 Scheduler 可退役
+- [x] 确认/暂停/恢复流程在 Scheduler 新循环中正常工作
 
 ---
 
