@@ -191,7 +191,7 @@ async def _on_event_impl(self, event: Event) -> None:
         err_map[error_type] = err_map.get(error_type, 0) + 1
         
         if count >= 3:
-            await self._check_and_inject_feedback(rid)
+            await self._check_and_inject_feedback(rid, error_detail=error)
 
 def _extract_error_type(self, error_text: str) -> str:
     """提取异常类名，不解析 message。
@@ -206,7 +206,9 @@ def _extract_error_type(self, error_text: str) -> str:
 #### 3.4.3 公共反馈触发方法（含 EventStore 防重）
 
 ```python
-async def _check_and_inject_feedback(self, rid: str) -> None:
+async def _check_and_inject_feedback(
+    self, rid: str, error_detail: str = "",
+) -> None:
     per_tool = self._failures_per_tool.get(rid, {})
     err_map = self._failure_error_map.get(rid, {})
     
@@ -239,7 +241,7 @@ async def _check_and_inject_feedback(self, rid: str) -> None:
         category=category,
         affected_tool=dominant_tool,
         error_type=dominant_error,
-        error_detail=event.payload.get("error", "")[:200],
+        error_detail=error_detail[:200],
         suggestion=suggestion,
         expires_at_seq=current_seq + 50,
     )
