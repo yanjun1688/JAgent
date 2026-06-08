@@ -2,8 +2,8 @@
 
 > **当前阶段**: V0.7 — Planner-Executor + DAG 执行引擎（Phase 4+ 架构修复完成）
 > **基线**: 315 项测试全通过（+13 V0.7 新增）
-> **文档版本**: v2.1.1
-> **最后更新**: 2026-06-07
+> **文档版本**: v2.1.2
+> **最后更新**: 2026-06-08
 
 ---
 
@@ -20,6 +20,7 @@
 | V0.5+ | ✅ | EpisodeSummary 结构化摘要 + 紧急压缩 |
 | V0.6 | ✅ | RunMonitor + FeedbackInjected + Scheduler 反馈注入 |
 | V0.6+ | ✅ | 架构加固：Skill 路由 / 输出校验 / 循环检测 / side_effects 消费 / 幂等验证 |
+| **V0.6.1** | 📄 设计完成 | 反馈机制增强：结构化反馈 + per-tool 追踪 + 建议生成 + Planner revise 注入 + Operator API |
 | **V0.7** | **✅** | **Planner-Executor + DAG 执行引擎（Phase 1-4）** |
 | V1.0 分析平台 | ✅ | AnalysisService + 6 个 API 端点 |
 
@@ -55,7 +56,9 @@
 │  │ ContextManager (受信) ← 自动压缩 + Checkpoint           │        │
 │  └─────────────────────────────────────────────────────────┘        │
 │  ┌─────────────────────────────────────────────────────────┐        │
-│  │ RunMonitor (受信) ← 异常检测 → FeedbackInjected 事件     │        │
+│   │  RunMonitor (受信) ← 异常检测(per-tool+模式识别)           │        │
+ │  │         → 结构化 FeedbackInjected (含 tool/error/suggestion) │        │
+ │  │         → CONDITION_RESOLVED 分辨率信号                    │        │
 │  └─────────────────────────────────────────────────────────┘        │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │
@@ -209,7 +212,7 @@ class EventStore:
 | `RunResumed` | Scheduler | `resume_from_seq` |
 | `RunCompleted` | Scheduler | `result_summary` |
 | `RunFailed` | Scheduler/Tool | `final_error, event_count, result_summary` |
-| `FeedbackInjected` | RunMonitor | `feedback_text, priority` |
+| `FeedbackInjected` | RunMonitor / Operator API | `feedback_text, priority, category, affected_tool, error_type, suggestion, expires_at_seq, resolves_feedback_id` |
 | **`PlanCreated`** | **V0.7** | `plan_id, intent, steps_summary, layer_count` |
 | **`DagStepStarted`** | **V0.7** | `plan_id, step_id, tool_name, depends_on` |
 | **`DagStepCompleted`** | **V0.7** | `plan_id, step_id, output_summary` |
@@ -348,6 +351,7 @@ class PlanningExecutorScheduler(BaseScheduler):
 | POST | `/api/v1/runs/{run_id}/pause` | — | `{"success": bool}` | 暂停 |
 | POST | `/api/v1/runs/{run_id}/resume` | — | `{"success": bool}` | 恢复 |
 | POST | `/api/v1/runs/{run_id}/confirm` | `{"confirmation_id", "confirmed", "operator_id"}` | `{"success": bool}` | 确认决策 |
+| POST | `/api/v1/runs/{run_id}/feedback` | `{"text","priority","suggestion"}` | `{"status","feedback_id"}` | V0.6.1: Operator 手动反馈注入 |
 | DELETE | `/api/v1/runs/{run_id}` | — | `{"success": bool}` | 取消/终止 |
 | WS | `/api/v1/runs/{run_id}/events` | — | 实时 Event JSON | WebSocket 事件流 |
 
@@ -384,7 +388,7 @@ class RunState:
     last_checkpoint_seq: int | None
     orchestration_history: list[dict]        # 旧编排历史
     latest_orchestration: dict | None
-    feedbacks: list[FeedbackInjectedPayload] # 监视器反馈
+    feedbacks: list[FeedbackInjectedPayload] # 监视器反馈 (结构化：含 category/tool/error/suggestion/expires/resolves)
     plan_history: list[dict]                 # V0.7: DAG 规划历史
     latest_plan: dict | None                 # V0.7: 当前最新计划
 ```
@@ -490,7 +494,7 @@ harness/
 │   ├── file_op.py            # 沙箱文件操作
 │   └── mcp_call.py           # MCP 工具调用
 ├── monitoring/
-│   └── run_monitor.py        # RunMonitor 异常检测 + 反馈注入
+│   └── run_monitor.py        # RunMonitor 异常检测 (per-tool 追踪 + 模式识别 + 结构化反馈注入)
 └── analysis/
     ├── schemas.py             # 分析响应模型
     └── service.py             # AnalysisService 聚合查询
@@ -520,6 +524,7 @@ harness/
 
 | 任务 | 说明 | 优先级 |
 |------|------|--------|
+| **V0.6.1 反馈机制增强** | 结构化反馈 + per-tool 追踪 + 建议生成 + Planner revise 注入 + Operator API | **P0** |
 | Predictive Guardrails | PlanRiskReport + self-correction | P1 |
 | 失败原因分类 | schema_error → 重试；tool_unavailable → skip | P1 |
 | 调度器层次重构 | `AgentLoopScheduler` 继承 `BaseScheduler`；提取公共方法 | P2 |

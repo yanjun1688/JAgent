@@ -188,6 +188,69 @@ Scheduler THINK 前 → 拉取 FeedbackInjected
 
 ---
 
+## V0.6.1 — 反馈机制增强（Feedback Redesign）
+
+**状态**: 📄 设计完成，待实现
+
+**前置依赖**: V0.6 完成
+**触发**: test-logs.md 日志暴露了 Monitor 反馈"形同虚设"的问题
+**目标**: 解决四个独立问题——反馈内容宽泛、无建设性建议、反馈流不到 Planner revise、反馈永不过期
+
+### 问题根因
+
+| # | 问题 | 代码位置 |
+|---|------|----------|
+| P0 | 反馈内容宽泛 | `run_monitor.py` 只计数不识别模式；`FeedbackInjectedPayload` 无 tool/error 结构 |
+| P0 | 无建设性建议 | `run_monitor.py` 无 `_generate_suggestion()` |
+| P0 | 反馈不进 revise | `planner.py` `_REVISE_PROMPT` 无 `{feedback_section}`；`revise()` 无 `feedback` 参数 |
+| P1 | 反馈永不过期 | `FeedbackInjectedPayload` 无 `expires_at_seq` 字段；scheduler 无过滤逻辑 |
+
+### 设计方案
+
+详见 `JAgent-docs/feedback_redesign.md`
+
+### 新增/修改文件
+
+| 文件 | 职责 |
+|------|------|
+| `harness/models/events.py` | `FeedbackCategory` 枚举 + `FeedbackInjectedPayload` 新增 6 个可选字段 |
+| `harness/monitoring/run_monitor.py` | per-tool 追踪 + 统一 TOOL_FAILED/GUARDRAIL_TRIGGERED + 建议生成 + 分辨率 + 确定性 hash |
+| `harness/core/scheduler.py` | 结构化反馈渲染 + 过期过滤 + 已解决隐藏 |
+| `harness/core/planner.py` | `_REVISE_PROMPT` 加 `{feedback_section}` + `revise()` 加 `feedback` 参数 |
+| `harness/api/routes.py` | 新增 `POST /api/v1/runs/{run_id}/feedback` Operator 手动反馈入口 |
+| `tests/test_monitoring.py` | 新增 ~5 个测试用例覆盖新逻辑 |
+
+### 任务清单
+
+| # | 任务 | 交付物 | 验收标准 |
+|---|------|--------|----------|
+| 9.8 | `FeedbackCategory` 枚举 + Payload 增强 | `harness/models/events.py` | 新字段全 Optional，老数据零兼容成本 |
+| 9.9 | RunMonitor per-tool 追踪 + 统一检测 | `harness/monitoring/run_monitor.py` | TOOL_FAILED 和 GUARDRAIL_TRIGGERED 都走同一模式识别；3 次失败含 tool/error/suggestion |
+| 9.10 | 建议生成器 | `run_monitor._generate_suggestion()` | 已知错误模式返回针对性建议；未知返回 None |
+| 9.11 | 分辨率信号 | `run_monitor.py` TOOL_COMPLETED | 失败 ≥3 后恢复 → 发 CONDITION_RESOLVED |
+| 9.12 | 确定性 feedback_id | `run_monitor._inject_feedback()` | 同一分钟内同一条反馈不重复写入 |
+| 9.13 | 过期 + 过滤逻辑 | `scheduler._get_feedback_text()` | expires_at_seq 生效；RESOLVED 自动隐藏被解决项 |
+| 9.14 | 结构化反馈渲染 | `scheduler._format_feedback()` | 输出含优先级标记 + tool + error + suggestion |
+| 9.15 | Planner revise 注入 | `planner.py` | `revise()` 可接收 `feedback` 参数；prompt 含反馈节 |
+| 9.16 | Operator 手动反馈 API | `harness/api/routes.py` | `POST /api/v1/runs/{run_id}/feedback` |
+| 9.17 | 测试 | `tests/test_monitoring.py` | 新逻辑覆盖 + 378 行现有测试回归 |
+
+### 验收检查清单
+
+- [ ] FeedbackInjectedPayload 新增字段序列化/反序列化正确
+- [ ] FeedbackCategory 枚举定义完整
+- [ ] RunMonitor per-tool 追踪覆盖 TOOL_FAILED 和 GUARDRAIL_TRIGGERED
+- [ ] 3 次同工具失败 → feedback 含 affected_tool + error_type + suggestion
+- [ ] 失败恢复 → 写入 CONDITION_RESOLVED
+- [ ] 相同输入产生相同 feedback_id（确定性 hash）
+- [ ] 过期反馈不展示（expires_at_seq < state.seq）
+- [ ] 已解决反馈自动隐藏
+- [ ] Planner.revise() 收到 feedback 并正确注入 prompt
+- [ ] Operator API 写入的反馈走完整 EventStore→fold→Scheduler 路径
+- [ ] 全部 378 行已有测试不受影响
+
+---
+
 ## V1.0 — 生产就绪（P1/P2）
 
 **前置依赖**: V0.6 完成
