@@ -44,3 +44,5 @@ async def ws_events(websocket: WebSocket, run_id: str, api: HarnessAPI = Depends
         pass
     finally:
         ws_clients[:] = [w for w in ws_clients if w is not websocket]
+        if not ws_clients:
+            api._ws_clients.pop(run_id, None)

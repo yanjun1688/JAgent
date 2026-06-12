@@ -109,7 +109,8 @@ class TestConsecutiveFailures:
             })
         fb = await self._state_feedbacks(store)
         assert len(fb) == 1
-        assert "3 consecutive" in fb[0].feedback_text
+        assert fb[0].affected_tool == "test"
+        assert fb[0].error_type == "fail"
         assert fb[0].priority == "high"
 
     @pytest.mark.asyncio
@@ -224,21 +225,64 @@ class TestCleanup:
         assert "run1" not in monitor._consecutive_failures
 
     @pytest.mark.asyncio
-    async def test_cleanup_then_retrigger_produces_new_feedback(self, store: EventStore):
+    async def test_cleanup_then_retrigger_with_new_error(self, store: EventStore):
+        """Multi-mode feedback: different (tool, error) pairs trigger independently.
+
+        browser 3x with NotImplementedError → feedback A
+        http_request 3x with ConnectTimeout  → feedback B  (different key, not blocked by dedup)
+        """
         monitor = RunMonitor(store)
         monitor.attach()
         for i in range(3):
             await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "test", "error": "fail", "retryable": False,
+                "tool_call_id": f"t{i}", "tool_name": "browser", "error": "NotImplementedError: x", "retryable": False,
             })
         monitor.cleanup("run1")
         for i in range(3, 6):
             await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "test", "error": "fail", "retryable": False,
+                "tool_call_id": f"t{i}", "tool_name": "http_request", "error": "ConnectTimeout: www.example.com", "retryable": False,
             })
         events = await store.get_events("run1")
         state = fold_events(events)
-        assert len(state.feedbacks) == 2  # one before cleanup, one after
+        assert len(state.feedbacks) == 2  # browser NotImpl + http ConnectTimeout
+
+    @pytest.mark.asyncio
+    async def test_different_errors_on_same_endpoint_trigger_separate_feedbacks(self, store: EventStore):
+        """Different error types on same endpoint each trigger their own feedback.
+
+        Without fix: ep_key-only dedup blocks second error type entirely.
+        With fix: dedup key is (ep_key, error_type), so each error type fires independently.
+        """
+        from harness.core.fold import fold_events
+
+        async def _state_feedbacks(store, run_id="run1"):
+            events = await store.get_events(run_id)
+            state = fold_events(events)
+            return state.feedbacks
+
+        monitor = RunMonitor(store)
+        monitor.attach()
+        # 3x same endpoint, same error → 1 feedback
+        for i in range(3):
+            await _write_event(store, "run1", EventType.TOOL_FAILED, {
+                "tool_call_id": f"t{i}", "tool_name": "http_request",
+                "error": "ConnectTimeout: httpbin.org", "retryable": False,
+            })
+        fb = await _state_feedbacks(store)
+        assert len(fb) == 1, f"Expected 1 feedback after 3 same errors, got {len(fb)}"
+        assert fb[0].error_type == "ConnectTimeout"
+
+        # 3x same endpoint, DIFFERENT error → should be a 2nd feedback (not deduped)
+        for i in range(3, 6):
+            await _write_event(store, "run1", EventType.TOOL_FAILED, {
+                "tool_call_id": f"t{i}", "tool_name": "http_request",
+                "error": "InvalidURL: httpbin.org/bad", "retryable": False,
+            })
+        fb = await _state_feedbacks(store)
+        assert len(fb) == 2, (
+            f"Bug: different error type should trigger separate feedback, "
+            f"got {len(fb)} — _fed_ep_keys dedup granularity too coarse"
+        )
 
 
 # ── FeedbackInjected Event Persistence ─────────────────────────
@@ -363,6 +407,52 @@ class TestSchedulerFeedbackIntegration:
         # Scheduler reads from folded state.feedbacks, not from memory buffer
         assert kernel.think_calls[0]["feedback"] is not None
         assert "Token warning" in kernel.think_calls[0]["feedback"]
+
+
+# ── #37: DAG_STEP_FAILED must trigger monitoring like TOOL_FAILED ─
+
+
+class TestDagStepFailedMonitoring:
+    """#37: RunMonitor must track DAG_STEP_FAILED events like TOOL_FAILED."""
+
+    async def _state_feedbacks(self, store, run_id="run-dag-mon"):
+        events = await store.get_events(run_id)
+        state = fold_events(events)
+        return state.feedbacks
+
+    @pytest.mark.asyncio
+    async def test_dag_step_failed_increments_consecutive_failures(self, store: EventStore):
+        """After 3 DAG_STEP_FAILED events, monitor should inject feedback."""
+        monitor = RunMonitor(store)
+        monitor.attach()
+
+        for i in range(3):
+            await _write_event(store, "run-dag-mon", EventType.DAG_STEP_FAILED, {
+                "plan_id": "p1", "step_id": f"s{i}", "error": "execution error",
+                "retryable": False,
+            })
+
+        fb = await self._state_feedbacks(store)
+        assert len(fb) == 1, (
+            f"#37: 3 consecutive DAG_STEP_FAILED should trigger feedback. "
+            f"Got {len(fb)} feedbacks"
+        )
+        assert fb[0].error_type == "execution error"
+        assert fb[0].priority == "high"
+
+    @pytest.mark.asyncio
+    async def test_dag_step_failed_single_does_not_trigger(self, store: EventStore):
+        """1 DAG_STEP_FAILED should NOT trigger feedback (threshold is 3)."""
+        monitor = RunMonitor(store)
+        monitor.attach()
+
+        await _write_event(store, "run-dag-single", EventType.DAG_STEP_FAILED, {
+            "plan_id": "p1", "step_id": "s1", "error": "execution error",
+            "retryable": False,
+        })
+
+        fb = await self._state_feedbacks(store, run_id="run-dag-single")
+        assert len(fb) == 0
 
 
 # ── 9.5 attach / cleanup integration ───────────────────────────

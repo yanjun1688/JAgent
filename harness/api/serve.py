@@ -40,6 +40,7 @@ from harness.tools.file_op import FILE_OP_DEF, file_op_fn, set_sandbox_root
 from harness.tools.http_request import HTTP_REQUEST_DEF, http_request_fn
 from harness.tools.mcp_call import MCP_CALL_DEF, mcp_call_fn
 from harness.tools.registry import ToolRegistry
+from logging.handlers import RotatingFileHandler
 
 _logger = guard_logger("serve")
 
@@ -67,12 +68,30 @@ class _RoleFormatter(logging.Formatter):
         return super().format(record)
 
 
-_handler = logging.StreamHandler()
-_handler.setFormatter(_RoleFormatter(
+_fmt = _RoleFormatter(
     fmt="%(asctime)s [%(role)-7s] %(message)s",
     datefmt="%H:%M:%S",
-))
-logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
+)
+
+# Console output
+_handler = logging.StreamHandler()
+_handler.setFormatter(_fmt)
+
+# File output with rotation
+_log_dir = Path(os.environ.get("HARNESS_LOG_DIR", "data/logs"))
+_log_dir.mkdir(parents=True, exist_ok=True)
+_file_handler = RotatingFileHandler(
+    filename=str(_log_dir / "harness.log"),
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(_fmt)
+
+# Only log harness.* namespaces to file (skip uvicorn/3rd-party noise)
+_file_handler.addFilter(logging.Filter("harness"))
+
+logging.basicConfig(level=logging.INFO, handlers=[_handler, _file_handler], force=True)
 
 # 独立控制三类日志等级（默认均为 INFO）：
 #   logging.getLogger("harness.agent").setLevel(logging.DEBUG)
@@ -166,7 +185,7 @@ api.llm_client = client
 
 # ── 3. 装配 ContextManager ─────────────────────────────────
 
-cm = ContextManager(store, llm_client=None, token_limit=0, checkpoint_interval=10)
+cm = ContextManager(store, llm_client=client if USE_REAL_LLM else None, token_limit=128000, checkpoint_interval=10)
 api.context_manager = cm
 
 

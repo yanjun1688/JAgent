@@ -172,6 +172,8 @@ class EventStore:
             stale = [rid for rid, lk in self._seq_locks.items() if not lk.locked()]
             for rid in stale:
                 self._seq_locks.pop(rid, None)
+        # Known Issue: count-based eviction above may miss locks held across the
+        # 50-write checkpoint. Needs time-based TTL. See TODO_v2.1.md §Known Technical Debt.
 
         next_seq = await self.get_latest_seq(run_id)
         event = Event(

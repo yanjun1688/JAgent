@@ -90,6 +90,8 @@ class OpenAILLMClient(LLMClient):
 
         _logger.info("[LLM] Sending %d messages (%.0f chars) to %s",
                      len(messages), sum(len(str(m)) for m in messages), self.model)
+        for i, m in enumerate(messages):
+            _logger.info("[LLM]   msg[%d] role=%s, content=%s...", i, m.get("role", "?"), str(m.get("content", ""))[:200])
 
         _t0 = time.monotonic()
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -99,7 +101,7 @@ class OpenAILLMClient(LLMClient):
                 json=body,
             )
             if resp.status_code != 200:
-                _logger.error("[LLM] API responded %d: %.200s", resp.status_code, resp.text)
+                _logger.error("[LLM] API responded %d: %s", resp.status_code, resp.text)
                 resp.raise_for_status()
             data = resp.json()
         _ms = (time.monotonic() - _t0) * 1000
@@ -138,6 +140,6 @@ class OpenAILLMClient(LLMClient):
                          ", ".join(tool_names), finish_reason)
             return "\n".join(lines)
 
-        _logger.info("[LLM] → text (%d chars) [reason=%s]: %.300s",
+        _logger.info("[LLM] → text (%d chars) [reason=%s]: %s",
                      len(content), finish_reason, content)
         return content

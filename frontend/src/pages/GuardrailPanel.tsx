@@ -22,6 +22,7 @@ export default function GuardrailPanel() {
     setLoading(true)
     getGuardrailStats()
       .then((res) => setGuardrails(res.guardrails))
+      .catch(() => setGuardrails([]))
       .finally(() => setLoading(false))
   }, [])
 

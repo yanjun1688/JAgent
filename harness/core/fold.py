@@ -193,6 +193,22 @@ def fold_events(events: list[Event]) -> RunState:
                 p = ContextCompressedPayload(**event.payload)
                 state.summary = p.summary_ref
                 state.keep_recent_count = p.keep_recent_count
+                if isinstance(state.summary, EpisodeSummary) and state.summary.original_event_refs:
+                    compressed_seqs = set(state.summary.original_event_refs)
+                    keep = max(p.keep_recent_count, 0)
+                    recent_thought_seqs = {t.seq for t in state.thought_history[-keep:]} if keep > 0 else set()
+                    recent_result_seqs = {tr.event_seq for tr in state.tool_results[-keep:]} if keep > 0 else set()
+                    state.thought_history = [
+                        t for t in state.thought_history
+                        if t.seq not in compressed_seqs or t.seq in recent_thought_seqs
+                    ]
+                    state.tool_results = [
+                        tr for tr in state.tool_results
+                        if tr.event_seq not in compressed_seqs or tr.event_seq in recent_result_seqs
+                    ]
+                    # Known Issue: tool_calls and feedbacks are NOT trimmed here.
+                    # They accumulate unboundedly over long runs.
+                    # See TODO_v2.1.md §Known Technical Debt.
 
             case EventType.CONTEXT_CHECKPOINTED:
                 p = ContextCheckpointedPayload(**event.payload)

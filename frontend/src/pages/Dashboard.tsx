@@ -61,6 +61,7 @@ export default function Dashboard() {
     else since = 0
     getDashboard(since, until)
       .then((res) => setData(res.overview))
+      .catch(() => setData(null))
       .finally(() => setLoading(false))
   }, [timeWindow])
 

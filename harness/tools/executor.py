@@ -273,23 +273,38 @@ class ToolExecutor:
                 try:
                     jsonschema.validate(instance=output, schema=tool_def.output_schema)
                 except jsonschema.ValidationError as exc:
-                    _log_sandbox.warning("[sandbox] Output schema validation failed: %s (%dms)",
-                                         exc.message, duration_ms)
-                    tp = ToolFailedPayload(
-                        tool_call_id=tool_call_id,
-                        tool_name=tool_name,
-                        error=f"Output schema validation failed: {exc.message}",
-                        retryable=False,
-                    )
-                    await self.store.append_event(run_id, EventType.TOOL_FAILED, tp.model_dump())
-                    return ToolExecutionResult(
-                        status=ExecutionStatus.FAILED,
-                        tool_call_id=tool_call_id,
-                        tool_name=tool_name,
-                        idempotency_key=ik_key,
-                        error=f"Output schema validation failed: {exc.message}",
-                        duration_ms=duration_ms,
-                    )
+                    if self._structurally_usable(output):
+                        _log_sandbox.warning(
+                            "[sandbox] Output schema validation failed (%s) but output is"
+                            " structurally usable — accepting",
+                            exc.message,
+                        )
+                    else:
+                        _log_sandbox.warning(
+                            "[sandbox] Output schema validation failed: output=%s (%dms)",
+                            type(output).__name__, duration_ms,
+                        )
+                        tp = ToolFailedPayload(
+                            tool_call_id=tool_call_id,
+                            tool_name=tool_name,
+                            error=(
+                                "Output schema validation failed: expected structured"
+                                f" data, got {type(output).__name__}"
+                            ),
+                            retryable=False,
+                        )
+                        await self.store.append_event(run_id, EventType.TOOL_FAILED, tp.model_dump())
+                        return ToolExecutionResult(
+                            status=ExecutionStatus.FAILED,
+                            tool_call_id=tool_call_id,
+                            tool_name=tool_name,
+                            idempotency_key=ik_key,
+                            error=(
+                                "Output schema validation failed: expected structured"
+                                f" data, got {type(output).__name__}"
+                            ),
+                            duration_ms=duration_ms,
+                        )
 
             if tool_def.side_effects:
                 _log_sandbox.info("[sidefx] tool=%s side_effects=%s",
@@ -374,6 +389,24 @@ class ToolExecutor:
             current_run_id.reset(token)
 
     # ── Helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _structurally_usable(output: Any) -> bool:
+        """Return True if output is structurally navigable by downstream steps.
+
+        Dicts and lists pass (navigable via variable resolution / LLM extraction).
+        None, bool, str, int, float fail (not navigable).
+
+        bool is explicitly excluded before the dict/list check because
+        ``isinstance(False, int)`` is True in Python.
+        """
+        if output is None:
+            return False
+        if isinstance(output, bool):
+            return False
+        if isinstance(output, (dict, list)):
+            return True
+        return False
 
     async def _find_confirmation_received(self, run_id: str, confirmation_id: str):
         return await self.store.find_confirmation_by_id(run_id, confirmation_id)

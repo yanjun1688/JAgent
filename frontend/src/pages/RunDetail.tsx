@@ -11,7 +11,6 @@ import {
   RunDetail as RunDetailType,
   HarnessEvent,
 } from '../api/client'
-import type { PendingConfirmationItem } from '../api/schema'
 import ConfirmDialog from '../components/ConfirmDialog'
 
 const EVENT_COLORS: Record<string, string> = {
@@ -24,6 +23,16 @@ const EVENT_COLORS: Record<string, string> = {
   GuardrailTriggered: '#ff7043',
   ConfirmationRequested: '#ffa726',
   ConfirmationReceived: '#26a69a',
+  ContextCompressed: '#26c6da',
+  ContextCheckpointed: '#78909c',
+  DagStepStarted: '#42a5f5',
+  DagStepCompleted: '#66bb6a',
+  DagStepFailed: '#ef5350',
+  PlanCreated: '#7c4dff',
+  PlanRevised: '#ffa726',
+  PlanCompleted: '#66bb6a',
+  PlanFailed: '#ef5350',
+  FeedbackInjected: '#ec407a',
   RunPaused: '#78909c',
   RunResumed: '#26a69a',
   RunCompleted: '#66bb6a',
@@ -42,6 +51,15 @@ export default function RunDetail() {
     input: Record<string, unknown> | undefined
     riskLevel: string | undefined
   } | null>(null)
+
+  const [expandedSeqs, setExpandedSeqs] = useState<Set<number>>(new Set())
+  const toggleExpand = useCallback((seq: number) => {
+    setExpandedSeqs((prev) => {
+      const next = new Set(prev)
+      if (next.has(seq)) next.delete(seq); else next.add(seq)
+      return next
+    })
+  }, [])
 
   const wsRef = useRef<WebSocket | null>(null)
   const lastSeqRef = useRef(0)
@@ -125,6 +143,16 @@ export default function RunDetail() {
     if (!runId || !confirmDialog) return
     await confirmAction(runId, confirmDialog.confirmationId, confirmed, operatorId)
     setConfirmDialog(null)
+    if (run?.pause_reason === 'waiting_confirmation') {
+      await resumeRun(runId)
+    }
+    await load()
+  }
+
+  async function handleInlineConfirm(confirmationId: string, confirmed: boolean) {
+    if (!runId) return
+    await confirmAction(runId, confirmationId, confirmed, '')
+    await resumeRun(runId)
     await load()
   }
 
@@ -153,6 +181,26 @@ export default function RunDetail() {
         return `${p.tool_name} ⚠ requires confirmation`
       case 'ConfirmationReceived':
         return `→ ${p.confirmed ? 'confirmed' : 'denied'} by ${p.operator_id}`
+      case 'DagStepStarted':
+        return `${p.tool_name} step ${p.step_id}`
+      case 'DagStepCompleted':
+        return `${p.tool_name} ✓ (${p.duration_ms}ms)`
+      case 'DagStepFailed':
+        return `${p.tool_name} ✗ ${p.error}`
+      case 'PlanCreated':
+        return `Plan: ${JSON.stringify(p).slice(0, 100)}`
+      case 'PlanRevised':
+        return `Revised: ${p.revision_reason as string}`
+      case 'PlanCompleted':
+        return `Plan completed ✓`
+      case 'PlanFailed':
+        return `Plan failed ✗ ${p.final_error as string}`
+      case 'FeedbackInjected':
+        return `Feedback: ${(p.message as string)?.slice(0, 100)}`
+      case 'ContextCompressed':
+        return `Compressed ${p.original_tokens as number}→${p.compressed_tokens as number} tokens`
+      case 'ContextCheckpointed':
+        return `Checkpoint at seq ${p.checkpoint_seq as number}`
       case 'RunPaused':
         return `Paused: ${p.reason}`
       case 'RunResumed':
@@ -186,7 +234,7 @@ export default function RunDetail() {
               Pause
             </button>
           )}
-          {run.status === 'paused' && (
+          {run.status === 'paused' && run.pause_reason !== 'waiting_confirmation' && (
             <button onClick={handleResume} style={{ cursor: 'pointer' }}>
               Resume
             </button>
@@ -204,25 +252,39 @@ export default function RunDetail() {
         {run.pause_reason ? <span>Paused: {run.pause_reason}</span> : null}
       </div>
 
-      {run.pending_confirmations && run.pending_confirmations.length > 0 && (
-        <div style={{ background: '#fff3e0', padding: 16, borderRadius: 8, marginBottom: 16 }}>
-          <h3 style={{ margin: '0 0 8px' }}>Pending Confirmations</h3>
-          {run.pending_confirmations?.map((pc) => (
-            <div key={pc.confirmation_id} style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 8 }}>
-              <span>
-                Tool: <strong>{pc.tool_name}</strong> (risk: {pc.risk_level})
-              </span>
-              <button
-                onClick={() => setConfirmDialog({
-                  confirmationId: pc.confirmation_id,
-                  toolName: pc.tool_name,
-                  input: pc.input,
-                  riskLevel: pc.risk_level,
-                })}
-                style={{ cursor: 'pointer' }}
-              >
-                Review
-              </button>
+      {run.status === 'paused' && run.pause_reason === 'waiting_confirmation' && run.pending_confirmations && run.pending_confirmations.length > 0 && (
+        <div style={{ background: '#fff3e0', border: '1px solid #ffe0b2', borderRadius: 12, padding: 20, marginBottom: 16 }}>
+          <h3 style={{ margin: '0 0 4px', color: '#e65100', fontSize: 16 }}>⚠ Confirmation Required</h3>
+          <p style={{ margin: '0 0 16px', color: '#666', fontSize: 14 }}>
+            The following tool needs your approval before the run can continue:
+          </p>
+          {run.pending_confirmations.map((pc) => (
+            <div key={pc.confirmation_id} style={{ background: '#fff', border: '1px solid #ffe0b2', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+              <div style={{ marginBottom: 8 }}>
+                <strong>{pc.tool_name}</strong>
+                <span style={{ marginLeft: 8, fontSize: 12, color: pc.risk_level === 'high' ? '#d32f2f' : '#f57c00' }}>
+                  (risk: {pc.risk_level})
+                </span>
+              </div>
+              {pc.input && Object.keys(pc.input).length > 0 && (
+                <pre style={{ margin: '0 0 8px', fontSize: 12, background: '#f5f5f5', padding: 8, borderRadius: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                  {JSON.stringify(pc.input, null, 2)}
+                </pre>
+              )}
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button
+                  onClick={() => handleInlineConfirm(pc.confirmation_id, false)}
+                  style={{ padding: '6px 16px', background: '#ef5350', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 13 }}
+                >
+                  Deny & Continue
+                </button>
+                <button
+                  onClick={() => handleInlineConfirm(pc.confirmation_id, true)}
+                  style={{ padding: '6px 16px', background: '#66bb6a', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 13 }}
+                >
+                  Approve & Continue
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -231,34 +293,58 @@ export default function RunDetail() {
       <h2>Event Stream</h2>
       <div style={{ fontFamily: 'monospace', fontSize: 13, lineHeight: 1.6 }}>
         {events.map((e) => (
-          <div
-            key={`${e.seq}-${e.event_type}`}
-            style={{
-              padding: '6px 12px',
-              borderLeft: `3px solid ${EVENT_COLORS[e.event_type] || '#ddd'}`,
-              marginBottom: 2,
-              background: '#fafafa',
-            }}
-          >
-            <span style={{ color: '#999', marginRight: 8 }}>
-              #{e.seq}
-            </span>
-            <span
+          <div key={`${e.seq}-${e.event_type}`}>
+            <div
+              onClick={() => toggleExpand(e.seq)}
               style={{
-                display: 'inline-block',
-                padding: '1px 6px',
-                borderRadius: 4,
-                fontSize: 11,
-                background: EVENT_COLORS[e.event_type] || '#eee',
-                color: '#fff',
-                marginRight: 8,
-                fontWeight: 'bold',
+                padding: '6px 12px',
+                borderLeft: `3px solid ${EVENT_COLORS[e.event_type] || '#ddd'}`,
+                marginBottom: expandedSeqs.has(e.seq) ? 0 : 2,
+                background: expandedSeqs.has(e.seq) ? '#f0f0f0' : '#fafafa',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
               }}
             >
-              {e.event_type}
-            </span>
-            <span style={{ color: '#999', marginRight: 8 }}>{formatTime(e.created_at)}</span>
-            <span>{eventSummary(e)}</span>
+              <span style={{ color: '#999', minWidth: 36, fontSize: 12 }}>
+                #{e.seq}
+              </span>
+              <span
+                style={{
+                  display: 'inline-block',
+                  padding: '1px 6px',
+                  borderRadius: 4,
+                  fontSize: 11,
+                  background: EVENT_COLORS[e.event_type] || '#eee',
+                  color: '#fff',
+                  marginRight: 8,
+                  fontWeight: 'bold',
+                  minWidth: 100,
+                  textAlign: 'center' as const,
+                }}
+              >
+                {e.event_type}
+              </span>
+              <span style={{ color: '#999', minWidth: 65, marginRight: 8 }}>{formatTime(e.created_at)}</span>
+              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{eventSummary(e)}</span>
+              <span style={{ color: '#ccc', fontSize: 11, flexShrink: 0 }}>{expandedSeqs.has(e.seq) ? '▲' : '▼'}</span>
+            </div>
+            {expandedSeqs.has(e.seq) && (
+              <div
+                style={{
+                  padding: '10px 16px',
+                  background: '#f8f9fa',
+                  borderLeft: '3px solid #ddd',
+                  fontSize: 12,
+                  marginBottom: 2,
+                }}
+              >
+                <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 300, overflow: 'auto' }}>
+                  {JSON.stringify(e.payload, null, 2)}
+                </pre>
+              </div>
+            )}
           </div>
         ))}
       </div>

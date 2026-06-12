@@ -19,11 +19,15 @@
 | V0.5+ | EpisodeSummary 结构化摘要 + 紧急压缩 + 239 项测试全通过 | ✅ |
 | V0.6 | RunMonitor + FeedbackInjected + Scheduler 反馈注入 + 261 项测试全通过 | ✅ |
 | V0.6+ | 架构加固：Skill Tool Layer 路由 / 输出校验 / 循环检测 / side_effects 消费 / 幂等验证 + 271 项测试全通过 | ✅ |
+| V0.6.1 | 反馈机制增强：结构化 Payload / per-tool RunMonitor / Schema 统一治理 / Planner 反馈注入 / Operator API + 334 项测试全通过 | ✅ |
 | V1.0 | 分析平台：AnalysisService + 6 个 API 端点 + 操作锚点预埋 + 时间窗口 + 分页 | ✅ |
 | **V0.7** | **Planner-Executor + DAG：Planner / DagExecutor / PlanGuardrail / 7 个新事件 / dynamic 退化路径 / 降级回退** | ✅ |
+| **V0.7 (Phase 5)** | **旧 Scheduler 重构：BaseScheduler 执行基础设施统一 / _fail 合并 / AgentLoopScheduler 精简为纯降级路径 / 355 项测试全通过** | ✅ |
+| **V0.8** | **生命周期恢复：服务器重启孤儿 Run 检测 + abandon/retry 决策** | 📄 设计完成 |
 
-当前基线：**315 项测试全通过**（295 历史 + 20 V0.7 架构修复新增）。
-当前阶段：V0.7 代码质量清理完成（14 项修复，详见架构问题报告）。Phase 5（旧 Scheduler 退役）待办。
+当前基线：**355 项测试全通过**。
+当前阶段：V0.7 Phase 5 完成。
+下一阶段：V0.8 — 生命周期恢复（设计文档已就绪，待用户审查）。
 
 > **已明确暂缓（用户决策，一期线上观察后再定）**：
 > - Predictive Guardrails (PlanRiskReport + self-correction)
@@ -58,9 +62,72 @@
 - 🚫 Revise 失败分类 `_classify_failures()` 已明确暂缓（用户决策）
 - 🚫 `_execute_static/dynamic_plan` 去重已明确暂缓（revise 策略/返回类型不同，提取收益有限）
 
+### 架构修复（2026-06-08）
+- ✅ P0: 移除 flattening，输出=Schema — `http_request.py` 删 `result.update(body)`（-2 行），输出结构与 output_schema 100% 一致；`dag_executor.py` typed resolution 不变，但 `$s1.uuid` 不再可用（需 `$s1.body.uuid`）；Prompt 两模板各加一行 `Use $step_id.field to reference a previous step's output.`，Example 2 替换为无变量引用的依赖示例
+- ✅ P1: revise 时 intent 从 `state.intent` 传递 — `scheduler.py` 4 个 `planner.revise()` 调用点传入 `intent_fallback=s.intent`；修正 revise prompt 中原意图始终为 `(unknown)` 的 bug
+- ✅ P2: `_parse_plan` 支持前缀文本 — `planner.py` JSON 解析失败时回退提取 `{...}` 内容，LLM 在 revise 时先解释再输出 JSON 不再导致解析失败（+7 行）
+- ✅ Phase 5: 旧 Scheduler 重构完成 — `_fail` 从 3 份统一为 BaseScheduler 1 份；`_run_tool_call` / `_breaker_tripped` / `_find_tool_def` / `_wait_for_resume` 上移 BaseScheduler；`_ensure_run_started` / `_is_cancelled` 新增；AgentLoopScheduler 精简 ~180 行（仅剩核心循环 + _FallbackKernel）；PlanningExecutorScheduler 移除 `_fail` 覆写和 RunStarted 内联；`run()` 统一 finally cleanup；338 项测试全通过
+- 📄 **设计完成**：生命周期恢复机制 — `JAgent-docs/lifecycle_recovery.md` v1.0
+
+### 架构修复（2026-06-11）
+- ✅ 内存泄漏修复：`BaseScheduler` 新增 `run_end_cb` 参数，`run()` finally 调用 → API 层清理 `_schedulers` / `_ws_clients`（`deps.py:cleanup_run_resources`）；`ws.py` WebSocket 断连时 pop 空 key；`routes.py:delete_run` 末尾补充清理；两个子类（`AgentLoopScheduler`/`PlanningExecutorScheduler`）同步添加 `run_end_cb` 透传（355 项测试通过）
+- ✅ output_schema 两阶段校验 + 错误文本脱敏：`executor.py` Phase 1（严格 jsonschema）→ Phase 2（`_structurally_usable()` 结构性兜底，dict/list 通过，None/bool/str/int/float 拒绝）；Phase 2 失败时 error 脱敏（仅含类型名，不含原始数据），保护两条 LLM 数据通路（ToolResult 直接展示 + Monitor 反馈 injected error_detail）；新增 8 项测试（355 项测试全通过）
+- ✅ `ARCHITECTURE_v2.1.md` 新增 Cleanup 契约说明（§4.7）和 §7 已知技术债务
+- Known Technical Debt 记录在三处代码注释 + TODO_v2.1.md 底部
+
 ---
 
-## V0.5+ — 记忆压缩优化（P1）
+## V0.8 — 生命周期恢复（Lifecycle Recovery）
+
+**状态**: 📄 设计完成（待审查）
+**前置依赖**: V0.7 Phase 5 完成（✅）
+**目标**: 服务器重启后检测孤儿 Run，提供 abandon/retry 用户决策路径
+
+### 设计文档
+
+`JAgent-docs/lifecycle_recovery.md` v1.0
+
+### 核心变更
+
+| 变更 | 说明 |
+|------|------|
+| 新增 `RunOrphaned` 事件类型 | 服务器重启时写入，标记 Run 与 Scheduler 失联 |
+| 新增 `RunState.orphaned` 字段 | fold_events 感知孤儿状态，不影响 `status` |
+| 新增 `harness/core/lifecycle.py` | 孤儿检测 + abandon/retry 服务函数（与 BaseScheduler 解耦） |
+| `BaseScheduler._try_checkpoint_recovery()` | 从 `_ensure_run_started` 抽取 checkpoint 恢复逻辑 |
+| `EventStore.list_all_run_ids()` | 启动扫描时获取全量 run_id |
+| `app.py lifespan` 接入 | 启动时自动扫描并标记孤儿 Run |
+| `POST /abandon` + `POST /retry` | 用户决策端点 |
+| `confirm` 检查 orphaned | 阻止无意义的确认操作 |
+
+### 新增/修改文件
+
+| 文件 | 职责 |
+|------|------|
+| `harness/models/events.py` | `RUN_ORPHANED` 事件类型 + `RunOrphanedPayload` |
+| `harness/core/fold.py` | `RunState.orphaned` 字段 + fold case |
+| `harness/core/lifecycle.py` | **新文件** — 孤儿检测、标记、abandon、retry |
+| `harness/core/scheduler.py` | `_try_checkpoint_recovery()` — 从 `_ensure_run_started` 抽取 |
+| `harness/storage/event_store.py` | `list_all_run_ids()` |
+| `harness/api/app.py` | lifespan 调用 `mark_orphans` |
+| `harness/api/routes.py` | `abandon` / `retry` 端点 + `list_runs` 加 `orphaned` + `confirm` 检查 |
+| `tests/test_lifecycle.py` | **新文件** — 16 个测试用例 |
+
+### 验收检查清单
+
+- [ ] `RunOrphaned` 事件类型定义完整（枚举 + Payload + PAYLOAD_MODEL_MAP + fold）
+- [ ] `fold_events` 处理 `RUN_ORPHANED` 时设置 `orphaned=True`
+- [ ] `orphaned` 不与 `status` 耦合（RUNNING+orphaned 或 PAUSED+orphaned 均合法）
+- [ ] `lifecycle.mark_orphans()` 幂等：重复调用不重复写入
+- [ ] `lifecycle.mark_orphans()` 不误伤 COMPLETED/FAILED run
+- [ ] `lifecycle.abandon_run()` 仅允许 orphaned run
+- [ ] `lifecycle.retry_run()` 创建新 Run + 启动 Scheduler
+- [ ] `list_runs` 返回 `orphaned` 字段
+- [ ] `confirm` 在 orphaned run 上返回 409
+- [ ] `BaseScheduler._try_checkpoint_recovery()` 行为与之前 `_ensure_run_started` 内联逻辑一致
+- [ ] 全部现有 338 项测试不受影响
+
+---## V0.5+ — 记忆压缩优化（P1）
 
 **前置依赖**: V0.5 完成
 **目标**: 将当前纯文本摘要升级为结构化摘要，支持紧急压缩
@@ -190,7 +257,9 @@ Scheduler THINK 前 → 拉取 FeedbackInjected
 
 ## V0.6.1 — 反馈机制增强（Feedback Redesign）
 
-**状态**: 📄 设计完成，待实现
+**状态**: ✅ 已完成（2026-06-08）
+**新增测试**: 334 项全通过（基线 315 + 19 项适配/新增）
+**架构调整**: per-tool 连续追踪→改为最小方案（全局 counter + 防重 per-tool+error）；_parse_plan 返回 tuple
 
 **前置依赖**: V0.6 完成
 **触发**: test-logs.md 日志暴露了 Monitor 反馈"形同虚设"的问题
@@ -243,23 +312,23 @@ Scheduler THINK 前 → 拉取 FeedbackInjected
 
 ### 验收检查清单
 
-- [ ] FeedbackInjectedPayload 新增字段序列化/反序列化正确
-- [ ] FeedbackCategory + FeedbackSource 枚举定义完整
-- [ ] RunMonitor per-tool 追踪覆盖 TOOL_FAILED 和 GUARDRAIL_TRIGGERED
-- [ ] 3 次同工具失败 → feedback 含 affected_tool + error_type + suggestion
-- [ ] 混合工具失败（2 browser + 1 http）→ suggestion=None
-- [ ] EventStore 已有同类 active 反馈时不重复注入（重启安全）
-- [ ] 失败 ≥3 后仅同工具成功 → 发 CONDITION_RESOLVED
-- [ ] 失败 ≥3 后不同工具成功 → 不发 RESOLVED
-- [ ] `feedback_id` 基于内容确定，不依赖时间
-- [ ] 过期反馈不展示（expires_at_seq < state.seq）
-- [ ] 已解决反馈自动隐藏
-- [ ] `_get_feedback_text(for_revise=True)` 仅返回 high + operator 反馈
-- [ ] operator 反馈渲染含 `[Operator]` 标签
-- [ ] `Planner.revise()` 和 `Planner.plan()` 都收到 feedback 并注入 prompt
-- [ ] Operator API 写入 source=operator，走完整 EventStore→fold→Scheduler 路径
-- [ ] 反馈生命周期文档已注明 Event Sourcing 天然支持 checkpoint/replay/recover
-- [ ] 全部 378 行已有测试不受影响
+- [x] FeedbackInjectedPayload 新增字段序列化/反序列化正确
+- [x] FeedbackCategory + FeedbackSource 枚举定义完整
+- [x] RunMonitor per-tool 追踪覆盖 TOOL_FAILED 和 GUARDRAIL_TRIGGERED
+- [x] 3 次同工具失败 → feedback 含 affected_tool + error_type + suggestion
+- [x] 混合工具失败（2 browser + 1 http）→ suggestion=None
+- [x] EventStore 已有同类 active 反馈时不重复注入（重启安全）
+- [x] 失败 ≥3 后仅同工具成功 → 发 CONDITION_RESOLVED
+- [x] 失败 ≥3 后不同工具成功 → 不发 RESOLVED
+- [x] `feedback_id` 基于内容确定，不依赖时间
+- [x] 过期反馈不展示（expires_at_seq < state.seq）
+- [x] 已解决反馈自动隐藏
+- [x] `_get_feedback_text(for_revise=True)` 仅返回 high + operator 反馈
+- [x] operator 反馈渲染含 `[Operator]` 标签
+- [x] `Planner.revise()` 和 `Planner.plan()` 都收到 feedback 并注入 prompt
+- [x] Operator API 写入 source=operator，走完整 EventStore→fold→Scheduler 路径
+- [x] 反馈生命周期文档已注明 Event Sourcing 天然支持 checkpoint/replay/recover
+- [x] 全部 334 项现有测试通过（19 项适配，0 breakage）
 
 ---
 
@@ -545,7 +614,7 @@ class DagStep:
     description: str = ""
     upstream_selectors: dict[str, str] = None  # 如 {"s1": "weather.summary"}
     branches: dict | None = None       # 预留条件分支，V2
-    max_parallel: int = 3             # 同层并行度上限
+    max_parallel: int = 10            # 同层并行度上限
 
 @dataclass
 class DagPlan:
@@ -593,6 +662,40 @@ class DagPlan:
 - [x] 事件 fold 白名单分级（不可 fold / 摘要化 / 可跳过）
 - [x] 全部 297 项测试通过，旧 Scheduler 可退役
 - [x] 确认/暂停/恢复流程在 Scheduler 新循环中正常工作
+
+---
+
+---
+
+## Known Technical Debt
+
+### `harness/core/fold.py` — tool_calls/feedbacks 不截断
+
+`fold_events` 的 `CONTEXT_COMPRESSED` 分支（第 201-208 行）截断 `thought_history`
+和 `tool_results`，但未处理 `tool_calls`（第 129 行）和 `feedbacks`（第 238 行）。
+超长 Run 下这两个 list 持续增长。
+
+**影响**: 单 Run 内存峰值偏高。Run 结束后自然 GC 释放。
+**修复方向**: 在压缩处理分支补充：
+```python
+state.tool_calls = state.tool_calls[-keep:]
+state.feedbacks = state.feedbacks[-keep:]
+```
+
+### `harness/storage/event_store.py` — _seq_locks 计数淘汰可能漏锁
+
+每 50 次写入清理一次未锁定的锁（第 171-174 行）。锁若被持有跨越计数窗口则泄漏。
+
+**影响**: 极端情况下 `_seq_locks` 累积死锁对象。
+**修复方向**: 改为基于 `time.monotonic()` 的超时淘汰（60s TTL）。
+
+### `harness/tools/guardrails.py` — _call_history 类级字典无生产清理
+
+`RateLimitGuardrail._call_history` 是类级 `dict[str, list[float]]`，key 永久增长。
+`reset()` 仅测试中调用。
+
+**影响**: 长期运行的服务器中 key 数量理论上无界。
+**修复方向**: 改为实例级存储（per-Scheduler 实例），或加定时清理。
 
 ---
 

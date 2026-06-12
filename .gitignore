@@ -27,6 +27,10 @@ harness/tools/fanghu.txt
 harness/tools/xx.py
 harness/tools/r*.txt
 
+# Data / Cache
+data/
+frontend/.vite/
+
 # OS
 *.DS_Store
 Thumbs.db

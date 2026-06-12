@@ -15,6 +15,7 @@ export default function ToolsPanel() {
     setLoading(true)
     getToolStats()
       .then((res) => setTools(res.tools))
+      .catch(() => setTools([]))
       .finally(() => setLoading(false))
   }, [])
 

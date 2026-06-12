@@ -218,7 +218,7 @@ class LLMAgentKernel(AgentKernel):
             try:
                 summary = await self.client.chat(summary_messages, max_tokens=512)
                 summary = summary.removeprefix("ANSWER:").removeprefix("THOUGHT:").strip()
-                _logger.info("[summary] Generated user-facing answer: %.200s", summary)
+                _logger.info("[summary] Generated user-facing answer: %s", summary)
                 results[0] = ThinkResult(thought=result.thought, direct_answer=summary)
             except Exception as exc:
                 _logger.warning("[summary] Failed to generate: %s", exc)

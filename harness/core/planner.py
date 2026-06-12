@@ -10,8 +10,8 @@ from typing import Any
 
 from harness.core.fold import RunState
 from harness.core.llm_client import LLMClient
-from harness.core.logger import agent_logger
-from harness.models.events import EventType
+from harness.core.logger import agent_logger, fmtkv
+from harness.models.events import EpisodeSummary, EventType
 from harness.models.plan import DagPlan, DagStep
 from harness.models.tools import ToolDefinition
 from harness.storage.event_store import EventStore
@@ -19,43 +19,90 @@ from harness.tools.registry import ToolRegistry
 
 _log = agent_logger("planner")
 
-_PLAN_PROMPT = """You are a task planner. Given a user intent and available tools,
+# ── JSON Schema 统一驱动 ───────────────────────────────────────
+# Schema 定义 → prompt 生成 → 输出校验，三处使用同一来源
+
+_STEP_SCHEMA_SIMPLE = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "description": "Unique step id, e.g. 's1', 's2'"},
+        "tool": {"type": "string", "description": "Tool name from available tools"},
+        "input": {
+            "type": "object",
+            "description": "ALL action/url/query params go HERE, not at step level",
+            "additionalProperties": True,
+        },
+        "depends_on": {
+            "type": "array", "items": {"type": "string"},
+            "description": "IDs of steps this step depends on (empty if independent)",
+        },
+        "description": {"type": "string", "description": "What this step does"},
+    },
+    "required": ["id", "tool", "input"],
+    "additionalProperties": False,
+}
+
+
+def _build_step_schema_text() -> str:
+    """Return LLM-readable schema text with single braces (for direct use)."""
+    return """Each step MUST be a JSON object with exactly these fields:
+  - "id" (string, required): unique identifier, e.g. "s1"
+  - "tool" (string, required): tool name from the available tools list
+  - "input" (object, required): ALL parameters go inside this object.
+    NEVER put parameters like 'action', 'url', 'query' at the step level.
+    Good: {"id": "s1", "tool": "http_request", "input": {"action": "GET", "url": "..."}}
+    Bad:  {"id": "s1", "tool": "http_request", "action": "GET", "url": "..."}
+  - "depends_on" (array of strings, optional): step dependencies for DAG ordering
+  - "description" (string, optional): what this step does
+
+No other fields are allowed at the step level."""
+
+
+
+
+
+def _validate_step(step: dict, step_index: int) -> str | None:
+    """验证单个 step 是否符合 schema，返回错误描述（None 表示通过）。"""
+    import jsonschema
+    from jsonschema import ValidationError
+    try:
+        jsonschema.validate(instance=step, schema=_STEP_SCHEMA_SIMPLE)
+    except ValidationError as e:
+        bad_field = ".".join(str(p) for p in e.path) if e.path else "structure"
+        return (
+            f"Step '{step.get('id', f'#{step_index}')}' has an error: "
+            f"field '{bad_field}': {e.message}. "
+            f"Remember: ALL tool parameters must be inside 'input'."
+        )
+    return None
+
+
+# Pre-compute for _retry_prompt (single braces, no .format())
+_STEP_SCHEMA_RAW = _build_step_schema_text()
+
+# ── Prompts ─────────────────────────────────────────────────────
+
+_PLAN_PROMPT_TMPL = """You are a task planner. Given a user intent and available tools,
 create a step-by-step plan in JSON format. Each step calls one tool.
 
 ## Rules
 1. Output ONLY valid JSON — no markdown, no code fences, no extra text.
-2. Each step must have an id (unique, like "s1", "s2"), a tool name from the available tools, and an input dict.
-3. If step B depends on step A's result, set B's "depends_on" to ["A_id"].
-4. Independent steps (no depends_on) will be executed in parallel.
-5. The plan is a DAG — no circular dependencies.
-6. If the user's intent is a simple question/chat that needs no tools, return {{"steps": []}}.
+2. If the user's intent is a simple question/chat that needs no tools, return {"steps": []}.
    The content after "## User Intent" will be used as the direct answer.
 
-## Output JSON format:
-{{
-  "steps": [
-    {{"id": "s1", "tool": "tool_name", "input": {{"key": "value"}}}},
-    {{"id": "s2", "tool": "tool_name", "input": {{"key": "value"}}, "depends_on": ["s1"]}}
-  ]
-}}
+## Output JSON format
+{step_schema}
 
-## Example 1 — Simple independent steps:
+## Example 1 — Independent steps:
 User: "Search for weather in Tokyo and London"
-{{
-  "steps": [
-    {{"id": "s1", "tool": "browser_search", "input": {{"query": "Tokyo weather"}}}},
-    {{"id": "s2", "tool": "browser_search", "input": {{"query": "London weather"}}}}
-  ]
-}}
+{"steps": [{"id": "s1", "tool": "browser_search", "input": {"query": "Tokyo weather"}}, {"id": "s2", "tool": "browser_search", "input": {"query": "London weather"}}]}
 
 ## Example 2 — Dependent steps:
-User: "Search for a recipe and save it to a file"
-{{
-  "steps": [
-    {{"id": "s1", "tool": "browser_search", "input": {{"query": "chicken recipe"}}}},
-    {{"id": "s2", "tool": "file_op", "input": {{"path": "recipe.txt", "content": "$s1_result"}}, "depends_on": ["s1"]}}
-  ]
-}}
+User: "Search for Tokyo weather and save to a file"
+{"steps": [{"id": "s1", "tool": "browser_search", "input": {"query": "Tokyo weather"}}, {"id": "s2", "tool": "file_op", "input": {"path": "tokyo.txt", "content": "done"}, "depends_on": ["s1"]}]}
+
+## Data Flow
+Use $step_id.field to reference a previous step's output.
 
 ## Available Tools
 {tool_descriptions}
@@ -64,7 +111,7 @@ User: "Search for a recipe and save it to a file"
 {intent}
 """
 
-_REVISE_PROMPT = """You are a task planner reviewing execution results.
+_REVISE_PROMPT_TMPL = """You are a task planner reviewing execution results.
 Some steps completed, some may have failed. Decide what to do next.
 
 ## Original User Intent
@@ -72,18 +119,27 @@ Some steps completed, some may have failed. Decide what to do next.
 
 {system_state}
 
-## Output JSON format — same as before:
+## Output JSON format
+{step_schema}
+
 Return a revised plan with only the REMAINING steps (steps that haven't been executed yet).
-If all steps are done, return {{"steps": []}}.
-If the task cannot be completed, return {{"steps": [], "failed": true, "reason": "explanation"}}.
+If all steps are done, return {"steps": []}.
+If the task cannot be completed, return {"steps": [], "failed": true, "reason": "explanation"}.
+
+## Data Flow
+Use $step_id.field to reference a previous step's output.
 
 ## Available Tools
 {tool_descriptions}
 """
 
-_RETRY_PROMPT = """The previous output was not valid JSON. Please output ONLY valid JSON for the plan.
-No markdown, no code fences, no extra text — just the JSON object.
-"""
+def _retry_prompt(last_error: str) -> str:
+    """生成带具体错误信息的重试提示。"""
+    return (
+        f"Your previous response had a format error:\n{last_error}\n\n"
+        f"Please fix this and output ONLY valid JSON.\n"
+        f"Remember the required format:\n{_STEP_SCHEMA_RAW}"
+    )
 
 
 class PlanGuardrail:
@@ -127,7 +183,7 @@ class PlanGuardrail:
             return errors
 
         try:
-            plan.topological_sort()
+            plan.topological_sort(completed_step_ids=completed)
         except ValueError as e:
             errors.append(str(e))
 
@@ -197,23 +253,30 @@ class Planner:
         self.guardrail = PlanGuardrail(registry, store)
         self.last_raw_response: str = ""
 
-    async def plan(self, intent: str, state: RunState | None = None) -> DagPlan | None:
-        prompt = self._build_plan_prompt(intent)
+    async def plan(
+        self, intent: str,
+        state: RunState | None = None,
+        feedback: str | None = None,
+    ) -> DagPlan | None:
+        prompt = self._build_plan_prompt(intent, feedback=feedback)
+        _log.info("[plan] Entry %s", fmtkv(
+            intent=intent[:80], feedback_len=len(feedback) if feedback else 0,
+            has_feedback=feedback is not None,
+        ))
         last_error = ""
 
         for attempt in range(1, self.max_plan_retries + 2):
             messages = [{"role": "system", "content": prompt}]
             if last_error:
-                messages.append({"role": "user", "content": f"Previous attempt failed: {last_error}. {_RETRY_PROMPT}"})
+                messages.append({"role": "user", "content": _retry_prompt(last_error)})
 
-            _log.info("[plan] Attempt %d/%d for intent: %.60s", attempt, self.max_plan_retries + 1, intent)
+            _log.info("[plan] Attempt %d/%d for intent: %s", attempt, self.max_plan_retries + 1, intent)
             response = await self.llm.chat(messages, temperature=0.0)
-            _log.info("[plan] LLM response (%d chars): %.200s", len(response), response)
+            _log.info("[plan] LLM response (%d chars): %s", len(response), response)
 
             self.last_raw_response = response
-            plan = self._parse_plan(response)
+            plan, last_error = self._parse_plan(response)
             if plan is None:
-                last_error = "JSON parse failed — response was not valid JSON"
                 _log.warning("[plan] Parse failed on attempt %d: %s", attempt, last_error)
                 continue
 
@@ -234,73 +297,142 @@ class Planner:
         plan: DagPlan,
         results: dict[str, Any],
         system_state: str,
+        feedback: str | None = None,
+        intent_fallback: str = "",
     ) -> DagPlan | None:
-        prompt = _REVISE_PROMPT.format(
-            intent=plan.intent[:200] if plan.intent else "(unknown)",
-            system_state=system_state,
-            tool_descriptions=self._build_tool_descriptions(),
-        )
+        intent = plan.intent[:200] if plan.intent else (intent_fallback[:200] if intent_fallback else "(unknown)")
+        feedback_section = self._build_feedback_section(feedback)
+        _log.info("[revise] Entry %s", fmtkv(
+            intent=intent[:80], has_feedback=feedback is not None,
+            feedback_len=len(feedback) if feedback else 0,
+            completed=len([sid for sid, r in results.items()
+                          if isinstance(r, dict) and r.get("status") in ("completed", "idempotency_hit")]),
+        ))
+        prompt = _REVISE_PROMPT_TMPL.replace("{step_schema}", _build_step_schema_text())
+        prompt = prompt.replace("{intent}", intent)
+        prompt = prompt.replace("{system_state}", system_state)
+        prompt = prompt.replace("{tool_descriptions}", self._build_tool_descriptions())
+        if feedback_section:
+            prompt += f"\n{feedback_section}"
         total_attempts = self.max_plan_retries + 1
         completed_step_ids = {
             sid for sid, r in results.items()
             if isinstance(r, dict) and r.get("status") in ("completed", "idempotency_hit")
         }
 
+        last_error = ""
         for attempt in range(1, total_attempts + 1):
             messages = [{"role": "system", "content": prompt}]
-            if attempt > 1:
-                messages.append({"role": "user", "content": _RETRY_PROMPT})
+            if last_error:
+                messages.append({"role": "user", "content": _retry_prompt(last_error)})
 
             response = await self.llm.chat(messages, temperature=0.0)
-            plan = self._parse_plan(response)
+            revised, last_error = self._parse_plan(response)
 
-            if plan is None:
-                _log.warning("[revise] Parse failed on attempt %d", attempt)
+            if revised is None:
+                _log.warning("[revise] Parse failed on attempt %d: %s", attempt, last_error)
                 continue
 
-            if not plan.steps:
+            if not revised.steps:
                 _log.info("[revise] Attempt %d — task complete (empty steps)", attempt)
-                return DagPlan(intent=plan.intent, steps=[], dynamic=True)
+                return DagPlan(intent=revised.intent, steps=[], dynamic=True)
 
-            errors = self.guardrail.validate(plan, completed_step_ids=completed_step_ids)
+            errors = self.guardrail.validate(revised, completed_step_ids=completed_step_ids)
             if errors:
-                _log.warning("[revise] Guardrail failed on attempt %d: %s", attempt, "; ".join(errors))
+                last_error = "; ".join(errors)
+                _log.warning("[revise] Guardrail failed on attempt %d: %s", attempt, last_error)
                 continue
 
-            _log.info("[revise] Attempt %d — valid plan with %d steps", attempt, len(plan.steps))
-            return plan
+            _log.info("[revise] Attempt %d — valid plan with %d steps", attempt, len(revised.steps))
+            return revised
 
         _log.error("[revise] All %d attempts failed", total_attempts)
         return None
 
     async def generate_answer(self, intent: str, state: RunState, feedback: str | None) -> str:
-        """Generate a conversational final answer when no tools are needed."""
+        """Generate a conversational final answer when no tools are needed.
+
+        All context (tool results, summary, feedback) is packed into a single
+        user message so the LLM sees everything as content to answer, regardless
+        of how different models handle multiple system messages.
+        """
         prompt = (
             "You are a helpful assistant. Answer the user's question directly and naturally.\n"
             "Do not call any tools. Just respond as a knowledgeable assistant.\n"
+            "Provide a complete answer with all the information gathered. "
+            "If the user asks for a comparison or recommendation, include that explicitly.\n"
         )
         messages = [{"role": "system", "content": prompt}]
-        if feedback:
-            messages.append({"role": "system", "content": f"## Feedback\n{feedback}"})
+
+        parts = []
+        n_tool_results = len(state.tool_results)
+
+        if state.tool_results:
+            parts.append("[Tool execution results]")
+            for tr in state.tool_results:
+                parts.append(f"[{tr.tool_name}]")
+                if tr.output is not None:
+                    output_str = str(tr.output)
+                    if len(output_str) > 5000:
+                        output_str = output_str[:5000] + "\n...(truncated)..."
+                    parts.append(output_str)
+                elif tr.error:
+                    parts.append(f"Error: {tr.error}")
+                parts.append("")
+
         if state.summary:
-            from harness.models.events import EpisodeSummary
             if isinstance(state.summary, EpisodeSummary):
-                parts = []
+                summary_parts = []
                 if state.summary.key_decisions:
-                    parts.append(f"Key decisions: {', '.join(state.summary.key_decisions)}")
+                    summary_parts.append(f"Key decisions: {', '.join(state.summary.key_decisions)}")
                 if state.summary.key_findings:
-                    parts.append(f"Key findings: {', '.join(state.summary.key_findings)}")
-                if parts:
-                    messages.append({"role": "system", "content": f"## Previous context\n" + "\n".join(parts)})
-        messages.append({"role": "user", "content": intent})
-        response = await self.llm.chat(messages, temperature=0.7, max_tokens=1024)
+                    summary_parts.append(f"Key findings: {', '.join(state.summary.key_findings)}")
+                if summary_parts:
+                    parts.append("## Previous Context (Compressed)")
+                    parts.extend(summary_parts)
+
+        if state.feedbacks:
+            fb_ids = ",".join(getattr(fb, "feedback_id", "?")[:8] for fb in state.feedbacks)
+            _log.info("[answer] Including %d feedbacks %s", len(state.feedbacks),
+                      fmtkv(feedback_ids=fb_ids))
+            parts.append("[Feedback]")
+            for fb in state.feedbacks:
+                parts.append(fb.feedback_text)
+            parts.append("")
+
+        user_content = "User's request:\n" + intent
+        if parts:
+            user_content += "\n\n" + "\n".join(parts)
+
+        messages.append({"role": "user", "content": user_content})
+        total_chars = sum(len(m["content"]) for m in messages)
+        _log.info("[answer] Sending %d messages (%d tool_results, %d chars) to LLM",
+                  len(messages), n_tool_results, total_chars)
+        _log.info("[answer] === USER MESSAGE BEGIN ===\n%s\n=== USER MESSAGE END ===", user_content[:3000])
+
+        response = await self.llm.chat(messages, temperature=0.7, max_tokens=16384)
+        _log.info("[answer] LLM response: %d chars: %s", len(response), response)
         return response.strip()
 
-    def _build_plan_prompt(self, intent: str) -> str:
-        return _PLAN_PROMPT.format(
-            intent=intent,
-            tool_descriptions=self._build_tool_descriptions(),
+    @staticmethod
+    def _build_feedback_section(feedback: str | None) -> str:
+        if not feedback:
+            return ""
+        _log.debug("[feedback] Built feedback section (%d chars)", len(feedback))
+        return (
+            f"\n## System Monitoring Feedback\n"
+            f"{feedback}\n"
+            f"Take this feedback into account when planning the next steps.\n"
         )
+
+    def _build_plan_prompt(self, intent: str, feedback: str | None = None) -> str:
+        text = _PLAN_PROMPT_TMPL.replace("{step_schema}", _build_step_schema_text())
+        text = text.replace("{tool_descriptions}", self._build_tool_descriptions())
+        text = text.replace("{intent}", intent)
+        fb = self._build_feedback_section(feedback)
+        if fb:
+            text = text.replace("## User Intent", fb + "## User Intent")
+        return text
 
     def _build_tool_descriptions(self) -> str:
         lines = []
@@ -332,7 +464,8 @@ class Planner:
         return "\n".join(lines) if lines else "  (no tools available)"
 
     @staticmethod
-    def _parse_plan(response: str) -> DagPlan | None:
+    def _parse_plan(response: str) -> tuple[DagPlan | None, str]:
+        """返回 (plan_or_None, error_reason)。error_reason 为空字符串表示成功。"""
         response = response.strip()
         if response.startswith("```"):
             response = response.split("\n", 1)[-1]
@@ -342,26 +475,42 @@ class Planner:
         try:
             data = json.loads(response)
         except json.JSONDecodeError:
-            return None
+            start = response.find("{")
+            end = response.rfind("}")
+            if start != -1 and end > start:
+                try:
+                    data = json.loads(response[start:end+1])
+                except json.JSONDecodeError as e:
+                    return None, f"JSON parse error: {e.msg} at position {e.pos}"
+            else:
+                return None, "No JSON object found in response"
 
         if not isinstance(data, dict):
-            return None
+            return None, "Top-level value must be a JSON object with a 'steps' array"
 
         steps_raw = data.get("steps")
         if not isinstance(steps_raw, list):
-            return None
+            return None, "Missing or invalid 'steps' array"
 
         steps = []
-        for s in steps_raw:
+        for i, s in enumerate(steps_raw):
             if not isinstance(s, dict):
-                return None
+                return None, f"Step #{i} is not a JSON object"
 
-            step_input = s.get("input")
-            if step_input is None:
-                # Compatibility: LLM sometimes generates "parameters" instead of "input"
-                step_input = s.get("parameters")
-            if step_input is None or not isinstance(step_input, dict):
-                return None
+            # Backward compat: if 'parameters' exists but 'input' doesn't, rename
+            if "input" not in s and "parameters" in s:
+                s["input"] = s.pop("parameters")
+            # If both exist, remove 'parameters' (input wins)
+            if "parameters" in s:
+                del s["parameters"]
+
+            err = _validate_step(s, i)
+            if err:
+                return None, err
+
+            step_input = s.get("input", {})
+            if not isinstance(step_input, dict):
+                step_input = {}
 
             steps.append(DagStep(
                 id=s.get("id", ""),
@@ -375,4 +524,4 @@ class Planner:
             intent=data.get("intent", ""),
             steps=steps,
             dynamic=data.get("dynamic", False),
-        )
+        ), ""
