@@ -296,6 +296,134 @@ async def test_pause_on_confirmation_needed(store: EventStore):
 
 
 @pytest.mark.asyncio
+async def test_timeout_race_resume_rejected_after_timeout(store: EventStore):
+    """CT-1: After _wait_for_resume times out, resume() must not resurrect.
+
+    Without fix: resume() writes RUN_RESUMED after RUN_FAILED → fold = RUNNING.
+    With fix: state-based guard in resume() checks fold state before writing.
+    """
+    dangerous_def = ToolDefinition(
+        name="delete_file",
+        description="Delete",
+        idempotency_key_fields=["path"],
+        side_effects=[SideEffect.DELETE],
+        requires_confirmation=True,
+        timeout_ms=5000,
+        retry_policy=RetryPolicy(),
+    )
+
+    def delete_fn(input):
+        return {"deleted": input["path"]}
+
+    kernel = MockAgentKernel(
+        [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
+    )
+    executor = ToolExecutor(store)
+    config = SchedulerConfig(max_iterations=5, pause_timeout_ms=100)
+
+    scheduler = AgentLoopScheduler(
+        store, executor, kernel, [dangerous_def], {"delete_file": delete_fn}, config=config
+    )
+
+    task = asyncio.create_task(scheduler.run("run-ct1", "CT-1 test"))
+    await asyncio.sleep(0.5)
+
+    # resume() after timeout should be rejected
+    await scheduler.resume("run-ct1")
+
+    try:
+        state = await asyncio.wait_for(task, timeout=3.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        events = await store.get_events("run-ct1")
+        from harness.core.fold import fold_events
+        state = fold_events(events)
+
+    assert state.status == RunStatus.FAILED, (
+        f"CT-1: resume() after timeout should not resurrect. "
+        f"Got {state.status}, expected FAILED"
+    )
+    assert "Confirmation timed out" in (state.last_error or "")
+
+    events = await store.get_events("run-ct1")
+    run_failed_seqs = [e.seq for e in events if e.event_type == EventType.RUN_FAILED]
+    run_resumed_after = [
+        e for e in events
+        if e.event_type == EventType.RUN_RESUMED
+        and (not run_failed_seqs or e.seq > max(run_failed_seqs))
+    ]
+    assert len(run_resumed_after) == 0, (
+        f"CT-1: RUN_RESUMED event after RUN_FAILED should not exist. "
+        f"Found {len(run_resumed_after)} RUN_RESUMED after FAILED"
+    )
+
+
+@pytest.mark.asyncio
+async def test_timeout_race_concurrent_resume_and_fail(store: EventStore):
+    """CT-1 concurrency: resume() and _fail() called simultaneously must not produce
+    RUN_RESUMED after RUN_FAILED.
+
+    Unlike the sequential test above, this fires both operations concurrently via
+    asyncio.gather so the event loop interleaves their store I/O, exercising the
+    read-check-write race window.
+    """
+    dangerous_def = ToolDefinition(
+        name="delete_file",
+        description="Delete",
+        idempotency_key_fields=["path"],
+        side_effects=[SideEffect.DELETE],
+        requires_confirmation=True,
+        timeout_ms=5000,
+        retry_policy=RetryPolicy(),
+    )
+
+    def delete_fn(input):
+        return {"deleted": input["path"]}
+
+    kernel = MockAgentKernel(
+        [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
+    )
+    executor = ToolExecutor(store)
+    config = SchedulerConfig(max_iterations=5, pause_timeout_ms=5000)
+
+    scheduler = AgentLoopScheduler(
+        store, executor, kernel, [dangerous_def], {"delete_file": delete_fn}, config=config
+    )
+
+    run_id = "run-ct1-concurrent"
+    task = asyncio.create_task(scheduler.run(run_id, "CT-1 concurrent test"))
+    await asyncio.sleep(0.3)  # wait for run to enter _wait_for_resume
+
+    # Concurrently: force-fail the run AND try to resume it.
+    async def fail_then_resume():
+        await scheduler._fail(run_id, "Forced fail during confirmation")
+        await scheduler.resume(run_id)
+
+    await asyncio.gather(
+        fail_then_resume(),
+        scheduler.resume(run_id),
+    )
+
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    events = await store.get_events(run_id)
+    run_failed_seqs = [e.seq for e in events if e.event_type == EventType.RUN_FAILED]
+    run_resumed_after = [
+        e for e in events
+        if e.event_type == EventType.RUN_RESUMED
+        and (not run_failed_seqs or e.seq > max(run_failed_seqs))
+    ]
+    assert len(run_resumed_after) == 0, (
+        f"CT-1 concurrent: RUN_RESUMED after RUN_FAILED should not exist. "
+        f"Found {len(run_resumed_after)} RUN_RESUMED after FAILED. "
+        f"Events: {[(e.event_type.value, e.seq) for e in events]}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_resume_writes_run_resumed_and_completes_execution(store: EventStore):
     dangerous_def = ToolDefinition(
         name="delete_file",
@@ -639,14 +767,23 @@ class TestInheritanceFromBaseScheduler:
 
     def test_own_methods_present(self):
         assert "_run_loop" in AgentLoopScheduler.__dict__
-        assert "_run_tool_call" in AgentLoopScheduler.__dict__
-        assert "_find_tool_def" in AgentLoopScheduler.__dict__
-        assert "_wait_for_resume" in AgentLoopScheduler.__dict__
+        # _run_tool_call / _find_tool_def / _wait_for_resume / _fail
+        # are inherited from BaseScheduler now (refactored to eliminate duplication)
+        assert hasattr(AgentLoopScheduler, "_run_tool_call")
+        assert hasattr(AgentLoopScheduler, "_find_tool_def")
+        assert hasattr(AgentLoopScheduler, "_wait_for_resume")
 
-    def test_fail_is_overridden(self):
-        """_fail should use 'thought(s)' terminology, not 'planning round(s)'."""
-        from harness.core.scheduler import BaseScheduler
-        assert AgentLoopScheduler._fail is not BaseScheduler._fail
+    def test_fail_is_inherited(self):
+        """_fail is now unified on BaseScheduler — not overridden.
+
+        The refactoring moved _fail from AgentLoopScheduler into BaseScheduler
+        so that both AgentLoopScheduler and PlanningExecutorScheduler share
+        the same implementation (which uses 'thought(s)' terminology for both).
+        """
+        from harness.core.scheduler import BaseScheduler, PlanningExecutorScheduler
+        assert AgentLoopScheduler._fail is BaseScheduler._fail
+        assert PlanningExecutorScheduler._fail is BaseScheduler._fail
+        # All three share the same unified implementation
 
     @pytest.mark.asyncio
     async def test_is_active_inherited(self, store: EventStore):

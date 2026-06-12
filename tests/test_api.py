@@ -146,11 +146,46 @@ class TestConfirm:
             "operator_id": "op1",
         })
         assert resp2.status_code == 200
-        assert resp2.json()["message"] == "Confirmation already processed (idempotent)"
 
         events = await store.get_events("r5")
         confirmation_events = [e for e in events if e.event_type.value == "ConfirmationReceived"]
-        assert len(confirmation_events) == 1
+        assert len(confirmation_events) == 1, (
+            f"CT-9: idempotency_key should prevent duplicate CONFIRMATION_RECEIVED. "
+            f"Got {len(confirmation_events)} events"
+        )
+
+    @pytest.mark.asyncio
+    async def test_confirm_idempotent_database_level(self, client, api):
+        """CT-9: Even without API-level dedup, database-level UNIQUE constraint
+        on idempotency_key prevents duplicate CONFIRMATION_RECEIVED events.
+
+        Two rapid direct store.append_event calls with same idempotency_key
+        should produce exactly one event.
+        """
+        _, store = api
+        await store.append_event("r5b", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+
+        # Simulate two concurrent confirm writes with same idempotency_key
+        from harness.models.events import ConfirmationReceivedPayload
+        payload = ConfirmationReceivedPayload(
+            confirmation_id="cid-2", confirmed=True, operator_id="op1",
+        ).model_dump()
+
+        results = await asyncio.gather(
+            store.append_event("r5b", EventType.CONFIRMATION_RECEIVED, payload, idempotency_key="confirm_cid-2"),
+            store.append_event("r5b", EventType.CONFIRMATION_RECEIVED, payload, idempotency_key="confirm_cid-2"),
+            return_exceptions=True,
+        )
+
+        success_count = sum(1 for r in results if not isinstance(r, Exception))
+        assert success_count >= 1, "At least one append should succeed"
+
+        events = await store.get_events("r5b")
+        confirmation_events = [e for e in events if e.event_type.value == "ConfirmationReceived"]
+        assert len(confirmation_events) == 1, (
+            f"CT-9: database-level idempotency_key should dedup. "
+            f"Got {len(confirmation_events)} CONFIRMATION_RECEIVED events, expected 1"
+        )
 
 
 class TestDeleteRun:

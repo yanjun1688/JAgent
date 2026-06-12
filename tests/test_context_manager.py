@@ -103,11 +103,12 @@ class TestCompressionTrigger:
     async def test_compression_triggers_when_over_threshold(self, store):
         cm = ContextManagerCls(store, token_limit=100, compression_threshold_ratio=0.5)
         # Build state with ~60+ token estimate (threshold=50)
-        from harness.core.fold import ToolResult, ToolResultStatus
+        from harness.core.fold import ThoughtEntry, ToolResult, ToolResultStatus
         state = RunState(run_id="r")
+        state.seq = 99
+        state.plan_boundary_seqs = [99]
         for i in range(5):
-            t = type("obj", (), {"thought": "x" * 50})()
-            state.thought_history.append(t)
+            state.thought_history.append(ThoughtEntry(seq=i, thought="x" * 50))
 
         await cm.maybe_compress("run-c1", 1, state)
         events = await store.get_events("run-c1")
@@ -121,6 +122,8 @@ class TestCompressionTrigger:
     async def test_compression_not_triggered_under_threshold(self, store):
         cm = ContextManagerCls(store, token_limit=128_000)
         state = RunState(run_id="r")
+        state.seq = 99
+        state.plan_boundary_seqs = [99]
         t = type("obj", (), {"thought": "hello"})()
         state.thought_history.append(t)
 
@@ -132,6 +135,8 @@ class TestCompressionTrigger:
     async def test_compression_precision_high(self, store):
         cm = ContextManagerCls(store, token_limit=20, compression_threshold_ratio=0.5)
         state = RunState(run_id="r")
+        state.seq = 99
+        state.plan_boundary_seqs = [99]
         t = type("obj", (), {"thought": "x" * 50})()
         state.thought_history.append(t)
 
@@ -143,6 +148,8 @@ class TestCompressionTrigger:
     async def test_summary_fallback_without_llm(self, store):
         cm = ContextManagerCls(store, token_limit=20, compression_threshold_ratio=0.5)
         state = RunState(run_id="r")
+        state.seq = 99
+        state.plan_boundary_seqs = [99]
         t = type("obj", (), {"thought": "x" * 50})()
         state.thought_history.append(t)
 
@@ -155,10 +162,11 @@ class TestCompressionTrigger:
 
     @pytest.mark.asyncio
     async def test_compression_cooldown_prevents_repeat(self, store):
-        """Compression only fires once per checkpoint_interval iterations."""
         cm = ContextManagerCls(store, token_limit=20, compression_threshold_ratio=0.5,
                                checkpoint_interval=3)
         state = RunState(run_id="r")
+        state.seq = 99
+        state.plan_boundary_seqs = [99]
         t = type("obj", (), {"thought": "x" * 100})()
         state.thought_history.append(t)
 
@@ -182,11 +190,12 @@ class TestCompressionTrigger:
             store, llm_client=mock_llm,
             token_limit=100, compression_threshold_ratio=0.5,
         )
-        from harness.core.fold import ToolResult, ToolResultStatus
+        from harness.core.fold import ThoughtEntry, ToolResult, ToolResultStatus
         state = RunState(run_id="r")
+        state.seq = 99
+        state.plan_boundary_seqs = [99]
         for _ in range(20):
-            t = type("obj", (), {"thought": "x" * 30})()
-            state.thought_history.append(t)
+            state.thought_history.append(ThoughtEntry(seq=_, thought="x" * 30))
         tr = ToolResult(tool_call_id="t1", tool_name="echo",
                         status=ToolResultStatus.COMPLETED, output="done")
         state.tool_results.append(tr)

@@ -48,6 +48,34 @@ def registry(echo_def):
 
 
 @pytest.fixture
+def nested_echo_def():
+    return ToolDefinition(
+        name="nested_echo",
+        description="Echo input with nested output body.uuid",
+        input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
+        output_schema={"type": "object"},
+        idempotency_key_fields=["msg"],
+        side_effects=[],
+        timeout_ms=5000,
+        retry_policy=RetryPolicy(),
+    )
+
+
+@pytest.fixture
+def registry_with_nested(echo_def, nested_echo_def):
+    r = ToolRegistry()
+    async def echo_fn(input: dict) -> dict:
+        await asyncio.sleep(0.01)
+        return {"echo": input.get("msg", ""), "status": "ok"}
+    async def nested_echo_fn(input: dict) -> dict:
+        await asyncio.sleep(0.01)
+        return {"body": {"uuid": input.get("msg", "")}, "status": "ok"}
+    r.register(echo_def, echo_fn)
+    r.register(nested_echo_def, nested_echo_fn)
+    return r
+
+
+@pytest.fixture
 def executor(store):
     return ToolExecutor(store)
 
@@ -119,3 +147,440 @@ class TestDagExecutorEdgeCases:
         results = await dag.execute("run-edge-2", plan)
         assert results["s1"]["status"] == "completed"
         assert results["s2"]["status"] == "completed"
+
+
+class TestDagExecutorVarSubstitution:
+    """V0.7: Pure static-method tests for _substitute_vars and _resolve_variables_in_input."""
+
+    async def test_substitute_basic(self):
+        upstream = {"s1": {"name": "World"}}
+        result = DagExecutor._substitute_vars("Hello $s1.name", upstream)
+        assert result == "Hello World"
+
+    async def test_substitute_nested_path(self):
+        upstream = {"s1": {"user": {"address": {"city": "Beijing"}}}}
+        result = DagExecutor._substitute_vars("City: $s1.user.address.city", upstream)
+        assert result == "City: Beijing"
+
+    async def test_substitute_missing_variable(self):
+        upstream = {"s1": {"name": "hello"}}
+        result = DagExecutor._substitute_vars("$unknown.field", upstream)
+        assert result == "$unknown.field"
+
+    async def test_substitute_dollar_in_value(self):
+        upstream = {"s1": {"price": 100}}
+        result = DagExecutor._substitute_vars("price is $100", upstream)
+        assert result == "price is $100"
+
+    async def test_substitute_none_value(self):
+        upstream = {"s1": {"x": None}}
+        result = DagExecutor._substitute_vars("value=$s1.x", upstream)
+        assert result == "value=None"
+
+    async def test_substitute_missing_path_segment(self):
+        upstream = {"s1": {"name": "hello"}}
+        result = DagExecutor._substitute_vars("$s1.name.missing", upstream)
+        assert result == "$s1.name.missing"
+
+    async def test_substitute_no_match_returns_original(self):
+        upstream = {"s1": {"name": "hello"}}
+        result = DagExecutor._substitute_vars("plain text with no vars", upstream)
+        assert result == "plain text with no vars"
+
+    async def test_substitute_variable_without_path(self):
+        upstream = {"greeting": "Hello"}
+        result = DagExecutor._substitute_vars("$greeting World", upstream)
+        assert result == "Hello World"
+
+    async def test_resolve_nested_dict(self):
+        upstream = {"s1": {"name": "Alice"}}
+        step_input = {"greeting": "Hi $s1.name", "static": "keep"}
+        result = DagExecutor._resolve_variables_in_input(step_input, upstream)
+        assert result == {"greeting": "Hi Alice", "static": "keep"}
+
+    async def test_resolve_list(self):
+        upstream = {"s1": {"x": "a", "y": "b"}}
+        step_input = {"items": ["$s1.x", "$s1.y", "static"]}
+        result = DagExecutor._resolve_variables_in_input(step_input, upstream)
+        assert result == {"items": ["a", "b", "static"]}
+
+    async def test_resolve_nested_dict_in_list(self):
+        upstream = {"s1": {"name": "Bob"}}
+        step_input = {"list": [{"greet": "Hello $s1.name"}, {"greet": "Hi $s1.name"}]}
+        result = DagExecutor._resolve_variables_in_input(step_input, upstream)
+        assert result == {"list": [{"greet": "Hello Bob"}, {"greet": "Hi Bob"}]}
+
+    async def test_resolve_int_value_unchanged(self):
+        """$s1.val resolves to int 42 (type preservation for bare refs).
+        
+        Pure variable references ($s1.field) preserve the original type.
+        Inline references ($"prefix_$s1.field") are always stringified.
+        Downstream tools must handle the type as specified in their input_schema.
+        """
+        upstream = {"s1": {"val": 42}}
+        step_input = {"count": 10, "name": "$s1.val"}
+        result = DagExecutor._resolve_variables_in_input(step_input, upstream)
+        assert result == {"count": 10, "name": 42}
+
+    async def test_resolve_empty_upstream(self):
+        step_input = {"msg": "hello $s1.name"}
+        result = DagExecutor._resolve_variables_in_input(step_input, {})
+        assert result == {"msg": "hello $s1.name"}
+
+    # ── flattening removed: body.field access ─────────────────────
+
+    async def test_resolve_body_uuid(self):
+        """$s1.body.uuid resolves through body dict (no flattening)."""
+        upstream = {"s1": {"status_code": 200, "headers": {}, "body": {"uuid": "abc-123"}, "elapsed_ms": 50}}
+        step_input = {"uuid": "$s1.body.uuid", "static": "x"}
+        result = DagExecutor._resolve_variables_in_input(step_input, upstream)
+        assert result == {"uuid": "abc-123", "static": "x"}
+
+    async def test_flat_field_gone(self):
+        """$s1.uuid resolves via deep search (uuid nested in body)."""
+        upstream = {"s1": {"status_code": 200, "headers": {}, "body": {"uuid": "abc-123"}, "elapsed_ms": 50}}
+        step_input = {"uuid": "$s1.uuid"}
+        result = DagExecutor._resolve_variables_in_input(step_input, upstream)
+        assert result["uuid"] == "abc-123"
+
+    async def test_body_passthrough(self):
+        """$s1.body gives entire body dict."""
+        upstream = {"s1": {"status_code": 200, "headers": {}, "body": {"uuid": "abc-123"}, "elapsed_ms": 50}}
+        step_input = {"payload": "$s1.body"}
+        result = DagExecutor._resolve_variables_in_input(step_input, upstream)
+        assert result["payload"] == {"uuid": "abc-123"}
+
+    async def test_body_uuid_in_nested_input(self):
+        """$s1.body.uuid resolves inside a nested body dict (common POST pattern)."""
+        upstream = {"s1": {"status_code": 200, "headers": {}, "body": {"uuid": "550e8400-e29b-41d4-a716-446655440000"}, "elapsed_ms": 45}}
+        step_input = {"url": "https://httpbin.org/post", "method": "POST", "body": {"uuid": "$s1.body.uuid"}}
+        result = DagExecutor._resolve_variables_in_input(step_input, upstream)
+        assert result["body"]["uuid"] == "550e8400-e29b-41d4-a716-446655440000"
+
+    async def test_legacy_key_format_s1_result(self):
+        """$s1_result.body.uuid resolves when upstream has both 's1' and 's1_result' keys.
+
+        _execute_step_only normalizes by adding f\"{dep_id}_result\" → dep_id mapping,
+        so the resolver receives BOTH keys.
+        """
+        upstream = {"s1": {"body": {"uuid": "abc-123"}}, "s1_result": {"body": {"uuid": "abc-123"}}}
+        step_input = {"uuid": "$s1_result.body.uuid", "static": "x"}
+        result = DagExecutor._resolve_variables_in_input(step_input, upstream)
+        assert result["uuid"] == "abc-123", (
+            f"Bug: legacy $s1_result syntax failed to resolve — "
+            f"got '{result.get('uuid')}'"
+        )
+
+    async def test_legacy_key_format_fallback(self):
+        """$s1_result.field resolves when upstream has both 's1' and 's1_result' keys."""
+        upstream = {"s1": {"result": "ok"}, "s1_result": {"result": "ok"}}
+        step_input = {"msg": "$s1_result.result"}
+        result = DagExecutor._resolve_variables_in_input(step_input, upstream)
+        assert result["msg"] == "ok", (
+            f"Bug: $s1_result.result did not resolve — got '{result.get('msg')}'"
+        )
+
+    async def test_deep_resolve_json_string_body(self):
+        """_substitute_vars parses JSON string during path traversal.
+
+        When $s1.body.uuid is referenced and s1.body is a JSON string,
+        the path traversal tries json.loads(body) and continues resolving.
+        """
+        upstream = {"s1": {"body": '{"uuid": "from-json", "nested": {"key": "val"}}'}}
+        step_input = {"uuid": "$s1.body.uuid", "nested_key": "$s1.body.nested.key"}
+        result = DagExecutor._resolve_variables_in_input(step_input, upstream)
+        assert result["uuid"] == "from-json", (
+            f"Bug: $s1.body.uuid from JSON string body failed — "
+            f"got '{result.get('uuid')}'"
+        )
+        assert result["nested_key"] == "val", (
+            f"Bug: $s1.body.nested.key from JSON string body failed — "
+            f"got '{result.get('nested_key')}'"
+        )
+
+
+class TestDagExecutorConfirmationPhase2:
+    """Phase 2: CONFIRMATION_NEEDED propagation (Bug #36 fix).
+    
+    Verifies that confirmation_needed is NOT collapsed to "error",
+    PlanSuspended is raised, and retry_step works after resume.
+    """
+
+    @pytest.fixture
+    def confirm_def(self):
+        return ToolDefinition(
+            name="confirm_echo",
+            description="Echo that requires confirmation",
+            input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
+            output_schema={"type": "object"},
+            idempotency_key_fields=["msg"],
+            requires_confirmation=True,
+            side_effects=["write"],
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
+        )
+
+    @pytest.fixture
+    def registry_with_confirm(self, confirm_def):
+        r = ToolRegistry()
+        async def echo_fn(input: dict) -> dict:
+            await asyncio.sleep(0.01)
+            return {"echo": input.get("msg", ""), "status": "ok"}
+        r.register(confirm_def, echo_fn)
+        return r
+
+    async def test_step_only_returns_confirmation_needed(self, store, executor, registry_with_confirm):
+        """_execute_step_only returns confirmation_needed status instead of error."""
+        from harness.core.dag_executor import PlanSuspended
+        dag = DagExecutor(executor, store, registry_with_confirm)
+        plan = DagPlan(
+            intent="test confirmation",
+            steps=[DagStep(id="s1", tool="confirm_echo", input={"msg": "hello"})],
+        )
+        # Pre-write CONFIRMATION_RECEIVED so the executor will confirm on retry
+        # First call: executor writes CONFIRMATION_REQUESTED, returns CONFIRMATION_NEEDED
+        result = await dag._execute_step_only("run-conf-1", plan, {}, "s1")
+        assert result["status"] == "confirmation_needed", (
+            f"Expected confirmation_needed, got '{result.get('status')}' — "
+            f"Bug #36: was collapsing to 'error'"
+        )
+        assert "confirmation_id" in result
+        assert result["step_id"] == "s1"
+
+    async def test_execute_layer_raises_plan_suspended(self, store, executor, registry_with_confirm):
+        """_execute_layer raises PlanSuspended when a step needs confirmation."""
+        from harness.core.dag_executor import PlanSuspended
+        dag = DagExecutor(executor, store, registry_with_confirm)
+        plan = DagPlan(
+            intent="test suspension",
+            steps=[DagStep(id="s1", tool="confirm_echo", input={"msg": "hello"})],
+        )
+        plan_id = "plan-susp"
+        layers = plan.topological_sort()
+        results = {}
+        with pytest.raises(PlanSuspended) as exc_info:
+            await dag.execute_layer("run-conf-2", plan, plan_id, layers[0], 0, layers, results)
+        assert exc_info.value.confirmations[0][0] == "s1"
+        assert exc_info.value.confirmations[0][1] is not None
+        # The CONFIRMATION_REQUESTED event should have been written by executor
+        events = await store.get_events("run-conf-2")
+        types = [e.event_type for e in events]
+        assert EventType.CONFIRMATION_REQUESTED in types
+        # No DAG_STEP_FAILED should have been written for the suspended step
+        assert EventType.DAG_STEP_FAILED not in types
+
+    async def test_retry_step_after_confirmation(self, store, executor, registry_with_confirm):
+        """retry_step succeeds after CONFIRMATION_RECEIVED is written."""
+        from harness.core.dag_executor import PlanSuspended
+        from harness.models.events import ConfirmationReceivedPayload
+
+        dag = DagExecutor(executor, store, registry_with_confirm)
+        plan = DagPlan(
+            intent="test retry",
+            steps=[DagStep(id="s1", tool="confirm_echo", input={"msg": "retry-test"})],
+        )
+        plan_id = "plan-retry"
+        layers = plan.topological_sort()
+        results = {}
+
+        # First call: triggers CONFIRMATION_NEEDED
+        with pytest.raises(PlanSuspended) as exc_info:
+            await dag.execute_layer("run-conf-3", plan, plan_id, layers[0], 0, layers, results)
+        assert exc_info.value.confirmations[0][0] == "s1"
+        confirmation_id = exc_info.value.confirmations[0][1]
+
+        # Simulate operator confirmation
+        await store.append_event(
+            "run-conf-3", EventType.CONFIRMATION_RECEIVED,
+            ConfirmationReceivedPayload(
+                confirmation_id=confirmation_id, confirmed=True, operator_id="test",
+            ).model_dump(),
+        )
+
+        # Retry the step — executor should see CONFIRMATION_RECEIVED and execute
+        retry_raw = await dag.retry_step("run-conf-3", plan, "s1", results)
+        assert retry_raw["status"] == "completed", (
+            f"Expected completed after confirmation, got '{retry_raw.get('status')}'"
+        )
+        output = retry_raw.get("output", {})
+        assert output.get("echo") == "retry-test"
+
+    async def test_retry_step_still_confirmation_needed(self, store, executor, registry_with_confirm):
+        """retry_step still returns confirmation_needed if no CONFIRMATION_RECEIVED yet."""
+        from harness.core.dag_executor import PlanSuspended
+        dag = DagExecutor(executor, store, registry_with_confirm)
+        plan = DagPlan(
+            intent="test retry no confirm",
+            steps=[DagStep(id="s1", tool="confirm_echo", input={"msg": "hello"})],
+        )
+        plan_id = "plan-noconf"
+        layers = plan.topological_sort()
+        results = {}
+
+        with pytest.raises(PlanSuspended) as exc_info:
+            await dag.execute_layer("run-conf-4", plan, plan_id, layers[0], 0, layers, results)
+        assert exc_info.value.confirmations[0][0] == "s1"
+
+        # Retry WITHOUT writing CONFIRMATION_RECEIVED
+        retry_raw = await dag.retry_step("run-conf-4", plan, "s1", results)
+        assert retry_raw["status"] == "confirmation_needed", (
+            f"Expected still confirmation_needed, got '{retry_raw.get('status')}'"
+        )
+
+    async def test_retry_step_denied_returns_error(self, store, executor, registry_with_confirm):
+        """retry_step returns error when confirmation is denied."""
+        from harness.core.dag_executor import PlanSuspended
+        from harness.models.events import ConfirmationReceivedPayload
+
+        dag = DagExecutor(executor, store, registry_with_confirm)
+        plan = DagPlan(
+            intent="test denial",
+            steps=[DagStep(id="s1", tool="confirm_echo", input={"msg": "hello"})],
+        )
+        plan_id = "plan-deny"
+        layers = plan.topological_sort()
+        results = {}
+
+        with pytest.raises(PlanSuspended) as exc_info:
+            await dag.execute_layer("plan-deny", plan, plan_id, layers[0], 0, layers, results)
+        confirmation_id = exc_info.value.confirmations[0][1]
+
+        # Operator denies confirmation
+        await store.append_event(
+            "plan-deny", EventType.CONFIRMATION_RECEIVED,
+            ConfirmationReceivedPayload(
+                confirmation_id=confirmation_id, confirmed=False, operator_id="test",
+            ).model_dump(),
+        )
+
+        retry_raw = await dag.retry_step("plan-deny", plan, "s1", results)
+        assert retry_raw["status"] == "error"
+
+    async def test_multi_step_confirmation_same_layer(self, store, executor):
+        """Two steps in same layer both need confirmation — BOTH must survive PlanSuspended."""
+        from harness.core.dag_executor import PlanSuspended
+        from harness.models.events import ConfirmationReceivedPayload
+
+        confirm_def_a = ToolDefinition(
+            name="confirm_a",
+            description="A",
+            input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
+            output_schema={"type": "object"},
+            idempotency_key_fields=["msg"],
+            requires_confirmation=True,
+            side_effects=["write"],
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
+        )
+        confirm_def_b = ToolDefinition(
+            name="confirm_b",
+            description="B",
+            input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
+            output_schema={"type": "object"},
+            idempotency_key_fields=["msg"],
+            requires_confirmation=True,
+            side_effects=["write"],
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
+        )
+
+        r = ToolRegistry()
+        async def echo_fn(input: dict) -> dict:
+            await asyncio.sleep(0.01)
+            return {"echo": input.get("msg", ""), "status": "ok"}
+        r.register(confirm_def_a, echo_fn)
+        r.register(confirm_def_b, echo_fn)
+
+        dag = DagExecutor(executor, store, r)
+        plan = DagPlan(
+            intent="multi confirm",
+            steps=[
+                DagStep(id="s1", tool="confirm_a", input={"msg": "first"}),
+                DagStep(id="s2", tool="confirm_b", input={"msg": "second"}),
+            ],
+        )
+        plan_id = "plan-multi-confirm"
+        layers = plan.topological_sort()
+        results = {}
+
+        # Layer has both s1 and s2 in same layer (parallel)
+        assert len(layers[0]) == 2, f"Expected 2 steps in layer, got {layers[0]}"
+        with pytest.raises(PlanSuspended) as exc_info:
+            await dag.execute_layer("run-multi-confirm", plan, plan_id, layers[0], 0, layers, results)
+        assert len(exc_info.value.confirmations) == 2, (
+            f"Expected 2 confirmations, got {len(exc_info.value.confirmations)} — "
+            f"Bug: multi-step confirmation lost"
+        )
+        ids = {cid for cid in map(lambda x: x[1], exc_info.value.confirmations)}
+        assert len(ids) == 2, "Both confirmation IDs must be unique"
+
+        # Confirm and retry s1
+        for sid_i, cid_i in exc_info.value.confirmations:
+            await store.append_event(
+                "run-multi-confirm", EventType.CONFIRMATION_RECEIVED,
+                ConfirmationReceivedPayload(
+                    confirmation_id=cid_i, confirmed=True, operator_id="test",
+                ).model_dump(),
+            )
+            retry = await dag.retry_step("run-multi-confirm", plan, sid_i, results)
+            assert retry["status"] == "completed", (
+                f"Bug: step {sid_i} failed after confirmation: {retry.get('error')}"
+            )
+
+
+class TestDagExecutorVariableIntegration:
+    """Integration tests: upstream_outputs() + resolve_variables_in_input() full path.
+
+    These test the actual contract between plan.py and dag_executor.py —
+    that upstream_outputs() produces keys matching what the resolver expects.
+    """
+
+    async def test_variable_resolution_full_path(self, store, executor, registry):
+        """$s1.echo is correctly resolved through upstream_outputs() → resolver.
+
+        s1: echo({"msg": "hello"}) → output {"echo": "hello", "status": "ok"}
+        s2: echo({"msg": "$s1.echo"}) → should resolve to echo({"msg": "hello"})
+
+        Without the fix (key naming mismatch in upstream_outputs), s2 receives
+        literal "$s1.echo" and outputs {"echo": "$s1.echo"}.
+        """
+        dag = DagExecutor(executor, store, registry)
+        plan = DagPlan(
+            intent="test variable resolution full path",
+            steps=[
+                DagStep(id="s1", tool="echo", input={"msg": "hello"}),
+                DagStep(id="s2", tool="echo", input={"msg": "$s1.echo"}, depends_on=["s1"]),
+            ],
+        )
+        results = await dag.execute("run-var-int", plan)
+        assert results["s1"]["status"] == "completed"
+        assert results["s2"]["status"] == "completed"
+        s2_output = results["s2"].get("output", {})
+        assert s2_output.get("echo") == "hello", (
+            f"Variable resolution failed: expected 'hello', got '{s2_output.get('echo')}'"
+        )
+
+    async def test_variable_resolution_nested_path(self, store, executor, registry_with_nested):
+        """$s1.body.uuid resolves through full DAG integration.
+
+        s1: nested_echo({"msg": "abc-123"}) → output {"body": {"uuid": "abc-123"}, "status": "ok"}
+        s2: echo({"msg": "$s1.body.uuid"}) → should resolve to echo({"msg": "abc-123"})
+        """
+        dag = DagExecutor(executor, store, registry_with_nested)
+        plan = DagPlan(
+            intent="test nested variable resolution",
+            steps=[
+                DagStep(id="s1", tool="nested_echo", input={"msg": "abc-123"}),
+                DagStep(id="s2", tool="echo", input={"msg": "$s1.body.uuid"}, depends_on=["s1"]),
+            ],
+        )
+        results = await dag.execute("run-var-nested", plan)
+        assert results["s1"]["status"] == "completed"
+        assert results["s2"]["status"] == "completed"
+        s2_output = results["s2"].get("output", {})
+        assert s2_output.get("echo") == "abc-123", (
+            f"Nested path $s1.body.uuid resolution failed: expected 'abc-123', "
+            f"got '{s2_output.get('echo')}'"
+        )
+
+

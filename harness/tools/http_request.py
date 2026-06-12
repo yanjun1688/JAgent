@@ -75,13 +75,16 @@ async def http_request_fn(input: dict[str, Any]) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=timeout_ms / 1000.0, follow_redirects=True) as client:
         response = await client.request(method, url, **req_kwargs)
 
-    body_text = response.text
-    if max_bytes > 0 and len(body_text) > max_bytes:
-        body_text = body_text[:max_bytes] + f"\n... (truncated, {len(body_text)} total bytes)"
+    body = response.text
 
-    return {
+    if max_bytes > 0 and len(body) > max_bytes:
+        body = body[:max_bytes] + f"\n... (truncated, {len(body)} total bytes)"
+
+    result = {
         "status_code": response.status_code,
         "headers": dict(response.headers),
-        "body": body_text,
+        "body": body,
         "elapsed_ms": int(response.elapsed.total_seconds() * 1000),
     }
+
+    return result

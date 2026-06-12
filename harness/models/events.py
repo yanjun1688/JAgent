@@ -139,9 +139,39 @@ class RunFailedPayload(BaseModel):
     result_summary: str | None = None
 
 
+class FeedbackCategory(str, Enum):
+    TOOL_FAILURE = "tool_failure"
+    TOKEN_WARNING = "token_warning"
+    REPEATED_CALL = "repeated_call"
+    GUARDRAIL_TRIGGERED = "guardrail_triggered"
+    OPERATOR_ADVICE = "operator_advice"
+    CONDITION_RESOLVED = "condition_resolved"
+
+
+class FeedbackSource(str, Enum):
+    MONITOR = "monitor"
+    OPERATOR = "operator"
+
+
 class FeedbackInjectedPayload(BaseModel):
+    feedback_id: str = ""
+    source: FeedbackSource = FeedbackSource.MONITOR
+    category: FeedbackCategory = FeedbackCategory.OPERATOR_ADVICE
     feedback_text: str
-    priority: Literal["high", "medium"] = "medium"
+    priority: Literal["high", "medium", "low"] = "medium"
+    affected_tool: str | None = None
+    error_type: str | None = None
+    error_detail: str | None = None
+    suggestion: str | None = None
+    expires_at_seq: int | None = None
+    resolves_feedback_id: str | None = None
+
+    @staticmethod
+    def compute_feedback_id(run_id: str, category: str, field_a: str, field_b: str) -> str:
+        """Deterministic hash — same input always produces same ID."""
+        import hashlib
+        raw = f"{run_id}:{category}:{field_a}:{field_b}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 class PlanCreatedPayload(BaseModel):

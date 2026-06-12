@@ -11,11 +11,12 @@ import time
 import uuid
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from harness.api.deps import HarnessAPI, get_hapi
-from harness.core.logger import guard_logger
+from harness.core.logger import fmtkv, guard_logger
 
 _log = guard_logger("serve")
 from harness.api.schemas import (
@@ -31,6 +32,9 @@ from harness.core.fold import RunStatus, fold_events
 from harness.models.events import (
     ConfirmationReceivedPayload,
     EventType,
+    FeedbackCategory,
+    FeedbackInjectedPayload,
+    FeedbackSource,
     RunFailedPayload,
     RunPausedPayload,
     RunResumedPayload,
@@ -78,9 +82,10 @@ async def list_runs(limit: int = 50, offset: int = 0, api: HarnessAPI = Depends(
 async def create_run(body: CreateRunRequest, api: HarnessAPI = Depends(get_hapi)):
     """Create a new run and write the RunStarted event.
 
-    写入 RunStarted 后立即通过 start_run() 拉起 AgentLoopScheduler 的后台循环。
-    Scheduler 自动执行 think→act→observe，事件写入后通过 WebSocket 广播。
+    写入 RunStarted 后立即通过 start_run() 拉起 PlanningExecutorScheduler 的后台循环。
+    Scheduler 自动执行 plan→execute→revise，事件写入后通过 WebSocket 广播。
     API 响应不等待 Scheduler 完成——循环运行在 asyncio.Task 中。
+    注：当 Planner 生成 Plan 失败时，会降级到 AgentLoopScheduler（串行 think→act→observe）。
     """
     run_id = str(uuid.uuid4())[:8]
     _log.info("Creating run — intent: %.120s", body.intent)
@@ -229,6 +234,7 @@ async def confirm_run(run_id: str, body: ConfirmRequest, api: HarnessAPI = Depen
             confirmed=body.confirmed,
             operator_id=body.operator_id,
         ).model_dump(),
+        idempotency_key=f"confirm_{body.confirmation_id}",
     )
 
     scheduler = api._schedulers.get(run_id)
@@ -236,6 +242,58 @@ async def confirm_run(run_id: str, body: ConfirmRequest, api: HarnessAPI = Depen
         await scheduler.resume(run_id)
 
     return {"success": True}
+
+
+class OperatorFeedbackRequest(BaseModel):
+    text: str = Field(..., max_length=500)
+    priority: str = Field(default="medium", pattern="^(high|medium|low)$")
+    suggestion: str | None = Field(None, max_length=300)
+    expires_in_seqs: int | None = Field(None, ge=1, le=500)
+
+
+@router.post("/api/v1/runs/{run_id}/feedback")
+async def operator_feedback(
+    run_id: str,
+    body: OperatorFeedbackRequest = Body(...),
+    api: HarnessAPI = Depends(get_hapi),
+):
+    """Operator injects manual feedback into a running run.
+
+    Feedback goes through EventStore → fold → Scheduler path,
+    same as Monitor-injected feedback.
+    """
+    _log.info("Operator feedback request %s", fmtkv(
+        run_id=run_id, text_len=len(body.text),
+        priority=body.priority, has_suggestion=body.suggestion is not None,
+        expires_in_seqs=body.expires_in_seqs,
+    ))
+
+    feedback_id = FeedbackInjectedPayload.compute_feedback_id(
+        run_id, FeedbackCategory.OPERATOR_ADVICE.value,
+        body.text[:100], "?",
+    )
+
+    payload = FeedbackInjectedPayload(
+        feedback_id=feedback_id,
+        source=FeedbackSource.OPERATOR,
+        category=FeedbackCategory.OPERATOR_ADVICE,
+        feedback_text=body.text,
+        priority=body.priority,
+        suggestion=body.suggestion,
+        expires_at_seq=body.expires_in_seqs,
+    )
+    try:
+        await api.store.append_event(
+            run_id, EventType.FEEDBACK_INJECTED, payload.model_dump(),
+        )
+        _log.info("Operator feedback injected %s", fmtkv(
+            feedback_id=feedback_id, run_id=run_id,
+            text_len=len(body.text), priority=body.priority,
+        ))
+    except Exception:
+        _log.exception("Failed to inject operator feedback for %s", run_id)
+        raise
+    return {"status": "ok", "feedback_id": feedback_id}
 
 
 @router.delete("/api/v1/runs/{run_id}")
@@ -253,4 +311,5 @@ async def delete_run(run_id: str, api: HarnessAPI = Depends(get_hapi)):
             RunFailedPayload(final_error="Run deleted by user", event_count=len(events)).model_dump(),
         )
 
+    api.cleanup_run_resources(run_id)
     return {"success": True}

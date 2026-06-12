@@ -1,5 +1,5 @@
 from harness.core.agent_kernel import LLMAgentKernel, MockAgentKernel
-from harness.core.dag_executor import DagExecutor
+from harness.core.dag_executor import DagExecutor, PlanSuspended
 from harness.core.fold import RunState, RunStatus, ThoughtEntry, ToolResult, ToolResultStatus, fold_events
 from harness.core.llm_client import LLMClient, MockLLMClient
 from harness.core.planner import PlanGuardrail, Planner
@@ -26,6 +26,7 @@ __all__ = [
     "build_system_prompt",
     "build_tool_schemas",
     "DagExecutor",
+    "PlanSuspended",
     "DagPlan",
     "DagStep",
     "Planner",

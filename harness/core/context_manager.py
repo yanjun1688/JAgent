@@ -126,12 +126,18 @@ class ContextManager:
     async def maybe_compress(self, run_id: str, iteration: int, state: RunState) -> None:
         """Check context size and trigger LLM summary compression if needed.
 
+        When plan boundaries exist (V0.7 DAG flow), only compresses at the most
+        recent PlanCompleted boundary. Without plan boundaries (legacy flow),
+        compresses on threshold only (backward compatible).
+
         Writes a ContextCompressed event when token estimate exceeds threshold.
         Guards against repeat compression: only fires once per checkpoint_interval
         iterations for the same run_id.
         The actual compression (truncation of history in AgentKernel) happens
         on the next iteration when fold_events sets state.summary from the event.
         """
+        if state.plan_boundary_seqs and state.seq < state.plan_boundary_seqs[-1]:
+            return
         estimate = self._estimate_context_tokens(state)
         _log_monitor.debug("Token estimate: ~%d tokens (threshold: %d)", estimate, self.compression_threshold)
         if estimate < self.compression_threshold:
@@ -265,7 +271,14 @@ class ContextManager:
         for t in thoughts:
             activity_lines.append(f"Thought: {t.thought[:500]}")
         for tr in results:
-            out = str(tr.output or tr.error or "")[:300]
+            raw = str(tr.output or tr.error or "")
+            if len(raw) > 2000:
+                if raw.startswith("{") or raw.startswith("["):
+                    out = raw[:2000] + "\n...(truncated)..."
+                else:
+                    out = raw[:2000] + "\n...(truncated)..."
+            else:
+                out = raw
             activity_lines.append(f"Tool '{tr.tool_name}' → {out}")
 
         # Preserve PlanCreated/PlanRevised event details (compression whitelist)

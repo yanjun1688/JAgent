@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { colors } from '../api/analysis-styles'
 import type { ParsedEventDetail } from '../api/analysis-types'
 import { getRunTimeline } from '../api/analysis-client'
-import { createRun } from '../api/client'
+import { createRun, confirmAction, resumeRun } from '../api/client'
 import ThinkingPanel from './ThinkingPanel'
 
 interface Props {
@@ -29,6 +29,34 @@ export default function ChatDrawer({ style, initialRunId }: Props) {
     if (failed) return String(failed.payload.final_error || '')
     return null
   }, [events])
+
+  const pendingConfirmations = useMemo(() => {
+    const received = new Set<string>()
+    const requested: ParsedEventDetail[] = []
+    for (const e of events) {
+      if (e.event_type === 'ConfirmationReceived' && e.confirmation_id) {
+        received.add(e.confirmation_id)
+      }
+      if (e.event_type === 'ConfirmationRequested' && e.confirmation_id) {
+        requested.push(e)
+      }
+    }
+    return requested.filter((e) => e.confirmation_id && !received.has(e.confirmation_id!))
+  }, [events])
+
+  const showConfirmationCard = useMemo(() => {
+    if (pendingConfirmations.length === 0) return false
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].event_type === 'RunResumed') return false
+      if (events[i].event_type === 'RunPaused' && events[i].payload.reason === 'waiting_confirmation') return true
+    }
+    return false
+  }, [events, pendingConfirmations])
+
+  async function handleConfirmResume(confirmationId: string, confirmed: boolean) {
+    await confirmAction(activeRunId!, confirmationId, confirmed, '')
+    await resumeRun(activeRunId!)
+  }
 
   const connectWs = useCallback((runId: string) => {
     if (wsRef.current) {
@@ -252,6 +280,51 @@ export default function ChatDrawer({ style, initialRunId }: Props) {
                 loading={activeRunStatus === 'running'}
               />
             )}
+
+            {/* confirmation card */}
+            {showConfirmationCard && pendingConfirmations.map((pc) => (
+              <div
+                key={pc.confirmation_id}
+                style={{
+                  background: '#fff3e0',
+                  border: '1px solid #ffe0b2',
+                  borderRadius: 10,
+                  padding: 14,
+                  margin: '4px 0',
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 600, color: '#e65100', marginBottom: 6 }}>
+                  ⚠ Confirmation Required
+                </div>
+                <div style={{ fontSize: 13, marginBottom: 6 }}>
+                  <strong>{pc.tool_name}</strong>
+                  {!!pc.payload?.risk_level && (
+                    <span style={{ marginLeft: 6, fontSize: 11, color: String(pc.payload.risk_level) === 'high' ? '#d32f2f' : '#f57c00' }}>
+                      (risk: {String(pc.payload.risk_level)})
+                    </span>
+                  )}
+                </div>
+                {pc.input && Object.keys(pc.input).length > 0 && (
+                  <pre style={{ margin: '0 0 8px', fontSize: 11, background: '#f5f5f5', padding: 8, borderRadius: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                    {JSON.stringify(pc.input, null, 2)}
+                  </pre>
+                )}
+                <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                  <button
+                    onClick={() => handleConfirmResume(pc.confirmation_id!, false)}
+                    style={{ padding: '5px 14px', background: '#ef5350', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}
+                  >
+                    Deny & Continue
+                  </button>
+                  <button
+                    onClick={() => handleConfirmResume(pc.confirmation_id!, true)}
+                    style={{ padding: '5px 14px', background: '#66bb6a', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}
+                  >
+                    Approve & Continue
+                  </button>
+                </div>
+              </div>
+            ))}
 
             {/* final answer */}
             {finalAnswer && (

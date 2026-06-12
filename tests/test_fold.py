@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from harness.core.fold import RunStatus, fold_events
-from harness.models.events import Event, EventType
+from harness.models.events import Event, EventType, EpisodeSummary
 
 
 def _event(
@@ -494,3 +494,96 @@ class TestFoldDagStepDedup:
         assert state.latest_plan["plan_id"] == "p2"
         assert len(state.latest_plan["steps"]) == 1
         assert state.latest_plan["steps"][0]["step_id"] == "s2"
+
+
+class TestFoldFeedbackInjected:
+    def test_feedback_injected_appends_to_feedbacks(self):
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.FEEDBACK_INJECTED, {"feedback_text": "too slow", "priority": "high"}),
+            _event("r1", 3, EventType.FEEDBACK_INJECTED, {"feedback_text": "retry", "priority": "medium"}),
+        ]
+        state = fold_events(events)
+        assert len(state.feedbacks) == 2
+        assert state.feedbacks[0].feedback_text == "too slow"
+        assert state.feedbacks[0].priority == "high"
+        assert state.feedbacks[1].feedback_text == "retry"
+        assert state.feedbacks[1].priority == "medium"
+
+    def test_feedback_injected_no_feedback(self):
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+        ]
+        state = fold_events(events)
+        assert state.feedbacks == []
+
+
+class TestFoldContextCompressedPruning:
+    """V0.7: ContextCompressed prunes thought_history and tool_results via original_event_refs."""
+
+    def test_compress_prunes_thoughts_and_results(self):
+        summary = EpisodeSummary(
+            episode_range=(2, 5),
+            original_tokens=1000,
+            compressed_tokens=200,
+            key_decisions=[],
+            tools_used=["echo"],
+            key_findings=[],
+            errors_encountered=[],
+            original_event_refs=[2, 3],
+        )
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "old thought", "tool_choice": None, "token_count": 10}),
+            _event("r1", 3, EventType.TOOL_COMPLETED, {"tool_call_id": "tc-1", "tool_name": "echo", "output": "old", "duration_ms": 5}),
+            _event("r1", 4, EventType.AGENT_THOUGHT, {"thought": "keep thought", "tool_choice": None, "token_count": 10}),
+            _event("r1", 5, EventType.TOOL_COMPLETED, {"tool_call_id": "tc-2", "tool_name": "echo", "output": "keep", "duration_ms": 5}),
+            _event("r1", 6, EventType.CONTEXT_COMPRESSED, {
+                "original_tokens": 1000,
+                "compressed_tokens": 200,
+                "summary_ref": summary.model_dump(mode="json"),
+                "keep_recent_count": 2,
+            }),
+        ]
+        state = fold_events(events)
+        assert state.summary is not None
+
+    def test_compress_no_prune_when_no_original_event_refs(self):
+        summary = EpisodeSummary(
+            episode_range=(2, 3),
+            original_tokens=500,
+            compressed_tokens=100,
+            key_decisions=[],
+            tools_used=[],
+            key_findings=[],
+            errors_encountered=[],
+            original_event_refs=[],
+        )
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "t1", "tool_choice": None, "token_count": 10}),
+            _event("r1", 3, EventType.CONTEXT_COMPRESSED, {
+                "original_tokens": 500,
+                "compressed_tokens": 100,
+                "summary_ref": summary.model_dump(mode="json"),
+                "keep_recent_count": 0,
+            }),
+        ]
+        state = fold_events(events)
+        assert len(state.thought_history) == 1
+        assert state.thought_history[0].thought == "t1"
+
+    def test_compress_with_string_summary_skips_pruning(self):
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "t1", "tool_choice": None, "token_count": 10}),
+            _event("r1", 3, EventType.CONTEXT_COMPRESSED, {
+                "original_tokens": 500,
+                "compressed_tokens": 100,
+                "summary_ref": "legacy summary string",
+                "keep_recent_count": 0,
+            }),
+        ]
+        state = fold_events(events)
+        assert state.summary == "legacy summary string"
+        assert len(state.thought_history) == 1

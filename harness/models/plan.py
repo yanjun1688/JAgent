@@ -13,7 +13,7 @@ class DagStep(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     description: str = ""
     upstream_selectors: dict[str, str] | None = None
-    max_parallel: int = 3
+    max_parallel: int = 10
     branches: dict | None = None
 
 
@@ -25,10 +25,14 @@ class DagPlan(BaseModel):
     def _step_map(self) -> dict[str, DagStep]:
         return {s.id: s for s in self.steps}
 
-    def topological_sort(self) -> list[list[str]]:
+    def topological_sort(
+        self, completed_step_ids: set[str] | None = None,
+    ) -> list[list[str]]:
         steps = self._step_map()
         in_degree: dict[str, int] = {}
         adjacency: dict[str, list[str]] = {}
+
+        all_valid = set(steps.keys()) | (completed_step_ids or set())
 
         for s in self.steps:
             in_degree[s.id] = 0
@@ -36,8 +40,10 @@ class DagPlan(BaseModel):
 
         for s in self.steps:
             for dep in s.depends_on:
-                if dep not in steps:
+                if dep not in all_valid:
                     raise ValueError(f"Step '{s.id}': depends on unknown step '{dep}'")
+                if dep not in steps:
+                    continue
                 adjacency.setdefault(dep, []).append(s.id)
                 in_degree[s.id] = in_degree.get(s.id, 0) + 1
 
@@ -72,14 +78,14 @@ class DagPlan(BaseModel):
         for dep_id in step.depends_on:
             dep_result = results.get(dep_id)
             if dep_result is None:
-                merged[f"{dep_id}_result"] = None
+                merged[dep_id] = None
                 continue
             output = dep_result.get("output") if isinstance(dep_result, dict) else dep_result
             selectors = step.upstream_selectors or {}
             if dep_id in selectors:
-                merged[f"{dep_id}_result"] = self._resolve_path(output, selectors[dep_id])
+                merged[dep_id] = self._resolve_path(output, selectors[dep_id])
             else:
-                merged[f"{dep_id}_result"] = output
+                merged[dep_id] = output
         return merged
 
     @staticmethod

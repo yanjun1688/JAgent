@@ -81,6 +81,7 @@ class HarnessAPI:
             tool_defs=self.tool_defs, tool_fns=self.tool_fns,
             config=self.scheduler_config,
             context_manager=self.context_manager, monitor=self.monitor,
+            run_end_cb=lambda rid: self.cleanup_run_resources(rid),
         )
         self.register_scheduler(run_id, scheduler)
         asyncio.create_task(scheduler.run(run_id, intent))
@@ -92,6 +93,11 @@ class HarnessAPI:
 
     def unregister_scheduler(self, run_id: str) -> None:
         self._schedulers.pop(run_id, None)
+
+    def cleanup_run_resources(self, run_id: str) -> None:
+        """清理 run 结束后的 API 层资源（scheduler 注册表 + WS 客户端列表）。"""
+        self._schedulers.pop(run_id, None)
+        self._ws_clients.pop(run_id, None)
 
     # ── WebSocket 广播 ───────────────────────────────────────
 

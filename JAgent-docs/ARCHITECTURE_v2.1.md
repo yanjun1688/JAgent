@@ -1,9 +1,10 @@
 # Harness v2.1 — 架构文档
 
-> **当前阶段**: V0.7 — Planner-Executor + DAG 执行引擎（Phase 4+ 架构修复完成）
-> **基线**: 315 项测试全通过（+13 V0.7 新增）
-> **文档版本**: v2.1.2
-> **最后更新**: 2026-06-08
+> **当前阶段**: V0.7 — Planner-Executor + DAG 执行引擎（Phase 5 完成）
+> **未来阶段**: V0.8 — 生命周期恢复（设计文档已就绪，待审查实施）
+> **基线**: 355 项测试全通过
+> **文档版本**: v2.1.5
+> **最后更新**: 2026-06-11
 
 ---
 
@@ -20,8 +21,9 @@
 | V0.5+ | ✅ | EpisodeSummary 结构化摘要 + 紧急压缩 |
 | V0.6 | ✅ | RunMonitor + FeedbackInjected + Scheduler 反馈注入 |
 | V0.6+ | ✅ | 架构加固：Skill 路由 / 输出校验 / 循环检测 / side_effects 消费 / 幂等验证 |
-| **V0.6.1** | 📄 设计完成 | 反馈机制增强：结构化反馈 + per-tool 追踪 + 建议生成 + Planner revise 注入 + Operator API |
-| **V0.7** | **✅** | **Planner-Executor + DAG 执行引擎（Phase 1-4）** |
+| **V0.6.1** | **✅** | 反馈机制增强：结构化反馈 + per-tool 追踪 + 建议生成 + Planner revise 注入 + Operator API |
+| **V0.7** | **✅** | **Planner-Executor + DAG 执行引擎（Phase 1-5）** |
+| **V0.8** | **📄 设计完成** | **生命周期恢复：服务器重启孤儿检测 + abandon/retry** |
 | V1.0 分析平台 | ✅ | AnalysisService + 6 个 API 端点 |
 
 ---
@@ -77,7 +79,8 @@
 │  │ ⑤ Confirm   │   ┌──────────────┐   ┌──────────────────────────┐  │
 │  │ ⑥ Sandbox   │   │ ToolRegistry │   │ Skill Executor           │  │
 │  │ ⑦ Validate  │   │ tool_defs +  │   │ (内部走 executor.execute) │  │
-│  │ ⑧ Write     │   │ tool_fns     │   │                          │  │
+│  │   (2-phase) │   │ tool_fns     │   │                          │  │
+│  │ ⑧ Write     │   └──────────────┘   └──────────────────────────┘  │
 │  └─────────────┘   └──────────────┘   └──────────────────────────┘  │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │
@@ -185,6 +188,7 @@ class EventStore:
     async def event_count(run_id) -> int
     async def find_by_idempotency_key(run_id, event_type, key) -> Event | None
     async def list_runs(limit=50, offset=0) -> list[dict]
+    async def list_all_run_ids() -> list[str]    # V0.8: 启动孤儿检测
     async def total_run_count() -> int
     async def get_events_for_runs(run_ids) -> dict[str, list[Event]]
     async def find_confirmation_by_id(run_id, confirmation_id) -> Event | None
@@ -193,7 +197,7 @@ class EventStore:
     def on_append(callback) -> None  # 注册写入后回调
 ```
 
-### 4.2 事件类型清单（共 37 种）
+### 4.2 事件类型清单（共 38 种）
 
 | 事件类型 | 写入方 | 关键 payload 字段 |
 |----------|--------|-------------------|
@@ -212,7 +216,8 @@ class EventStore:
 | `RunResumed` | Scheduler | `resume_from_seq` |
 | `RunCompleted` | Scheduler | `result_summary` |
 | `RunFailed` | Scheduler/Tool | `final_error, event_count, result_summary` |
-| `FeedbackInjected` | RunMonitor / Operator API | `feedback_text, priority, category, affected_tool, error_type, suggestion, expires_at_seq, resolves_feedback_id` |
+| **`RunOrphaned`** | **V0.8 Lifecycle** | `reason, last_seq, timestamp` |
+| `FeedbackInjected` | RunMonitor / Operator API | `feedback_text, priority, source(monitor\|operator), category, affected_tool, error_type, error_detail, suggestion, expires_at_seq, resolves_feedback_id` |
 | **`PlanCreated`** | **V0.7** | `plan_id, intent, steps_summary, layer_count` |
 | **`DagStepStarted`** | **V0.7** | `plan_id, step_id, tool_name, depends_on` |
 | **`DagStepCompleted`** | **V0.7** | `plan_id, step_id, output_summary` |
@@ -240,8 +245,16 @@ class ToolDefinition(BaseModel):
     requires_confirmation: bool            # 是否需要人工确认
     depends_on: list[DependencyConstraint]  # 声明式事件前置条件
     dangerous_with: list[str]              # V0.7: 危险组合工具名列表
-    max_parallel: int = 3                  # V0.7: 同层并行实例上限
+    max_parallel: int = 10                 # V0.7: 同层并行实例上限
 ```
+
+**`output_schema` 两阶段校验**（V0.7, 2026-06-11）：
+
+工具执行后，`output_schema` 经两阶段校验：
+- **Phase 1**：严格 `jsonschema.validate()` — 类型、必填字段、格式全部检查
+- **Phase 2**（Phase 1 失败时）：`_structurally_usable()` 结构性兜底 — 只检查输出是否为 `dict` 或 `list`（导航可用），不是则拒绝（`None`/`bool`/`str`/`int`/`float`）
+
+Phase 2 通过 → `ToolCompleted`（输出被接受），Phase 2 失败 → `ToolFailed`（error 脱敏，仅含类型名）。适用于 `http_request` 等变量内容字段无法预知远端格式的场景。详见 §7.3。
 
 ### 4.4 DAG 数据模型
 
@@ -255,7 +268,7 @@ class DagStep:
     depends_on: list[str]                  # 依赖的上游 step id
     description: str                       # 人类可读描述
     upstream_selectors: dict[str, str] | None  # 上游字段路径，如 {"s1": "weather.summary"}
-    max_parallel: int = 3                  # 该工具在单层中的并行上限
+    max_parallel: int = 10                 # 该工具在单层中的并行上限
     branches: dict | None                  # 预留条件分支
 
 @dataclass
@@ -318,12 +331,22 @@ class SchedulerConfig:
     pause_timeout_ms: int = 300_000
 
 class BaseScheduler(ABC):
+    def __init__(self, ..., run_end_cb=None)   # Cleanup: run() finally 调用 run_end_cb(run_id)
     async def run(run_id, intent) -> RunState
     async def pause(run_id) -> None          # 写 RunPaused 事件
     async def resume(run_id) -> None         # 写 RunResumed 事件
     async def cancel(run_id) -> None         # 设置 cancel flag
     def is_active(run_id) -> bool
     def is_paused(run_id) -> bool
+
+    # V0.8: Checkpoint 恢复
+    async def _try_checkpoint_recovery(events) -> bool  # 从 ContextManager 查找 checkpoint
+
+**Cleanup 契约**: `run()` 的 `finally` 块保证清理：
+  1. `_running_tasks` / `_cancel_flags` / `_pause_events`（Scheduler 内部 run-scoped dict）
+  2. `monitor.cleanup(run_id)`（RunMonitor 的 15 个 per-run 字典）
+  3. `run_end_cb(run_id)`（API 层注册的回调，清理 `_schedulers` / `_ws_clients`）
+  4. 异常/取消路径均走同一 `finally`，无遗漏。
 
 class AgentLoopScheduler(BaseScheduler):
     # 旧串行调度器：think → act → observe
@@ -353,6 +376,8 @@ class PlanningExecutorScheduler(BaseScheduler):
 | POST | `/api/v1/runs/{run_id}/confirm` | `{"confirmation_id", "confirmed", "operator_id"}` | `{"success": bool}` | 确认决策 |
 | POST | `/api/v1/runs/{run_id}/feedback` | `{"text","priority","suggestion"}` | `{"status","feedback_id"}` | V0.6.1: Operator 手动反馈注入 |
 | DELETE | `/api/v1/runs/{run_id}` | — | `{"success": bool}` | 取消/终止 |
+| POST | `/api/v1/runs/{run_id}/abandon` | — | `{"success": bool}` | V0.8: 放弃孤儿 Run（仅 `orphaned==True`） |
+| POST | `/api/v1/runs/{run_id}/retry` | — | `{"run_id", "retry_of"}` | V0.8: 重试孤儿 Run（创建新 Run） |
 | WS | `/api/v1/runs/{run_id}/events` | — | 实时 Event JSON | WebSocket 事件流 |
 
 **分析 API：**
@@ -389,6 +414,7 @@ class RunState:
     orchestration_history: list[dict]        # 旧编排历史
     latest_orchestration: dict | None
     feedbacks: list[FeedbackInjectedPayload] # 监视器反馈 (结构化：含 category/tool/error/suggestion/expires/resolves)
+    orphaned: bool                           # V0.8: 孤儿标记（服务器重启后与 Scheduler 失联）
     plan_history: list[dict]                 # V0.7: DAG 规划历史
     latest_plan: dict | None                 # V0.7: 当前最新计划
 ```
@@ -471,9 +497,10 @@ harness/
 │   └── serve.py              # 生产入口装配
 ├── core/
 │   ├── scheduler.py          # [V0.7] AgentLoopScheduler + BaseScheduler + PlanningExecutorScheduler
+│   ├── lifecycle.py          # [V0.8] 孤儿 Run 检测 + mark/abandon/retry（与 Scheduler 解耦）
 │   ├── planner.py            # [V0.7] Planner + PlanGuardrail
 │   ├── dag_executor.py       # [V0.7] DagExecutor + build_dag_status_text
-│   ├── fold.py               # [V0.7] plan_history + 新事件 fold
+│   ├── fold.py               # [V0.7] plan_history + 新事件 fold; [V0.8] orphaned 标记
 │   ├── context_manager.py    # 自动压缩 + Checkpoint
 │   ├── agent_kernel.py       # LLMAgentKernel + MockAgentKernel
 │   ├── llm_client.py         # OpenAILLMClient + MockLLMClient
@@ -520,18 +547,113 @@ harness/
 | 顶层导出 | `harness/__init__.py` | 补充 V0.7 类型 |
 | P3 代码规范 | 多处 | 中文→英文；函数体 import 修复；未使用参数标记 |
 
-### 7.2 待做
+### 7.2 V0.7 运行时修复（2026-06-08）
 
-| 任务 | 说明 | 优先级 |
-|------|------|--------|
-| **V0.6.1 反馈机制增强** | 结构化反馈 + per-tool 追踪 + 建议生成 + Planner revise 注入 + Operator API | **P0** |
-| Predictive Guardrails | PlanRiskReport + self-correction | P1 |
-| 失败原因分类 | schema_error → 重试；tool_unavailable → skip | P1 |
-| 调度器层次重构 | `AgentLoopScheduler` 继承 `BaseScheduler`；提取公共方法 | P2 |
-| `_generate_answer` 解耦 | 委托给 `Planner.generate_answer()` | P2 |
-| 旧 Scheduler 退役 | `serve.py` 切换到 `PlanningExecutorScheduler` | P1 |
-| 分布式 Worker | 多 Worker 共享 Event Store | P1 |
-| 多租户隔离 | `tenant_id` + `ScopedEventStore` | P1 |
+| 修复 | 文件 | 说明 |
+|------|------|------|
+| 移除 flattening | `http_request.py` | 删 `result.update(body)`，输出=output_schema，不再运行时添加顶层字段；LLM 通过 `$s1.body.uuid` 访问 JSON body 字段 |
+| revise intent 传递 | `scheduler.py` + `planner.py` | `revise()` 新增 `intent_fallback` 参数，4 个调用点传入 `s.intent`；revise 时 LLM 不再看到 `(unknown)` |
+| `_parse_plan` 前缀文本 | `planner.py` | JSON 解析失败时回退提取 `{...}` 内容，LLM 先解释再输出 JSON 不再导致解析失败 |
+
+### 7.3 V0.7 输出校验加固（2026-06-11）
+
+| 修复 | 文件 | 说明 |
+|------|------|------|
+| output_schema 两阶段校验 | `executor.py` | Phase 1: 严格 jsonschema.validate()；Phase 2: `_structurally_usable()` 结构性兜底 — dict/list 通过（ToolCompleted），None/bool/str/int/float 拒绝（ToolFailed） |
+| 错误文本脱敏 | `executor.py` | Phase 2 失败时 error 仅含 `type(output).__name__`（如 `got NoneType`），不含原始 API 响应数据；保护 ToolResult 直接展示 + Monitor feedback injected error_detail 两条 LLM 数据通路 |
+| 测试覆盖 | `test_tool_layer.py` | 新增 8 项：dict 兜底 / list 兜底 / None 拒绝 / str 拒绝 / bool 拒绝 / int 拒绝 / 脱敏验证 / Schema 匹配不变 |
+| 返回值 | — | 355 项测试全通过 |
+
+**两阶段校验数据流**:
+
+```
+输出 → Phase 1 (严格 jsonschema)
+         ├─ 通过 → ToolCompleted (不变)
+         └─ 失败 → Phase 2 (_structurally_usable)
+                   ├─ 通过 → ToolCompleted (dict/list 可用，仅 log warning)
+                   └─ 失败 → ToolFailed (error 脱敏: "expected structured data, got {type}")
+```
+
+**设计原理**: `output_schema` 用于校验工具输出对下游步骤的结构可用性。对于 `http_request` 等工具的变量内容字段（如 `body`），无法在工具定义时预知远端 API 返回格式（对象/数组/字符串/null）。两阶段校验允许严格 schema 在类型不匹配时由结构性兜底判定输出是否仍可导航（`dict`/`list`），而不因过严的类型约束丢弃有效数据。
+
+### 7.4 待做
+
+| 任务 | 说明 | 优先级 | 状态 |
+|------|------|--------|------|
+| 生命周期恢复 | 服务器重启孤儿 Run 检测 + abandon/retry | P0 | 📄 设计完成 |
+| Predictive Guardrails | PlanRiskReport + self-correction | P1 | ⏳ 待做 |
+| 失败原因分类 | schema_error → 重试；tool_unavailable → skip | P1 | ⏳ 待做 |
+| 旧 Scheduler 退役 | `serve.py` 切换到 `PlanningExecutorScheduler` | P1 | ⏳ 待做 |
+| 分布式 Worker | 多 Worker 共享 Event Store | P1 | ⏳ 待做 |
+| 多租户隔离 | `tenant_id` + `ScopedEventStore` | P1 | ⏳ 待做 |
+
+---
+
+## 8. 技术栈
+
+| 组件 | 开发期 | 生产 |
+|------|--------|------|
+| Agent 运行时 | Python asyncio | Python asyncio |
+| LLM 调用 | OpenAI / DeepSeek SDK | OpenAI / DeepSeek SDK |
+| 接口层 | FastAPI | FastAPI + K8s Ingress |
+| Event Store | SQLite | PostgreSQL + JSONB |
+| 任务队列 | asyncio.Queue | Redis Streams |
+| 沙盒执行 | subprocess（进程隔离） | gVisor 容器 |
+| 浏览器工具 | Playwright (async) | Playwright (async) |
+| MCP 集成 | mcp Python SDK | mcp Python SDK |
+
+---
+
+## 9. 确定性与可追溯性
+
+**确定性边界**: 相同事件流 → 相同工具调用序列 → 相同副作用
+
+Agent 的 thought 文本在重放时可能因上下文截断或 LLM sampling 差异而不同，这是可接受的。
+
+**重放安全**:
+1. 从 Event Store 读取所有事件，按 seq 排序
+2. 依次折叠事件，恢复 Agent 上下文
+3. 工具不会被重新执行，副作用不会重复产生
+4. 调试时可在任意 seq 停止，检查该时刻的完整状态
+
+**断点续传**:
+1. 读取最近的 `ContextCheckpointed` 事件，加载上下文快照
+2. 从快照对应的 seq 之后读取增量事件
+3. 将增量事件折叠进上下文
+4. Scheduler 恢复 think → act → observe 循环
+
+**Agent 状态与 Worker 状态分离**:
+- Agent 逻辑状态: Event Store 永久存储，崩溃不丢失
+- Worker 运行时状态: Worker 内存临时存储，崩溃后可丢弃重建，目标恢复时间 < 30 秒
+
+**服务器重启恢复（V0.8）**:
+1. 启动时 `app.py` lifespan 调用 `lifecycle.mark_orphans()` 扫描 Event Store
+2. 所有 `RUNNING`/`PAUSED` 状态的 run 被写入 `RunOrphaned` 事件（幂等）
+3. `fold_events` 设置 `state.orphaned = True`，不影响 `status` 字段
+4. 前端展示孤儿标记，用户可选择 `abandon`（写 `RunFailed`）或 `retry`（创建新 Run）
+5. 不自动 resume，不自动 fail——系统强制不猜测用户意图
+
+---
+
+## 7. 已知技术债务（Known Technical Debt）
+
+### 7.1 `fold.py: tool_calls/feedbacks` 不截断
+
+`fold_events` 在 `CONTEXT_COMPRESSED` 时截断 `thought_history` 和 `tool_results`，
+但绕过 `tool_calls` 和 `feedbacks`。超长 Run 下这两个 list 持续增长。
+Run 结束后自然 GC 释放，不影响系统整体，但单 Run 内存峰值可能偏高。
+
+### 7.2 `event_store.py: _seq_locks` 计数淘汰可能漏锁
+
+`_seq_locks` 每 50 次写入检查一次未锁定锁并淘汰之。如果锁恰好被持有跨越
+这个计数窗口，会永远留在 dict 里。需改为基于超时的 TTL 淘汰或用
+数据库行锁替代。
+
+### 7.3 `guardrails.py: _call_history` 类级字典无生产清理
+
+`RateLimitGuardrail._call_history` 是类级 `dict[str, list[float]]`，
+key 按 `(scope, tool_name)` 组合增长，生产环境无清理机制。
+`reset()` 仅测试中调用。需改为实例级存储或定时清理。
 
 ---
 
