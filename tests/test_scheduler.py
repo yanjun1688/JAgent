@@ -302,12 +302,12 @@ async def test_pause_on_confirmation_needed(store: EventStore):
 # ── State chain fix tests ───────────────────────────────────────
 
 
-class TestDynamicPlanStateChain:
-    """Verify _execute_dynamic_plan uses passed-in state, not internal _refresh_state."""
+class TestPlanStateChain:
+    """Verify _execute_plan uses passed-in state, not internal _refresh_state."""
 
     @pytest.mark.asyncio
-    async def test_dynamic_plan_uses_passed_state_for_context_manager(self, store: EventStore):
-        """Verify _execute_dynamic_plan uses the passed state.seq for context_manager,
+    async def test_plan_uses_passed_state_for_context_manager(self, store: EventStore):
+        """Verify _execute_plan uses the passed state.seq for context_manager,
         not a freshly-refreshed state."""
         from harness.core.dag_executor import DagExecutor
         from harness.core.planner import Planner
@@ -331,7 +331,7 @@ class TestDynamicPlanStateChain:
 
         plan = DagPlan(intent="test", steps=[
             DagStep(id="s1", tool="echo", input={"msg": "hello"}),
-        ], dynamic=True)
+        ])
         planner.plan = AsyncMock(return_value=plan)
         planner.last_raw_response = "mock"
 
@@ -350,7 +350,7 @@ class TestDynamicPlanStateChain:
         assert state.status == RunStatus.COMPLETED
         events = await store.get_events("run-chain-1")
         assert any(e.event_type == EventType.CONTEXT_CHECKPOINTED for e in events), (
-            "Context manager should have checkpointed during dynamic plan execution"
+            "Context manager should have checkpointed during plan execution"
         )
 
     @pytest.mark.asyncio
@@ -709,13 +709,13 @@ class TestPlanningExecutorSchedulerExecution:
         return sched, planner, dag
 
     @staticmethod
-    def _plan(*, step_ids: list[str] | None = None, dynamic: bool = False):
+    def _plan(*, step_ids: list[str] | None = None):
         """Build a DagPlan with one-layer independent steps."""
         from harness.models.plan import DagPlan, DagStep
 
         ids = step_ids if step_ids is not None else ["s1"]
         steps = [DagStep(id=sid, tool="echo", input={"msg": sid}) for sid in ids]
-        return DagPlan(intent="test", steps=steps, dynamic=dynamic)
+        return DagPlan(intent="test", steps=steps)
 
     @staticmethod
     def _mock_exec_layer(*, succeed: bool = True):

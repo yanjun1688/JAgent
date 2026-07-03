@@ -14,8 +14,6 @@ from harness.storage.event_store import EventStore
 from harness.tools.executor import ToolExecutor
 from harness.tools.registry import ToolRegistry
 
-pytestmark = pytest.mark.asyncio
-
 
 @pytest.fixture
 async def store():
@@ -588,7 +586,6 @@ class TestDagExecutorVariableIntegration:
 
 class TestStepResultDictBackCompat:
     """StepResult.get() provides dict-compatible access for backward compatibility."""
-    pytestmark = []  # these are sync tests, override global asyncio mark
 
     def test_get_output(self):
         sr = StepResult(step_id="s1", status=StepStatus.COMPLETED, output={"k": "v"})

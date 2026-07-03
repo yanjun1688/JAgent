@@ -242,12 +242,8 @@ class PlanningExecutorScheduler(BaseScheduler):
                 await self._complete(run_id, answer)
                 return await self._refresh_state(run_id)
 
-            if plan.dynamic:
-                state = await self._execute_dynamic_plan(run_id, intent, plan, state)
-                continue
-
-            state, consecutive_failures = await self._execute_static_plan(run_id, plan, consecutive_failures, state_seq=state.seq)
-            _sched_ctrl.info("[lifecycle] Static plan complete — status=%s failures=%d", state.status.value, consecutive_failures)
+            state, consecutive_failures = await self._execute_plan(run_id, plan, consecutive_failures, state_seq=state.seq)
+            _sched_ctrl.info("[lifecycle] Plan complete — status=%s failures=%d", state.status.value, consecutive_failures)
             if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
                 return state
 
@@ -260,133 +256,7 @@ class PlanningExecutorScheduler(BaseScheduler):
 
         return state
 
-    async def _execute_dynamic_plan(
-        self, run_id: str, intent: str, plan: DagPlan, state: RunState,
-    ) -> RunState:
-        _sched_ctrl.info("[plan] Dynamic plan — serial step-by-step execution")
-        results: dict[str, StepResult] = {}
-        dyn_plan_id = f"plan_{run_id}_{uuid4().hex[:8]}"
-        layers = plan.topological_sort(
-            completed_step_ids=set(),
-        )
-        state_seq = state.seq
-        await self.store.append_event(
-            run_id, EventType.PLAN_CREATED,
-            PlanCreatedPayload(
-                plan_id=dyn_plan_id, intent=plan.intent,
-                steps_summary=f"{len(plan.steps)} steps in {len(layers)} layers",
-                layer_count=len(layers),
-            ).model_dump(),
-        )
-        for step_idx, step in enumerate(plan.steps):
-            if self._is_cancelled(run_id):
-                await self._fail(run_id, "Run cancelled by user")
-                return await self._refresh_state(run_id)
-            if self.context_manager:
-                await self.context_manager.maybe_compress(run_id, state.seq, state)
-                await self.context_manager.try_checkpoint(run_id, state.seq, state)
-            step_layers = DagPlan(intent=intent, steps=[step]).topological_sort()
-            try:
-                ok = await self.dag_executor.execute_layer(
-                    run_id, plan, dyn_plan_id, step_layers[0], step_idx, step_layers, results,
-                )
-            except PlanSuspended as susp:
-                _sched_act.info("[dynamic] %d step(s) need confirmation: %s",
-                                len(susp.confirmations),
-                                ", ".join(sid for sid, _ in susp.confirmations))
-                terminated, failed_step_ids, _ = await self._handle_dag_confirmations(
-                    run_id, plan, dyn_plan_id,
-                    susp.confirmations, results, "dynamic", 0,
-                )
-                if terminated:
-                    return await self._refresh_state(run_id)
-                if failed_step_ids:
-                    ok = False
-                else:
-                    continue
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                _sched_act.error("[dynamic] Step %s failed: %s", step.id, exc)
-                await self._fail(run_id, f"Dynamic step '{step.id}' failed: {exc}")
-                return await self._refresh_state(run_id)
-            if not ok:
-                _sched_act.error("[dynamic] Step %s had failures — revising", step.id)
-                sys_state = self.dag_executor.build_dag_status_text(
-                    plan, results, current_layer=step_idx,
-                )
-                state = await self._refresh_state(run_id)
-                # Track the seq at which state was folded for feedback filtering
-                step_state_seq = state.seq
-                fb = self._get_feedback_text(state, for_revise=True, since_seq=state_seq)
-                _sched_act.info("[dynamic] Revise after failure %s", fmtkv(
-                    step_id=step.id, has_feedback=fb is not None,
-                ))
-                revised = await self.planner.revise(plan, results, sys_state, feedback=fb, intent_fallback=state.intent)
-                if revised is None:
-                    _sched_act.error("[dynamic] Revise failed — terminating")
-                    await self._fail(run_id, f"Dynamic step '{step.id}' failed")
-                    return await self._refresh_state(run_id)
-                await self.store.append_event(
-                    run_id, EventType.PLAN_REVISED,
-                    PlanRevisedPayload(
-                        plan_id=dyn_plan_id, revision_reason="dynamic_step_failure",
-                        intent=revised.intent,
-                        remaining_steps_summary=f"{len(revised.steps)} steps remaining" if revised.steps else "task complete",
-                    ).model_dump(),
-                )
-                if not revised.steps or revised.dynamic:
-                    total_ok = sum(1 for sid in (s.id for s in plan.steps) if isinstance(results.get(sid), StepResult) and results[sid].is_completed)
-                    revised_layers = revised.topological_sort() if revised.steps else []
-                    await self.store.append_event(
-                        run_id, EventType.PLAN_COMPLETED,
-                        PlanCompletedPayload(
-                            plan_id=dyn_plan_id, completed_steps=total_ok,
-                            total_layers=len(revised_layers), summary="Dynamic task completed after revision",
-                        ).model_dump(),
-                    )
-                    await self._finalize_with_summary(run_id, plan.intent, "Dynamic task completed after revision")
-                    return await self._refresh_state(run_id)
-                plan = revised
-                continue
-            sys_state = self.dag_executor.build_dag_status_text(
-                plan, results, current_layer=step_idx,
-            )
-            s = await self._refresh_state(run_id)
-            step_state_seq = s.seq
-            fb = self._get_feedback_text(s, for_revise=True, since_seq=state_seq)
-            _sched_act.info("[dynamic] Revise after layer complete %s", fmtkv(
-                step_id=step.id, has_feedback=fb is not None,
-            ))
-            revised = await self.planner.revise(plan, results, sys_state, feedback=fb, intent_fallback=s.intent)
-            if revised is None:
-                _sched_think.error("[dynamic] Revise failed — terminating")
-                await self._fail(run_id, "Planner revise failed during dynamic execution")
-                return await self._refresh_state(run_id)
-            await self.store.append_event(
-                run_id, EventType.PLAN_REVISED,
-                PlanRevisedPayload(
-                    plan_id=dyn_plan_id, revision_reason="dynamic_step_completed",
-                    intent=revised.intent,
-                    remaining_steps_summary=f"{len(revised.steps)} steps remaining" if revised.steps else "task complete",
-                ).model_dump(),
-            )
-            if not revised.steps or revised.dynamic:
-                total_ok = sum(1 for sid in (s.id for s in plan.steps) if isinstance(results.get(sid), StepResult) and results[sid].is_completed)
-                revised_layers = revised.topological_sort() if revised.steps else []
-                await self.store.append_event(
-                    run_id, EventType.PLAN_COMPLETED,
-                    PlanCompletedPayload(
-                        plan_id=dyn_plan_id, completed_steps=total_ok,
-                        total_layers=len(revised_layers), summary="Dynamic task completed",
-                    ).model_dump(),
-                )
-                await self._finalize_with_summary(run_id, plan.intent, "Dynamic task completed")
-                return await self._refresh_state(run_id)
-            plan = revised
-        return await self._refresh_state(run_id)
-
-    async def _execute_static_plan(
+    async def _execute_plan(
         self, run_id: str, plan: DagPlan, consecutive_failures: int,
         state_seq: int = 0,
     ) -> tuple[RunState, int]:

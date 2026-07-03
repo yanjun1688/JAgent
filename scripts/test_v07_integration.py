@@ -5,7 +5,7 @@
   2. V0.7 Planner-DAG 直接测试 → 验证 PlanningExecutorScheduler 完整循环
   3. V0.7 事件链校验 → PlanCreated → DagStepStarted/Completed → PlanRevised → PlanCompleted
   4. PlanGuardrail 校验 → dangerous_with, max_parallel, cycle detection
-  5. Dynamic Plan 退化路径 → dynamic:true 逐层串行+每步 revise
+   5. Serial Step Execution → 单步 plan + 每步 revise
 
 Usage:
   cd D:\Project\JAgent
@@ -535,13 +535,13 @@ async def test_planner_executor_cycle() -> dict:
 
 
 # ═══════════════════════════════════════════════════════════
-# Test 8: Dynamic Plan — 退化路径
+# Test 8: Serial Step Execution — per-step revise
 # ═══════════════════════════════════════════════════════════
 
-async def test_dynamic_plan() -> dict:
-    """dynamic:true → 逐层串行 + 每步 revise"""
+async def test_serial_step_execution() -> dict:
+    """single-step plan → execute → revise → empty plan → complete"""
     _log.info("=" * 56)
-    _log.info("Test 8: Dynamic Plan — 退化路径")
+    _log.info("Test 8: Serial Step Execution — per-step revise")
     _log.info("=" * 56)
 
     store = EventStore(":memory:")
@@ -552,15 +552,11 @@ async def test_dynamic_plan() -> dict:
     dag = DagExecutor(executor, store, reg)
 
     mock_llm = MockLLMClient(responses=[
-        # Initial plan: 2 steps, dynamic=true (both pre-planned, executed one-at-a-time)
         json.dumps({
             "steps": [
                 {"id": "s1", "tool": "echo", "input": {"msg": "step1"}},
-                {"id": "s2", "tool": "echo", "input": {"msg": "step2"}},
             ],
-            "dynamic": True,
         }),
-        # Revise after s1: empty = task complete before s2 runs (dynamic path stops when revise says empty)
         json.dumps({"steps": []}),
     ])
     planner = Planner(mock_llm, reg, store, max_plan_retries=1)
@@ -573,20 +569,18 @@ async def test_dynamic_plan() -> dict:
         context_manager=cm,
     )
 
-    state = await p_sched.run("dynamic-plan", "Test dynamic path")
-    events = await store.get_events("dynamic-plan")
+    state = await p_sched.run("serial-plan", "Test serial step execution")
+    events = await store.get_events("serial-plan")
 
-    _dump_events("Dynamic Plan", events)
+    _dump_events("Serial Step Execution", events)
 
     step_completed = [e for e in events if e.event_type == EventType.DAG_STEP_COMPLETED]
     plan_revised = [e for e in events if e.event_type == EventType.PLAN_REVISED]
     is_terminated = state.status in (RunStatus.COMPLETED, RunStatus.FAILED)
 
-    # Dynamic path: 1 step executed (s1), then revise returned empty → task completes
-    # (revise controls after each step whether to continue)
-    plan_created_count = sum(1 for e in events if e.event_type == EventType.PLAN_CREATED)
+    # Plan executes 1 step, then revise returns empty → task completes
     _log.info("  Steps completed: %d, PlanRevised: %d", len(step_completed), len(plan_revised))
-    _log.info("  PlanCreated count (dynamic=serial steps): %d", plan_created_count)
+    _log.info("  PlanCreated count: %d", plan_created_count)
     _log.info("  Status: %s", state.status.value)
 
     passed = len(step_completed) == 1 and len(plan_revised) >= 1 and is_terminated
@@ -877,7 +871,7 @@ async def main() -> None:
         test_upstream_selectors(),
         test_dag_step_error(),
         test_planner_executor_cycle(),
-        test_dynamic_plan(),
+        test_serial_step_execution(),
         test_planner_fallback(),
         test_system_state_injection(),
         test_topological_cycle(),

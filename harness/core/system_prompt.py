@@ -22,6 +22,7 @@ class AgentPhase(Enum):
     ANSWER = "answer"
     SERIAL_THINK = "serial_think"
     SUMMARIZE = "summarize"
+    EVALUATE_ANSWER_ACCURACY = "evaluate_answer_accuracy"
 
 
 # ── Prompt Templates ───────────────────────────────────────────────
@@ -52,11 +53,7 @@ _PLAN_PROMPT = (
     "5. Never compute, calculate, reason, or derive values yourself. "
     "If a parameter value requires calculation (e.g., math, summarization, "
     "generation), reference it from an upstream step using $step_id.field "
-    "(see Data Flow below). Do NOT hardcode computed results.\n"
-    '6. If the user explicitly requests steps to run "in order", "one by one", '
-    '"step by step", "sequentially", or "按顺序" — set "dynamic": true in the '
-    "top-level JSON. This tells the executor to run steps strictly one at a time "
-    "with revise between each step.\n\n"
+    "(see Data Flow below). Do NOT hardcode computed results.\n\n"
     "## Output JSON format\n"
     "{step_schema}\n\n"
     "## Example 1 — Independent steps:\n"
@@ -157,6 +154,32 @@ _SUMMARIZE_PROMPT = (
     "Be factual and concise. Return ONLY valid JSON, no markdown or explanation."
 )
 
+_EVALUATE_ANSWER_ACCURACY_PROMPT = (
+    "You are a quality evaluator. Your job is to check whether the agent's final answer "
+    "is consistent with the actual tool execution results. Look for hallucinations, factual errors, "
+    "or inconsistencies.\n\n"
+    "## User's Intent\n"
+    "{intent}\n\n"
+    "## Tool Execution Results\n"
+    "{tool_results_summary}\n\n"
+    "## Agent's Final Answer\n"
+    "{answer}\n\n"
+    "## Instructions\n"
+    "1. Compare every factual claim in the answer against the tool execution results.\n"
+    "2. Identify any numbers, paths, dates, names, or conclusions that are NOT supported by the tool results.\n"
+    '3. Classify each issue as: "hallucination" (fabricated), "inconsistency" (contradicts tool results), '
+    '"unfulfilled" (user request not addressed), or "missing_data" (answer says N/A but result actually had data).\n'
+    '4. Rate each issue severity as: "error", "warning", or "info".\n'
+    '5. Give an overall verdict: "pass" (all good), "warn" (minor issues), or "fail" (significant issues).\n'
+    "6. Provide a score from 0.0 (worst) to 1.0 (perfect).\n\n"
+    'Output a JSON object with these exact fields:\n'
+    '- "verdict": "pass" | "warn" | "fail"\n'
+    '- "score": number between 0 and 1\n'
+    '- "summary": a one-sentence summary of your evaluation\n'
+    '- "issues": array of {{"type": "str", "severity": "str", "detail": "str", "source": null}}\n'
+    "Return ONLY valid JSON, no markdown or explanation."
+)
+
 _PHASE_PROMPTS: dict[AgentPhase, str] = {
     AgentPhase.CLASSIFY: _CLASSIFY_PROMPT,
     AgentPhase.PLAN: _PLAN_PROMPT,
@@ -164,6 +187,7 @@ _PHASE_PROMPTS: dict[AgentPhase, str] = {
     AgentPhase.ANSWER: _ANSWER_PROMPT,
     AgentPhase.SERIAL_THINK: _SERIAL_THINK_PROMPT,
     AgentPhase.SUMMARIZE: _SUMMARIZE_PROMPT,
+    AgentPhase.EVALUATE_ANSWER_ACCURACY: _EVALUATE_ANSWER_ACCURACY_PROMPT,
 }
 
 
@@ -174,10 +198,9 @@ def get_prompt(phase: AgentPhase, **kwargs) -> str:
         result = template.format(**kwargs)
     else:
         result = template
-    _log.info("[prompt] phase=%-14s len=%d chars%s\n%s",
+    _log.info("[prompt] phase=%-14s len=%d chars%s",
               phase.value, len(result),
-              " (formatted)" if kwargs else "",
-              result)
+              " (formatted)" if kwargs else "")
     return result
 
 

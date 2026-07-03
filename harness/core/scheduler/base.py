@@ -280,18 +280,20 @@ class BaseScheduler(ABC):
             if task and not task.done() and task is not current:
                 task.cancel()
 
-    async def pause(self, run_id: str) -> None:
-        events = await self.store.get_events(run_id)
-        state = fold_events(events)
-        if state.status != RunStatus.RUNNING:
-            _sched_ctrl.info("[ctrl] PAUSE rejected — run=%s status=%s (not RUNNING)", run_id, state.status.value)
-            return
-        await self.store.append_event(
-            run_id, EventType.RUN_PAUSED,
-            RunPausedPayload(reason="user_requested").model_dump(),
-        )
-        _sched_ctrl.info("[ctrl] PAUSE written for run=%s, _pause_events exists=%s, _confirm_events exists=%s",
-                         run_id, run_id in self._pause_events, run_id in self._confirm_events)
+    async def pause(self, run_id: str) -> bool:
+        async with self._resume_lock:
+            events = await self.store.get_events(run_id)
+            state = fold_events(events)
+            if state.status != RunStatus.RUNNING:
+                _sched_ctrl.info("[ctrl] PAUSE rejected — run=%s status=%s (not RUNNING)", run_id, state.status.value)
+                return False
+            await self.store.append_event(
+                run_id, EventType.RUN_PAUSED,
+                RunPausedPayload(reason="user_requested").model_dump(),
+            )
+            _sched_ctrl.info("[ctrl] PAUSE written for run=%s, _pause_events exists=%s, _confirm_events exists=%s",
+                             run_id, run_id in self._pause_events, run_id in self._confirm_events)
+            return True
 
     async def cancel(self, run_id: str) -> None:
         flag = self._cancel_flags.get(run_id)
@@ -304,7 +306,7 @@ class BaseScheduler(ABC):
         if cevent:
             cevent.set()
 
-    async def resume(self, run_id: str) -> None:
+    async def resume(self, run_id: str) -> bool:
         async with self._resume_lock:
             events = await self.store.get_events(run_id)
             state = fold_events(events)
@@ -312,9 +314,9 @@ class BaseScheduler(ABC):
                              "_pause_events exists=%s, _confirm_events exists=%s",
                              run_id, state.status.value, state.pause_reason,
                              run_id in self._pause_events, run_id in self._confirm_events)
-            if state.status in (RunStatus.FAILED, RunStatus.COMPLETED):
-                _sched_ctrl.warning("[ctrl] RESUME rejected — run %s is %s", run_id, state.status.value)
-                return
+            if state.status != RunStatus.PAUSED:
+                _sched_ctrl.warning("[ctrl] RESUME rejected — run %s is %s, not PAUSED", run_id, state.status.value)
+                return False
             seq = state.seq
             await self.store.append_event(
                 run_id, EventType.RUN_RESUMED,
@@ -332,6 +334,7 @@ class BaseScheduler(ABC):
                 cevent.set()
             else:
                 _sched_ctrl.info("[ctrl] RESUME _confirm_events NOT FOUND for run=%s", run_id)
+            return True
 
     def is_active(self, run_id: str) -> bool:
         return run_id in self._running_tasks

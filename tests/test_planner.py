@@ -437,31 +437,6 @@ class TestAnswerContextBug5:
         assert "Tool execution results" not in content, "Should not have tool section when no results"
 
 
-class TestPlanPromptBug7:
-    """Bug 7: Planner should output dynamic: true when user requests strict ordering."""
-
-    def test_prompt_has_dynamic_rule(self):
-        """The PLAN prompt should instruct when to set dynamic: true."""
-        from harness.core.system_prompt import AgentPhase, get_prompt
-
-        prompt = get_prompt(AgentPhase.PLAN, step_schema="", tool_descriptions="", intent="test")
-        assert '"dynamic": true' in prompt or 'dynamic: true' in prompt, (
-            "Bug 7: Prompt should instruct when to use dynamic: true for ordered tasks"
-        )
-        assert "one at a time" in prompt, (
-            "Bug 7: Prompt should explain dynamic: true -> strict sequential execution"
-        )
-
-    def test_prompt_has_sequential_keywords(self):
-        """Rule 6 should mention ordering-related keywords."""
-        from harness.core.system_prompt import AgentPhase, get_prompt
-
-        prompt = get_prompt(AgentPhase.PLAN, step_schema="", tool_descriptions="", intent="test")
-        assert "one by one" in prompt or "step by step" in prompt or "sequentially" in prompt, (
-            "Bug 7: Rule 6 should list ordering keywords like 'one by one', 'step by step', 'sequentially'"
-        )
-
-
 class TestToolFilteringBug8:
     """Bug 8: Filter tool descriptions by intent relevance to reduce prompt size."""
 

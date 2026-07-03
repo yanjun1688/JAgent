@@ -147,6 +147,258 @@ class TestHttpRequestDefinition:
         assert HTTP_REQUEST_DEF.input_schema["required"] == ["url"]
 
 
+# ── http_request client lifecycle & behaviour ──────────────────────
+
+
+class TestHttpRequestClientLifecycle:
+    """Shared client should be reused across calls and properly cleaned up."""
+
+    async def test_client_reuse(self):
+        from harness.tools.http_request import _get_client, close_client
+        from harness.tools.http_request import _client
+        try:
+            c1 = await _get_client()
+            c2 = await _get_client()
+            assert c1 is c2, "should return the same client instance"
+        finally:
+            await close_client()
+
+    async def test_close_client_nullifies(self):
+        from harness.tools.http_request import _get_client, close_client
+        from harness.tools.http_request import _client
+        await _get_client()
+        await close_client()
+        assert _client is None
+
+    async def test_get_client_after_close_creates_new(self):
+        from harness.tools.http_request import _get_client, close_client
+        try:
+            c1 = await _get_client()
+            await close_client()
+            c2 = await _get_client()
+            assert c1 is not c2, "should create a new client after close"
+        finally:
+            await close_client()
+
+    async def test_concurrent_init_produces_same_client(self):
+        import asyncio
+        from harness.tools.http_request import _get_client, close_client
+        try:
+            c1, c2 = await asyncio.gather(_get_client(), _get_client())
+            assert c1 is c2, "concurrent init should yield the same client"
+        finally:
+            await close_client()
+
+
+class TestHttpRequestFn:
+    """Test http_request_fn behaviour: truncation, timeout, error paths."""
+
+    @pytest.mark.asyncio
+    async def test_truncation_preserves_original_byte_count(self):
+        import datetime as dt
+        from unittest.mock import AsyncMock, patch
+        import httpx
+        from harness.tools.http_request import http_request_fn, close_client
+
+        long_text = "x" * 2000
+
+        mock_resp = AsyncMock()
+        mock_resp.text = long_text
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
+        mock_resp.elapsed = dt.timedelta(milliseconds=42)
+
+        with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = mock_resp
+            result = await http_request_fn({
+                "url": "https://test.local/data",
+                "method": "GET",
+                "max_response_bytes": 100,
+            })
+
+        assert result["status_code"] == 200
+        assert "truncated" in result["body"]
+        assert "2000 total bytes" in result["body"], f"should show original len, got: {result['body']}"
+        assert result["elapsed_ms"] == 42
+
+    @pytest.mark.asyncio
+    async def test_no_truncation_when_under_limit(self):
+        import datetime as dt
+        from unittest.mock import AsyncMock, patch
+        import httpx
+        from harness.tools.http_request import http_request_fn, close_client
+
+        text = "short response"
+
+        mock_resp = AsyncMock()
+        mock_resp.text = text
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
+        mock_resp.elapsed = dt.timedelta(milliseconds=5)
+
+        with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = mock_resp
+            result = await http_request_fn({
+                "url": "https://test.local/data",
+                "max_response_bytes": 1000,
+            })
+
+        assert result["body"] == text
+        assert "truncated" not in result["body"]
+
+    @pytest.mark.asyncio
+    async def test_unlimited_response(self):
+        import datetime as dt
+        from unittest.mock import AsyncMock, patch
+        import httpx
+        from harness.tools.http_request import http_request_fn, close_client
+
+        text = "a" * 100000
+
+        mock_resp = AsyncMock()
+        mock_resp.text = text
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
+        mock_resp.elapsed = dt.timedelta(milliseconds=10)
+
+        with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = mock_resp
+            result = await http_request_fn({
+                "url": "https://test.local/big",
+                "max_response_bytes": 0,
+            })
+
+        assert result["body"] == text
+
+    @pytest.mark.asyncio
+    async def test_post_sends_json_body(self):
+        import datetime as dt
+        from unittest.mock import AsyncMock, patch
+        import httpx
+        from harness.tools.http_request import http_request_fn, close_client
+
+        mock_resp = AsyncMock()
+        mock_resp.text = '{"ok":true}'
+        mock_resp.status_code = 201
+        mock_resp.headers = {}
+        mock_resp.elapsed = dt.timedelta(milliseconds=30)
+
+        with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = mock_resp
+            result = await http_request_fn({
+                "url": "https://test.local/api",
+                "method": "POST",
+                "body": {"key": "value"},
+            })
+
+        call_kwargs = mock_req.call_args.kwargs
+        assert call_kwargs["json"] == {"key": "value"}
+        assert result["status_code"] == 201
+        assert result["method"] == "POST"
+
+    @pytest.mark.asyncio
+    async def test_default_method_is_get(self):
+        import datetime as dt
+        from unittest.mock import AsyncMock, patch
+        import httpx
+        from harness.tools.http_request import http_request_fn, close_client
+
+        mock_resp = AsyncMock()
+        mock_resp.text = "ok"
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
+        mock_resp.elapsed = dt.timedelta(milliseconds=1)
+
+        with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = mock_resp
+            result = await http_request_fn({"url": "https://test.local/"})
+
+        assert mock_req.call_args.args[0] == "GET"
+        assert result["method"] == "GET"
+
+    @pytest.mark.asyncio
+    async def test_result_includes_url_method_headers(self):
+        import datetime as dt
+        from unittest.mock import AsyncMock, patch
+        import httpx
+        from harness.tools.http_request import http_request_fn, close_client
+
+        resp_headers = httpx.Headers({"content-type": "application/json", "x-req-id": "abc123"})
+        mock_resp = AsyncMock()
+        mock_resp.text = "{}"
+        mock_resp.status_code = 200
+        mock_resp.headers = resp_headers
+        mock_resp.elapsed = dt.timedelta(milliseconds=15)
+
+        with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = mock_resp
+            result = await http_request_fn({
+                "url": "https://test.local/v1",
+                "method": "DELETE",
+            })
+
+        assert result["url"] == "https://test.local/v1"
+        assert result["method"] == "DELETE"
+        assert result["headers"]["content-type"] == "application/json"
+        assert result["headers"]["x-req-id"] == "abc123"
+
+
+class TestHttpRequestConcurrency:
+    """Concurrent http_request calls should work correctly with shared client."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_calls_complete(self):
+        import asyncio
+        import datetime as dt
+        from unittest.mock import AsyncMock, patch
+        import httpx
+        from harness.tools.http_request import http_request_fn, close_client
+
+        async def delayed_response(request, *args, **kwargs):
+            await asyncio.sleep(0.01)
+            mock = AsyncMock()
+            mock.text = "ok"
+            mock.status_code = 200
+            mock.headers = {}
+            mock.elapsed = dt.timedelta(milliseconds=10)
+            return mock
+
+        with patch.object(httpx.AsyncClient, "request", side_effect=delayed_response) as mock_req:
+            tasks = [
+                http_request_fn({"url": f"https://test.local/{i}", "method": "GET"})
+                for i in range(20)
+            ]
+            results = await asyncio.gather(*tasks)
+
+        assert len(results) == 20
+        assert all(r["status_code"] == 200 for r in results)
+        assert mock_req.call_count == 20
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_use_shared_client(self):
+        import asyncio
+        import datetime as dt
+        from unittest.mock import AsyncMock, patch
+        import httpx
+        from harness.tools.http_request import http_request_fn, _client, close_client
+
+        mock_resp = AsyncMock()
+        mock_resp.text = "ok"
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
+        mock_resp.elapsed = dt.timedelta(milliseconds=5)
+
+        with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
+            mock_req.return_value = mock_resp
+            tasks = [
+                http_request_fn({"url": f"https://test.local/page/{i}"})
+                for i in range(5)
+            ]
+            await asyncio.gather(*tasks)
+
+        assert mock_req.call_count == 5
+
+
 # ── file_op ───────────────────────────────────────────────────────
 
 

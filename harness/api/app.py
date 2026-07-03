@@ -27,6 +27,7 @@ from harness.api.query import router as query_router
 from harness.api.routes import router as routes_router
 from harness.api.ws import router as ws_router
 from harness.models.mcp_config import MCPConfig
+from harness.tools.http_request import close_client as close_http_client
 from harness.tools.mcp_call import set_manager as set_mcp_manager
 from harness.tools.mcp_manager import MCPServerManager
 
@@ -91,6 +92,10 @@ async def lifespan(app: FastAPI):
             await api.store.close()
         except asyncio.CancelledError:
             _logger.warning("Store close interrupted during shutdown")
+        try:
+            await close_http_client()
+        except asyncio.CancelledError:
+            _logger.warning("HTTP client close interrupted during shutdown")
 
 
 # ── App assembly ──────────────────────────────────────────────
