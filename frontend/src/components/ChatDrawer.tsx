@@ -66,8 +66,13 @@ export default function ChatDrawer({ style, initialRunId, onRunChange }: Props) 
   }, [allEvents, pendingConfirmations])
 
   async function handleConfirmResume(confirmationId: string, confirmed: boolean) {
-    await confirmAction(activeRunId!, confirmationId, confirmed, '')
-    await resumeRun(activeRunId!)
+    setLoading(true)
+    try {
+      await confirmAction(activeRunId!, confirmationId, confirmed, '')
+      await resumeRun(activeRunId!)
+    } finally {
+      setLoading(false)
+    }
   }
 
   function loadRun(runId: string) {
@@ -375,13 +380,14 @@ export default function ChatDrawer({ style, initialRunId, onRunChange }: Props) 
         {activeRunStatus === 'running' && (
           <button
             onClick={() => pauseRun(activeRunId!)}
+            disabled={loading}
             style={{
               padding: '8px 14px',
-              background: '#ffb74d',
+              background: loading ? '#ffcc80' : '#ffb74d',
               color: '#fff',
               border: 'none',
               borderRadius: 8,
-              cursor: 'pointer',
+              cursor: loading ? 'not-allowed' : 'pointer',
               fontSize: 13,
               fontWeight: 600,
             }}
@@ -392,13 +398,14 @@ export default function ChatDrawer({ style, initialRunId, onRunChange }: Props) 
         {activeRunStatus === 'paused' && (
           <button
             onClick={() => resumeRun(activeRunId!)}
+            disabled={loading}
             style={{
               padding: '8px 14px',
-              background: '#66bb6a',
+              background: loading ? '#a5d6a7' : '#66bb6a',
               color: '#fff',
               border: 'none',
               borderRadius: 8,
-              cursor: 'pointer',
+              cursor: loading ? 'not-allowed' : 'pointer',
               fontSize: 13,
               fontWeight: 600,
             }}

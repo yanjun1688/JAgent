@@ -49,7 +49,6 @@ def _build_step_schema_text() -> str:
     return """Top-level JSON MUST contain:
   - "intent" (string, required): a one-sentence summary of what this plan aims to accomplish. Rephrase the user's goal in your own words — DO NOT copy-paste the user intent verbatim.
   - "steps" (array): list of step objects. Use [] for no-action plans.
-  - "dynamic" (boolean, optional): set true if the plan's steps must run strictly one at a time (e.g. conditional branching, interactive flows). Default false.
 
 Each step MUST be a JSON object with exactly these fields:
   - "id" (string, required): unique identifier, e.g. "s1"
@@ -214,11 +213,10 @@ class Planner:
         feedback: str | None = None,
     ) -> DagPlan | None:
         prompt = self._build_plan_prompt(intent, feedback=feedback)
-        _log.info("[plan] phase=%s len=%d %s\n=== PLAN PROMPT ===\n%s\n=== END PLAN PROMPT ===",
+        _log.info("[plan] phase=%s len=%d %s",
                   AgentPhase.PLAN.value, len(prompt),
                   fmtkv(intent=intent[:80], feedback_len=len(feedback) if feedback else 0,
-                        has_feedback=feedback is not None),
-                  prompt)
+                        has_feedback=feedback is not None))
         last_error = ""
 
         for attempt in range(1, self.max_plan_retries + 2):
@@ -292,7 +290,7 @@ class Planner:
 
             if not revised.steps:
                 _log.info("[revise] Attempt %d — task complete (empty steps)", attempt)
-                return DagPlan(intent=revised.intent, steps=[], dynamic=True)
+                return DagPlan(intent=revised.intent, steps=[])
 
             errors = self.guardrail.validate(revised, completed_step_ids=completed_step_ids)
             if errors:
@@ -531,5 +529,4 @@ class Planner:
         return DagPlan(
             intent=data.get("intent", ""),
             steps=steps,
-            dynamic=data.get("dynamic", False),
         ), ""

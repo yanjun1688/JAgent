@@ -9,8 +9,6 @@ import pytest
 from harness.models.events import EventType
 from harness.storage.event_store import EventStore
 
-pytestmark = pytest.mark.asyncio
-
 
 class TestAppendEvent:
     async def test_append_first_event(self, store: EventStore):

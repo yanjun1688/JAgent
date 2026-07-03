@@ -10,7 +10,7 @@ from harness.tools.guardrails import (
     SchemaGuardrail,
     ScopeGuardrail,
 )
-from harness.tools.http_request import HTTP_REQUEST_DEF, http_request_fn
+from harness.tools.http_request import HTTP_REQUEST_DEF, close_client, http_request_fn
 from harness.tools.idempotency import IdempotencyKeyGenerator
 from harness.tools.mcp_call import MCP_CALL_DEF, connect_mcp_server, disconnect_mcp_server, mcp_call_fn
 from harness.tools.registry import ToolRegistry
@@ -39,6 +39,7 @@ __all__ = [
     "ToolRegistry",
     "HTTP_REQUEST_DEF",
     "http_request_fn",
+    "close_client",
     "FILE_OP_DEF",
     "file_op_fn",
     "set_sandbox_root",

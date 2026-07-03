@@ -163,7 +163,12 @@ async def pause_run(
     """Pause a running run. Writes RunPaused event and halts the scheduler loop."""
     scheduler = api._schedulers.get(run_id)
     if scheduler:
-        await scheduler.pause(run_id)
+        ok = await scheduler.pause(run_id)
+        if not ok:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Run is not in RUNNING state, cannot pause"},
+            )
     else:
         events = await api.store.get_events(run_id)
         if not events:
@@ -187,9 +192,13 @@ async def resume_run(run_id: str, api: HarnessAPI = Depends(get_hapi)):
     """Resume a paused run. Writes RunResumed event and wakes the scheduler loop."""
     scheduler = api._schedulers.get(run_id)
     if scheduler:
-        await scheduler.resume(run_id)
+        ok = await scheduler.resume(run_id)
+        if not ok:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Run is not in PAUSED state, cannot resume"},
+            )
     else:
-        # No active scheduler — validate state via Event Store
         events = await api.store.get_events(run_id)
         if not events:
             return JSONResponse(status_code=404, content={"error": "Run not found"})
@@ -199,8 +208,6 @@ async def resume_run(run_id: str, api: HarnessAPI = Depends(get_hapi)):
                 status_code=409,
                 content={"error": f"Run is {state.status.value}, cannot resume"},
             )
-        # Run is PAUSED but has no scheduler (edge case: scheduler already exited).
-        # Write RunResumed so the event stream is consistent.
         seq = await api.store.get_latest_seq(run_id)
         await api.store.append_event(
             run_id,

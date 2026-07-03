@@ -20,7 +20,6 @@ class DagStep(BaseModel):
 class DagPlan(BaseModel):
     intent: str = ""
     steps: list[DagStep] = Field(default_factory=list)
-    dynamic: bool = False
 
     def _step_map(self) -> dict[str, DagStep]:
         return {s.id: s for s in self.steps}

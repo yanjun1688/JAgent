@@ -171,7 +171,7 @@ export default function RunAnalysis() {
 
         <div style={{ fontFamily: 'monospace', fontSize: 13, lineHeight: 1.6 }}>
           {timeline.map((e) => (
-            <div key={e.seq}>
+            <div key={`${e.seq}-${e.event_type}`}>
               <div
                 onClick={() => toggleExpand(e.seq)}
                 style={{

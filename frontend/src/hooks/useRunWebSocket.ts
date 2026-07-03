@@ -33,22 +33,29 @@ export function useRunWebSocket(
   const wsRef = useRef<WebSocket | null>(null)
   const lastSeqRef = useRef(0)
   const runStatusRef = useRef('')
-  const closedRef = useRef(false)
   const reconnectAttemptsRef = useRef(0)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const prevRunIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!runId) {
       setEvents([])
       setRunStatus('')
+      prevRunIdRef.current = null
       return
     }
 
+    const runIdChanged = prevRunIdRef.current !== runId
+    prevRunIdRef.current = runId
+
     let disposed = false
-    lastSeqRef.current = 0
-    runStatusRef.current = ''
-    reconnectAttemptsRef.current = 0
+    if (runIdChanged) {
+      lastSeqRef.current = 0
+      runStatusRef.current = ''
+      reconnectAttemptsRef.current = 0
+      setEvents([])
+    }
 
     function stopPing() {
       if (pingTimerRef.current) {
@@ -121,6 +128,8 @@ export function useRunWebSocket(
           if (!raw.event_type) return
           if (raw.seq <= lastSeqRef.current) return
           lastSeqRef.current = raw.seq
+
+          console.log('[WS]', `#${raw.seq}`, raw.event_type, raw.payload)
 
           const event: WsEvent = {
             run_id: raw.run_id || id,

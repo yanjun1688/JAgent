@@ -364,7 +364,7 @@ export default function OpsRealTimePanel({ runId, events, runStatus, isConnected
         <div style={{ ...sectionTitle, marginBottom: 8, fontSize: 14 }}>Key Events</div>
         <div style={{ fontFamily: 'monospace', fontSize: 11, lineHeight: 1.5, maxHeight: 300, overflow: 'auto' }}>
           {keyEvents.slice(-50).map((e) => (
-            <div key={e.seq} style={{ display: 'flex', gap: 6, padding: '2px 4px', borderLeft: `2px solid ${eventTypeBadge(e.event_type).background || '#ddd'}`, marginBottom: 1, background: '#fafafa' }}>
+            <div key={`${e.seq}-${e.event_type}`} style={{ display: 'flex', gap: 6, padding: '2px 4px', borderLeft: `2px solid ${eventTypeBadge(e.event_type).background || '#ddd'}`, marginBottom: 1, background: '#fafafa' }}>
               <span style={{ color: '#999', minWidth: 28 }}>#{e.seq}</span>
               <span style={{ display: 'inline-block', padding: '0 4px', borderRadius: 3, fontSize: 9, background: eventTypeBadge(e.event_type).background || '#eee', color: '#fff', fontWeight: 700, minWidth: 70, textAlign: 'center', lineHeight: '16px', height: 16, overflow: 'hidden' }}>
                 {e.event_type}

@@ -43,6 +43,7 @@ export default function RunDetail() {
   const navigate = useNavigate()
   const [run, setRun] = useState<RunDetailType | null>(null)
   const [loading, setLoading] = useState(true)
+  const [acting, setActing] = useState(false)
   const [confirmDialog, setConfirmDialog] = useState<{
     confirmationId: string
     toolName: string
@@ -87,14 +88,24 @@ export default function RunDetail() {
 
   async function handlePause() {
     if (!runId) return
-    await pauseRun(runId)
-    await load()
+    setActing(true)
+    try {
+      await pauseRun(runId)
+      await load()
+    } finally {
+      setActing(false)
+    }
   }
 
   async function handleResume() {
     if (!runId) return
-    await resumeRun(runId)
-    await load()
+    setActing(true)
+    try {
+      await resumeRun(runId)
+      await load()
+    } finally {
+      setActing(false)
+    }
   }
 
   async function handleDelete() {
@@ -105,19 +116,37 @@ export default function RunDetail() {
 
   async function handleConfirm(confirmed: boolean, operatorId: string) {
     if (!runId || !confirmDialog) return
-    await confirmAction(runId, confirmDialog.confirmationId, confirmed, operatorId)
-    setConfirmDialog(null)
-    if (run?.pause_reason === 'waiting_confirmation') {
-      await resumeRun(runId)
+    setActing(true)
+    try {
+      await confirmAction(runId, confirmDialog.confirmationId, confirmed, operatorId)
+      setConfirmDialog(null)
+      if (run?.pause_reason === 'waiting_confirmation') {
+        try {
+          await resumeRun(runId)
+        } catch {
+          console.warn('Resume after confirm failed, relying on event stream to refresh status')
+        }
+      }
+      await load()
+    } finally {
+      setActing(false)
     }
-    await load()
   }
 
   async function handleInlineConfirm(confirmationId: string, confirmed: boolean) {
     if (!runId) return
-    await confirmAction(runId, confirmationId, confirmed, '')
-    await resumeRun(runId)
-    await load()
+    setActing(true)
+    try {
+      await confirmAction(runId, confirmationId, confirmed, '')
+      try {
+        await resumeRun(runId)
+      } catch {
+        console.warn('Resume after confirm failed, relying on event stream to refresh status')
+      }
+      await load()
+    } finally {
+      setActing(false)
+    }
   }
 
   function formatTime(ts: number): string {
@@ -194,12 +223,12 @@ export default function RunDetail() {
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           {run.status === 'running' && (
-            <button onClick={handlePause} style={{ cursor: 'pointer' }}>
+            <button onClick={handlePause} disabled={acting} style={{ cursor: acting ? 'not-allowed' : 'pointer', opacity: acting ? 0.6 : 1 }}>
               Pause
             </button>
           )}
           {run.status === 'paused' && run.pause_reason !== 'waiting_confirmation' && (
-            <button onClick={handleResume} style={{ cursor: 'pointer' }}>
+            <button onClick={handleResume} disabled={acting} style={{ cursor: acting ? 'not-allowed' : 'pointer', opacity: acting ? 0.6 : 1 }}>
               Resume
             </button>
           )}
