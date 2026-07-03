@@ -1,6 +1,6 @@
 # Harness v2.1 — 架构文档
 
-> **当前阶段**: V0.8 — Quality Evaluator (实现完成)
+> **当前阶段**: V0.7 — Planner-Executor + DAG（实现完成）
 > **未来阶段**: V0.9 — 生命周期恢复（设计文档已就绪，待审查实施）
 > **基线**: 341 项测试全通过
 > **文档版本**: v2.1.6
@@ -23,7 +23,6 @@
 | V0.6+ | ✅ | 架构加固：Skill 路由 / 输出校验 / 循环检测 / side_effects 消费 / 幂等验证 |
 | **V0.6.1** | **✅** | 反馈机制增强：结构化反馈 + per-tool 追踪 + 建议生成 + Planner revise 注入 + Operator API |
 | **V0.7** | **✅** | **Planner-Executor + DAG 执行引擎（Phase 1-5）** |
-| **V0.8** | **✅** | **Quality Evaluator: StepCompletenessCheck + AnswerAccuracyCheck + EvaluatorRunner** |
 | **V0.9** | **📄 设计完成** | **生命周期恢复：服务器重启孤儿检测 + abandon/retry** |
 | V1.0 分析平台 | ✅ | AnalysisService + 6 个 API 端点 |
 
@@ -62,13 +61,6 @@
 │   │  RunMonitor (受信) ← 异常检测(per-tool+模式识别)           │        │
  │  │         → 结构化 FeedbackInjected (含 tool/error/suggestion) │        │
  │  │         → CONDITION_RESOLVED 分辨率信号                    │        │
-│  └─────────────────────────────────────────────────────────┘        │
-│  ┌─────────────────────────────────────────────────────────┐        │
-│  │  Quality Evaluator (V0.8, 受信)                          │        │
-│  │  EvaluatorRunner: on_append 回调 → create_task 异步      │        │
-│  │  ├─ StepCompletenessCheck (Rule, 零成本)                 │        │
-│  │  └─ AnswerAccuracyCheck  (LLM, ~3s/2K tokens)           │        │
-│  │  → 写 QualityCheckCompleted 事件（对执行管道透明）        │        │
 │  └─────────────────────────────────────────────────────────┘        │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │
@@ -224,7 +216,7 @@ class EventStore:
 | `RunResumed` | Scheduler | `resume_from_seq` |
 | `RunCompleted` | Scheduler | `result_summary` |
 | `RunFailed` | Scheduler/Tool | `final_error, event_count, result_summary` |
-| **`RunOrphaned`** | **V0.8 Lifecycle** | `reason, last_seq, timestamp` |
+| **`RunOrphaned`** | **V0.9 Lifecycle** | `reason, last_seq, timestamp` |
 | `FeedbackInjected` | RunMonitor / Operator API | `feedback_text, priority, source(monitor\|operator), category, affected_tool, error_type, error_detail, suggestion, expires_at_seq, resolves_feedback_id` |
 | **`PlanCreated`** | **V0.7** | `plan_id, intent, steps_summary, layer_count` |
 | **`DagStepStarted`** | **V0.7** | `plan_id, step_id, tool_name, depends_on` |
@@ -233,7 +225,6 @@ class EventStore:
 | **`PlanRevised`** | **V0.7** | `plan_id, revision_reason, remaining_steps_summary` |
 | **`PlanCompleted`** | **V0.7** | `plan_id, completed_steps, total_layers, summary` |
 | **`PlanFailed`** | **V0.7** | `plan_id, completed_steps, total_layers, final_error` |
-| **`QualityCheckCompleted`** | **V0.8 Evaluator** | `check_id, target, evaluator_type, verdict, score, issues, summary, duration_ms` |
 | `OrchestrationStarted/Completed/Failed` | Orchestrator | （旧 V0.4+，与 V0.7 共存） |
 | `StepCompleted/StepFailed` | Orchestrator | |
 
@@ -422,10 +413,9 @@ class RunState:
     orchestration_history: list[dict]        # 旧编排历史
     latest_orchestration: dict | None
     feedbacks: list[FeedbackInjectedPayload] # 监视器反馈 (结构化：含 category/tool/error/suggestion/expires/resolves)
-    orphaned: bool                           # V0.8: 孤儿标记（服务器重启后与 Scheduler 失联）
+    orphaned: bool                           # V0.9: 孤儿标记（服务器重启后与 Scheduler 失联）
     plan_history: list[dict]                 # V0.7: DAG 规划历史
     latest_plan: dict | None                 # V0.7: 当前最新计划
-    quality_checks: list[QualityCheckCompletedPayload]  # V0.8: 累积质量检查结果
 ```
 
 ---
@@ -467,24 +457,13 @@ Planner.plan() → 重试 2 次 → 全部失败
     → 返回 RunState
 ```
 
-### 5.3 质量评估流 (V0.8)
+### 5.3 上下文压缩流
 
 ```
 EventStore.append_event(RUN_COMPLETED)
   → on_append 回调
     ├→ WebSocket 广播（前端收到 Run 完成通知）
-    └→ EvaluatorRunner._on_event
-        → asyncio.create_task(_evaluate_checks)
-          → fold_events(get_events(run_id)) → RunState
-          → 遍历 checks:
-            ├→ StepCompletenessCheck.evaluate(state) [Rule, <1ms]
-            │    → check_id="step_completeness"
-            │    → 检测: 每个 tool_call 都有对应 result?
-            │    → 写 QualityCheckCompleted 事件
-            └→ AnswerAccuracyCheck.evaluate(state) [LLM, ~3s]
-                  → check_id="answer_accuracy"
-                  → 检测: 答案里的数字/结论和 tool 实际返回一致吗?
-                  → 写 QualityCheckCompleted 事件
+    └→ （无额外异步任务）
 ```
 
 ### 5.4 错误处理流
@@ -517,7 +496,7 @@ harness/
 │   ├── lifecycle.py          # [V0.8] 孤儿 Run 检测 + mark/abandon/retry（与 Scheduler 解耦）
 │   ├── planner.py            # [V0.7] Planner + PlanGuardrail
 │   ├── dag_executor.py       # [V0.7] DagExecutor + build_dag_status_text
-│   ├── fold.py               # [V0.7] plan_history + 新事件 fold; [V0.8] orphaned 标记
+│   ├── fold.py               # [V0.7] plan_history + 新事件 fold; [V0.9] orphaned 标记
 │   ├── context_manager.py    # 自动压缩 + Checkpoint
 │   ├── agent_kernel.py       # LLMAgentKernel + MockAgentKernel
 │   ├── llm_client.py         # OpenAILLMClient + MockLLMClient
@@ -539,11 +518,6 @@ harness/
 │   └── mcp_call.py           # MCP 工具调用
 ├── monitoring/
 │   └── run_monitor.py        # RunMonitor 异常检测 (per-tool 追踪 + 模式识别 + 结构化反馈注入)
-├── evaluator/                   # V0.8 Quality Evaluator — 独立语义质量评估
-│   ├── __init__.py              #   导出 EvaluatorRunner, QualityCheck, 内置 checks
-│   ├── base.py                  #   QualityCheck(ABC) + RuleQualityCheck + LLMQualityCheck
-│   ├── checks.py                #   StepCompletenessCheck (Rule) + AnswerAccuracyCheck (LLM)
-│   └── runner.py                #   EvaluatorRunner — on_append 回调 + create_task 异步
 └── analysis/
     ├── schemas.py             # 分析响应模型
     └── service.py             # AnalysisService 聚合查询

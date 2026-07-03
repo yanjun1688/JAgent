@@ -32,7 +32,6 @@ from harness.models.events import (
     DagStepStartedPayload,
     DagStepCompletedPayload,
     DagStepFailedPayload,
-    QualityCheckCompletedPayload,
 )
 
 
@@ -92,7 +91,6 @@ class RunState:
     plan_history: list[dict] = field(default_factory=list)
     latest_plan: dict | None = None
     plan_boundary_seqs: list[int] = field(default_factory=list)
-    quality_checks: list[QualityCheckCompletedPayload] = field(default_factory=list)
 
 
 def fold_events(events: list[Event]) -> RunState:
@@ -316,9 +314,5 @@ def fold_events(events: list[Event]) -> RunState:
                 if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
                     state.latest_plan["status"] = "failed"
                     state.latest_plan["final_error"] = p.final_error
-
-            case EventType.QUALITY_CHECK_COMPLETED:
-                p = QualityCheckCompletedPayload(**event.payload)
-                state.quality_checks.append(p)
 
     return state
