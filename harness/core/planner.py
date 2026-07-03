@@ -12,9 +12,9 @@ from harness.core.fold import RunState
 from harness.core.llm_client import LLMClient
 from harness.core.logger import agent_logger, fmtkv
 from harness.core.system_prompt import AgentPhase, get_prompt
-from harness.models.events import EpisodeSummary, EventType
+from harness.models.events import EpisodeSummary
+from harness.core.dag_types import StepResult, TaskState
 from harness.models.plan import DagPlan, DagStep
-from harness.models.tools import ToolDefinition
 from harness.storage.event_store import EventStore
 from harness.tools.registry import ToolRegistry
 
@@ -225,7 +225,8 @@ class Planner:
                 messages.append({"role": "user", "content": _retry_prompt(last_error)})
 
             _log.info("[plan] Attempt %d/%d for intent: %s", attempt, self.max_plan_retries + 1, intent)
-            response = await self.llm.chat(messages, temperature=0.0)
+            chat_resp = await self.llm.chat(messages, temperature=0.0)
+            response = chat_resp.content
             _log.info("[plan] LLM response (%d chars): %s", len(response), response)
 
             self.last_raw_response = response
@@ -233,6 +234,7 @@ class Planner:
             if plan is None:
                 _log.warning("[plan] Parse failed on attempt %d: %s", attempt, last_error)
                 continue
+            plan.user_intent = intent
 
             errors = self.guardrail.validate(plan)
             if errors:
@@ -255,10 +257,12 @@ class Planner:
         intent_fallback: str = "",
     ) -> DagPlan | None:
         intent = plan.intent[:200] if plan.intent else (intent_fallback[:200] if intent_fallback else "(unknown)")
+        user_intent = plan.user_intent[:200] if plan.user_intent else intent
         feedback_section = self._build_feedback_section(feedback)
         prompt = get_prompt(
             AgentPhase.REVISE,
             step_schema=_build_step_schema_text(),
+            user_intent=user_intent,
             intent=intent,
             system_state=system_state,
             tool_descriptions=self._build_tool_descriptions(),
@@ -270,9 +274,9 @@ class Planner:
                         feedback_len=len(feedback) if feedback else 0),
                   system_state)
         total_attempts = self.max_plan_retries + 1
-        completed_step_ids = {
+        executed_step_ids = {
             sid for sid, r in results.items()
-            if isinstance(r, dict) and r.get("status") in ("completed", "idempotency_hit")
+            if isinstance(r, StepResult) and r.should_not_rerun
         }
 
         last_error = ""
@@ -281,18 +285,20 @@ class Planner:
             if last_error:
                 messages.append({"role": "user", "content": _retry_prompt(last_error)})
 
-            response = await self.llm.chat(messages, temperature=0.0)
-            revised, last_error = self._parse_plan(response)
+            chat_resp = await self.llm.chat(messages, temperature=0.0)
+            revised, last_error = self._parse_plan(chat_resp.content, executed_step_ids)
 
             if revised is None:
                 _log.warning("[revise] Parse failed on attempt %d: %s", attempt, last_error)
                 continue
+            if not revised.user_intent:
+                revised.user_intent = plan.user_intent
 
             if not revised.steps:
                 _log.info("[revise] Attempt %d — task complete (empty steps)", attempt)
                 return DagPlan(intent=revised.intent, steps=[])
 
-            errors = self.guardrail.validate(revised, completed_step_ids=completed_step_ids)
+            errors = self.guardrail.validate(revised, completed_step_ids=executed_step_ids)
             if errors:
                 last_error = "; ".join(errors)
                 _log.warning("[revise] Guardrail failed on attempt %d: %s", attempt, last_error)
@@ -374,9 +380,9 @@ class Planner:
                   len(messages), n_tool_results, total_chars)
         _log.info("[answer] === USER MESSAGE BEGIN ===\n%s\n=== USER MESSAGE END ===", user_content)
 
-        response = await self.llm.chat(messages, temperature=0.7, max_tokens=16384)
-        _log.info("[answer] LLM response: %d chars: %s", len(response), response)
-        return response.strip()
+        chat_resp = await self.llm.chat(messages, temperature=0.7, max_tokens=16384)
+        _log.info("[answer] LLM response: %d chars: %s", len(chat_resp.content), chat_resp.content)
+        return chat_resp.content.strip()
 
     @staticmethod
     def _build_feedback_section(feedback: str | None) -> str:
@@ -393,7 +399,7 @@ class Planner:
         text = get_prompt(
             AgentPhase.PLAN,
             step_schema=_build_step_schema_text(),
-            tool_descriptions=self._build_tool_descriptions(intent=intent),
+            tool_descriptions=self._build_tool_descriptions(),
             intent=intent,
         )
         fb = self._build_feedback_section(feedback)
@@ -401,46 +407,8 @@ class Planner:
             text = text.replace("## User Intent\n", fb + "## User Intent\n")
         return text
 
-    @staticmethod
-    def _extract_tool_keywords(td: "ToolDefinition") -> set[str]:
-        """Extract relevance keywords from a tool definition."""
-        kw = set()
-        kw.add(td.name.lower())
-        for word in td.description.lower().split():
-            clean = word.strip(".,;:()[]")
-            if len(clean) >= 3:
-                kw.add(clean)
-        if td.input_schema and isinstance(td.input_schema, dict):
-            for pname in td.input_schema.get("properties", {}):
-                kw.add(pname.lower())
-            for pname, pinfo in td.input_schema.get("properties", {}).items():
-                desc = pinfo.get("description", "")
-                if desc:
-                    for word in desc.lower().split():
-                        clean = word.strip(".,;:()[]")
-                        if len(clean) >= 3:
-                            kw.add(clean)
-        return kw
-
-    @staticmethod
-    def _filter_tools_by_intent(intent: str, tool_defs: list["ToolDefinition"]) -> list["ToolDefinition"]:
-        """Return tools whose keywords appear in the intent, plus always-include tools."""
-        intent_lower = intent.lower()
-        ALWAYS_INCLUDE = {"file_op"}
-        relevant = []
-        for td in tool_defs:
-            if td.name in ALWAYS_INCLUDE:
-                relevant.append(td)
-                continue
-            keywords = Planner._extract_tool_keywords(td)
-            if any(kw in intent_lower for kw in keywords):
-                relevant.append(td)
-        return relevant if relevant else tool_defs
-
-    def _build_tool_descriptions(self, intent: str | None = None) -> str:
+    def _build_tool_descriptions(self) -> str:
         tool_defs = self.registry.list_tool_defs()
-        if intent and len(tool_defs) > 2:
-            tool_defs = self._filter_tools_by_intent(intent, tool_defs)
         lines = []
         for td in tool_defs:
             line = f"  - {td.name}: {td.description}"
@@ -470,7 +438,7 @@ class Planner:
         return "\n".join(lines) if lines else "  (no tools available)"
 
     @staticmethod
-    def _parse_plan(response: str) -> tuple[DagPlan | None, str]:
+    def _parse_plan(response: str, executed_step_ids: set[str] | None = None) -> tuple[DagPlan | None, str]:
         """返回 (plan_or_None, error_reason)。error_reason 为空字符串表示成功。"""
         response = response.strip()
         if response.startswith("```"):
@@ -526,7 +494,28 @@ class Planner:
                 description=s.get("description", ""),
             ))
 
+        step_tasks: dict[str, str] = {}
+        raw_tasks = data.get("step_tasks")
+        if raw_tasks is not None and isinstance(raw_tasks, dict):
+            valid_states = {s.value for s in TaskState}
+            exec_ids = executed_step_ids or set()
+            for sid, ts_str in raw_tasks.items():
+                if not isinstance(sid, str) or not isinstance(ts_str, str):
+                    continue
+                if exec_ids and sid not in exec_ids:
+                    _log.debug("[parse] step_tasks: ignoring unknown step %s", sid)
+                    continue
+                if ts_str not in valid_states:
+                    _log.warning("[parse] step_tasks: invalid state %s for %s, defaulting to unknown", ts_str, sid)
+                    step_tasks[sid] = TaskState.UNKNOWN.value
+                    continue
+                step_tasks[sid] = ts_str
+            if step_tasks:
+                _log.info("[parse] step_tasks from LLM: %s", [(sid, ts) for sid, ts in step_tasks.items()])
+
         return DagPlan(
             intent=data.get("intent", ""),
             steps=steps,
+            failed=data.get("failed", False),
+            step_tasks=step_tasks,
         ), ""

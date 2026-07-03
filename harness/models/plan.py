@@ -18,8 +18,11 @@ class DagStep(BaseModel):
 
 
 class DagPlan(BaseModel):
+    user_intent: str = ""
     intent: str = ""
     steps: list[DagStep] = Field(default_factory=list)
+    failed: bool = False
+    step_tasks: dict[str, str] = Field(default_factory=dict)
 
     def _step_map(self) -> dict[str, DagStep]:
         return {s.id: s for s in self.steps}

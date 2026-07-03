@@ -20,6 +20,10 @@ from typing import TYPE_CHECKING, Callable
 from fastapi import WebSocket
 
 from harness.core.scheduler import PlanningExecutorScheduler, SchedulerConfig
+from harness.core.fold import fold_events
+from harness.core.logger import guard_logger
+
+_log = guard_logger("api.deps")
 
 if TYPE_CHECKING:
     from harness.core.llm_client import LLMClient
@@ -96,9 +100,62 @@ class HarnessAPI:
         self._schedulers.pop(run_id, None)
 
     def cleanup_run_resources(self, run_id: str) -> None:
-        """清理 run 结束后的 API 层资源（scheduler 注册表 + WS 客户端列表）。"""
+        """清理 run 结束后的 API 层资源（scheduler 注册表 + WS 客户端列表）。
+        同时写入 assistant 消息到关联的 conversation。
+        """
         self._schedulers.pop(run_id, None)
         self._ws_clients.pop(run_id, None)
+        asyncio.create_task(self._write_assistant_message(run_id))
+
+    async def _write_assistant_message(self, run_id: str) -> None:
+        """如果 run 关联了 conversation，写入 ConversationMessage(role=assistant)。"""
+        if self.store._conn is None:
+            _log.debug(
+                "Skipping assistant message for run=%s — EventStore already closed",
+                run_id,
+            )
+            return
+        try:
+            events = await self.store.get_events(run_id)
+            if not events:
+                return
+            state = fold_events(events)
+            if not state.conversation_id:
+                return
+
+            conv = await self.store.get_conversation(state.conversation_id)
+            if not conv:
+                return
+
+            content = "Task completed."
+            if state.summary:
+                if isinstance(state.summary, str):
+                    content = state.summary
+                else:
+                    content = str(state.summary)
+            elif state.last_error:
+                content = f"Error: {state.last_error}"
+
+            from harness.models.events import ConversationMessagePayload, EventType
+            import time
+            await self.store.append_event(
+                state.conversation_id,
+                EventType.CONVERSATION_MESSAGE,
+                ConversationMessagePayload(
+                    conversation_id=state.conversation_id,
+                    run_id=run_id,
+                    role="assistant",
+                    content=content,
+                ).model_dump(),
+            )
+            await self.store.increment_message_count(state.conversation_id)
+        except Exception as exc:
+            _log.exception(
+                "Failed to write assistant message for run=%s conversation=%s: %s",
+                run_id,
+                state.conversation_id if "state" in locals() else None,
+                exc,
+            )
 
     # ── WebSocket 广播 ───────────────────────────────────────
 

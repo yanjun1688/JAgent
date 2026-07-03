@@ -2,12 +2,17 @@
   "servers": [
     {
       "name": "memory",
-      "command": ["cmd", "/c", "npx", "-y", "@modelcontextprotocol/server-memory"],
+      "command": ["npx", "-y", "@modelcontextprotocol/server-memory"],
       "enabled": true
     },
     {
       "name": "fetch",
-      "command": ["cmd", "/c", "npx", "-y", "@modelcontextprotocol/server-fetch"],
+      "command": ["npx", "-y", "@modelcontextprotocol/server-fetch"],
+      "enabled": true
+    },
+    {
+      "name": "playwright",
+      "command": ["npx", "-y", "@playwright/mcp"],
       "enabled": true
     }
   ]

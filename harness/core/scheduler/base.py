@@ -23,6 +23,7 @@ from harness.models.events import (
     PlanCompletedPayload,
     PlanCreatedPayload,
     PlanRevisedPayload,
+    RunCommandPayload,
     RunCompletedPayload,
     RunFailedPayload,
     RunPausedPayload,
@@ -52,6 +53,7 @@ class ThinkResult:
     tool_input: dict[str, Any] | None = None
     token_count: int = 0
     direct_answer: str | None = None
+    tool_call_id: str | None = None
 
 
 class AgentKernel(ABC):
@@ -109,6 +111,10 @@ class BaseScheduler(ABC):
         self._cancel_flags: dict[str, asyncio.Event] = {}
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._resume_lock = asyncio.Lock()
+        # Trusted control-plane bookkeeping: RUN_COMMAND events are enforced by
+        # Scheduler infrastructure, never by Agent cooperation.  The value is
+        # the 1-based ordinal of the latest processed RUN_COMMAND within a run.
+        self._last_processed_command_seq: dict[str, int] = {}
 
     @abstractmethod
     async def _run_loop(self, run_id: str, intent: str) -> RunState: ...
@@ -128,10 +134,14 @@ class BaseScheduler(ABC):
             self._cancel_flags.pop(run_id, None)
             self._pause_events.pop(run_id, None)
             self._confirm_events.pop(run_id, None)
+            self._last_processed_command_seq.pop(run_id, None)
             if not task.done():
                 task.cancel()
             if self.monitor:
                 self.monitor.cleanup(run_id)
+            # Evict the run-level conversation_id cache so the in-memory
+            # mapping doesn't grow unbounded across runs (P0-04 follow-up).
+            self.store.evict_run_to_conv(run_id)
             self._run_end_cb(run_id)
 
     async def _handle_pause(self, run_id: str) -> None:
@@ -306,6 +316,93 @@ class BaseScheduler(ABC):
         if cevent:
             cevent.set()
 
+    async def _check_pending_commands(self, run_id: str) -> str | None:
+        """Return the latest unprocessed RUN_COMMAND command for a run.
+
+        RUN_COMMAND is a trusted control-plane channel.  Commands are ordered by
+        their 1-based ordinal within the run's RUN_COMMAND stream (independent
+        of unrelated event types sharing the same run_id).  Store failures are
+        contained and reported as "no command" so a transient read error cannot
+        crash the scheduler loop.
+        """
+        try:
+            events = await self.store.get_events(run_id)
+        except Exception as exc:
+            _sched_ctrl.warning("[ctrl] command check failed for run=%s: %s", run_id, exc)
+            return None
+
+        last_processed = self._last_processed_command_seq.get(run_id, 0)
+        latest: tuple[int, RunCommandPayload] | None = None
+        command_seq = 0
+        for event in events:
+            if event.event_type != EventType.RUN_COMMAND:
+                continue
+            command_seq += 1
+            if command_seq <= last_processed:
+                continue
+            latest = (command_seq, RunCommandPayload(**event.payload))
+        return latest[1].command if latest else None
+
+    async def _process_command(self, run_id: str, command: str) -> bool:
+        """Enforce a RUN_COMMAND against scheduler lifecycle state.
+
+        Returns True when the command was recognized and handling completed.
+        Unknown commands are ignored and leave the run untouched.
+        """
+        handled = False
+        match command:
+            case "hard_abort" | "soft_abort":
+                _sched_ctrl.warning("[ctrl] %s received for run=%s — failing run", command, run_id)
+                await self._fail(run_id, f"Run aborted by command: {command}")
+                handled = True
+            case "pause":
+                handled = await self.pause(run_id)
+            case "resume":
+                handled = await self.resume(run_id)
+            case "skip_tool":
+                # Reserved for tool-level skipping; acknowledged here so the
+                # command is consumed rather than repeatedly reprocessed.
+                _sched_ctrl.info("[ctrl] skip_tool command acknowledged for run=%s", run_id)
+                handled = True
+            case _:
+                _sched_ctrl.warning("[ctrl] unknown command ignored for run=%s: %s", run_id, command)
+                handled = True
+
+        if handled:
+            command_seq = await self._latest_command_seq(run_id, command)
+            if command_seq > self._last_processed_command_seq.get(run_id, 0):
+                self._last_processed_command_seq[run_id] = command_seq
+        return handled
+
+    async def _latest_command_seq(self, run_id: str, command: str) -> int:
+        """Return the ordinal of the latest RUN_COMMAND matching ``command``."""
+        try:
+            events = await self.store.get_events(run_id)
+        except Exception:
+            return self._last_processed_command_seq.get(run_id, 0)
+        command_seq = 0
+        latest = 0
+        for event in events:
+            if event.event_type != EventType.RUN_COMMAND:
+                continue
+            command_seq += 1
+            if RunCommandPayload(**event.payload).command == command:
+                latest = command_seq
+        return latest
+
+    async def _handle_pending_commands(self, run_id: str) -> RunState | None:
+        """Process at most one pending command and return refreshed state.
+
+        Returning None means no command was pending; callers should continue
+        their normal loop.  Returning a state means a command was enforced and
+        the caller must re-evaluate terminal/paused status before proceeding.
+        """
+        command = await self._check_pending_commands(run_id)
+        if command is None:
+            return None
+        await self._process_command(run_id, command)
+        return await self._refresh_state(run_id)
+
     async def resume(self, run_id: str) -> bool:
         async with self._resume_lock:
             events = await self.store.get_events(run_id)
@@ -383,6 +480,7 @@ class BaseScheduler(ABC):
                 think_result.tool_input or {},
                 tool_def,
                 tool_fn,
+                override_tool_call_id=think_result.tool_call_id,
             )
         except Exception as exc:
             _sched_act.error("[act] Unexpected exception: %s", exc)

@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from harness.core.dag_executor import DagExecutor
-from harness.core.dag_types import StepResult, StepStatus
+from harness.core.dag_types import ExecState, StepResult
 from harness.core.dag_vars import VariableResolutionError, resolve_variables_in_input, substitute_vars
 from harness.models.events import EventType
 from harness.models.plan import DagPlan, DagStep
@@ -95,7 +95,7 @@ class TestDagExecutorBasic:
         results = await dag.execute("run-1", plan)
         assert len(results) == 3
         for sid in ("s1", "s2", "s3"):
-            assert results[sid].is_completed
+            assert results[sid].is_done
 
     async def test_execute_layer_returns_bool(self, store, executor, registry):
         dag = DagExecutor(executor, store, registry)
@@ -145,8 +145,8 @@ class TestDagExecutorEdgeCases:
             ],
         )
         results = await dag.execute("run-edge-2", plan)
-        assert results["s1"].is_completed
-        assert results["s2"].is_completed
+        assert results["s1"].is_done
+        assert results["s2"].is_done
 
 
 class TestDagExecutorVarSubstitution:
@@ -554,7 +554,7 @@ class TestDagExecutorVariableIntegration:
         )
         results = await dag.execute("run-var-int", plan)
         assert results["s1"].is_completed
-        assert results["s2"].is_completed
+        assert results["s2"].is_done
         s2_output = results["s2"].output or {}
         assert s2_output.get("echo") == "hello", (
             f"Variable resolution failed: expected 'hello', got '{s2_output.get('echo')}'"
@@ -582,34 +582,6 @@ class TestDagExecutorVariableIntegration:
             f"Nested path $s1.body.uuid resolution failed: expected 'abc-123', "
             f"got '{s2_output.get('echo')}'"
         )
-
-
-class TestStepResultDictBackCompat:
-    """StepResult.get() provides dict-compatible access for backward compatibility."""
-
-    def test_get_output(self):
-        sr = StepResult(step_id="s1", status=StepStatus.COMPLETED, output={"k": "v"})
-        assert sr.get("output") == {"k": "v"}
-
-    def test_get_status(self):
-        sr = StepResult(step_id="s1", status=StepStatus.COMPLETED)
-        assert sr.get("status") == "completed"
-
-    def test_get_summary(self):
-        sr = StepResult(step_id="s1", status=StepStatus.COMPLETED, summary="done")
-        assert sr.get("summary") == "done"
-
-    def test_get_error(self):
-        sr = StepResult(step_id="s1", status=StepStatus.FAILED, error="boom")
-        assert sr.get("error") == "boom"
-
-    def test_get_error_none(self):
-        sr = StepResult(step_id="s1", status=StepStatus.COMPLETED)
-        assert sr.get("error") is None
-
-    def test_get_unknown_key_returns_default(self):
-        sr = StepResult(step_id="s1", status=StepStatus.COMPLETED)
-        assert sr.get("nonexistent", "fallback") == "fallback"
 
 
 class TestDagExecutorMergedStep:
@@ -642,7 +614,7 @@ class TestDagExecutorMergedStep:
         all_results["s1"] = r1
         # Execute s2 via retry path — should still resolve $s1_result.echo
         r2 = await dag._execute_step("run-legacy", plan, all_results, "s2", is_retry=True)
-        assert r2.is_completed
+        assert r2.is_done
         assert r2.output == {"echo": "hello", "status": "ok"}
 
     async def test_execute_step_retry_unknown_step(self, store, executor, registry):
@@ -698,8 +670,8 @@ class TestDagExecutorBuildStatus:
             ],
         )
         results: dict[str, StepResult] = {
-            "s1": StepResult(step_id="s1", status=StepStatus.COMPLETED, summary="echo ok"),
-            "s2": StepResult(step_id="s2", status=StepStatus.FAILED, error="timeout"),
+            "s1": StepResult(step_id="s1", exec_state=ExecState.COMPLETED, summary="echo ok"),
+            "s2": StepResult(step_id="s2", exec_state=ExecState.FAILED, error="timeout"),
         }
         text = DagExecutor.build_dag_status_text(plan, results, current_layer=0)
 

@@ -1,38 +1,57 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
+import { useRunStore } from '../stores/runStore'
+import type { WsEvent, RunStatus } from '../api/types'
 
-export interface WsEvent {
-  run_id: string
-  seq: number
-  event_type: string
-  payload: Record<string, unknown>
-  idempotency_key: string | null
-  created_at: number
-  tool_call_id: string | null
-  tool_name: string | null
-  input: Record<string, unknown> | null
-  error: string | null
-  duration_ms: number | null
-  confirmation_id: string | null
-}
+// Re-export shared types so existing imports keep working
+export type { WsEvent, RunStatus }
 
 const MAX_BACKOFF_MS = 30_000
 const BASE_BACKOFF_MS = 1_000
 const PING_INTERVAL_MS = 25_000
 
-export function useRunWebSocket(
-  runId: string | null,
-  onEvent?: (event: WsEvent) => void,
-) {
-  const [events, setEvents] = useState<WsEvent[]>([])
-  const [runStatus, setRunStatus] = useState<string>('')
-  const [isConnected, setIsConnected] = useState(false)
+function mapEventTypeToStatus(eventType: string): RunStatus | null {
+  switch (eventType) {
+    case 'RunCompleted':
+      return 'completed'
+    case 'RunFailed':
+      return 'failed'
+    case 'RunPaused':
+      return 'paused'
+    case 'RunResumed':
+      return 'running'
+    case 'RunStarted':
+      return 'running'
+    default:
+      return null
+  }
+}
 
-  const onEventRef = useRef(onEvent)
-  onEventRef.current = onEvent
+export interface UseRunWebSocketResult {
+  events: WsEvent[]
+  runStatus: RunStatus | null
+  isConnected: boolean
+}
+
+/**
+ * 订阅指定 Run 的实时事件流。
+ *
+ * 该 Hook 是受信边界的"事件入口"：所有 WebSocket 消息在此被解析后
+ * 通过 runStore.addEvent 写入客户端事件流，组件只读 store 即可。
+ * 自动按 seq 排序、断线指数退避重连、最终态停止重连。
+ */
+export function useRunWebSocket(runId: string | null): UseRunWebSocketResult {
+  const addEvent = useRunStore((s) => s.addEvent)
+  const setRunStatus = useRunStore((s) => s.setRunStatus)
+  const setWebSocketConnected = useRunStore((s) => s.setWebSocketConnected)
+  const setActiveRun = useRunStore((s) => s.setActiveRun)
+
+  const storeEvents = useRunStore((s) => s.events)
+  const storeRunStatus = useRunStore((s) => s.runStatus)
+  const storeConnected = useRunStore((s) => s.isWebSocketConnected)
 
   const wsRef = useRef<WebSocket | null>(null)
   const lastSeqRef = useRef(0)
-  const runStatusRef = useRef('')
+  const runStatusRef = useRef<RunStatus | null>(null)
   const reconnectAttemptsRef = useRef(0)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -40,8 +59,7 @@ export function useRunWebSocket(
 
   useEffect(() => {
     if (!runId) {
-      setEvents([])
-      setRunStatus('')
+      setActiveRun(null)
       prevRunIdRef.current = null
       return
     }
@@ -49,22 +67,23 @@ export function useRunWebSocket(
     const runIdChanged = prevRunIdRef.current !== runId
     prevRunIdRef.current = runId
 
-    let disposed = false
     if (runIdChanged) {
+      setActiveRun(runId)
       lastSeqRef.current = 0
-      runStatusRef.current = ''
+      runStatusRef.current = null
       reconnectAttemptsRef.current = 0
-      setEvents([])
     }
 
-    function stopPing() {
+    let disposed = false
+
+    function stopPing(): void {
       if (pingTimerRef.current) {
         clearInterval(pingTimerRef.current)
         pingTimerRef.current = null
       }
     }
 
-    function startPing() {
+    function startPing(): void {
       stopPing()
       pingTimerRef.current = setInterval(() => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -74,13 +93,22 @@ export function useRunWebSocket(
     }
 
     function computeBackoff(): number {
-      const base = Math.min(BASE_BACKOFF_MS * Math.pow(2, reconnectAttemptsRef.current), MAX_BACKOFF_MS)
+      const base = Math.min(
+        BASE_BACKOFF_MS * Math.pow(2, reconnectAttemptsRef.current),
+        MAX_BACKOFF_MS,
+      )
       const jitter = Math.random() * 1_000
       return base + jitter
     }
 
-    function scheduleReconnect(id: string) {
-      if (disposed || runStatusRef.current === 'completed' || runStatusRef.current === 'failed') return
+    function scheduleReconnect(id: string): void {
+      if (
+        disposed ||
+        runStatusRef.current === 'completed' ||
+        runStatusRef.current === 'failed'
+      ) {
+        return
+      }
       const delay = computeBackoff()
       reconnectTimerRef.current = setTimeout(() => {
         if (!disposed) {
@@ -90,33 +118,35 @@ export function useRunWebSocket(
       }, delay)
     }
 
-    function teardownSocket() {
+    function teardownSocket(): void {
       stopPing()
       const ws = wsRef.current
-      if (ws) {
+        if (ws) {
         ws.onopen = null
         ws.onmessage = null
         ws.onerror = null
         ws.onclose = null
-        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        if (
+          ws.readyState === WebSocket.OPEN ||
+          ws.readyState === WebSocket.CONNECTING
+        ) {
           ws.close(1000, 'teardown')
         }
         wsRef.current = null
       }
     }
 
-    function connect(id: string) {
+    function connect(id: string): void {
       if (disposed) return
       teardownSocket()
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const ws = new WebSocket(`${protocol}//${window.location.host}/api/v1/runs/${id}/events`)
       wsRef.current = ws
-      setIsConnected(true)
 
       ws.onopen = () => {
         if (disposed) return
-        setIsConnected(true)
+        setWebSocketConnected(true)
         reconnectAttemptsRef.current = 0
         startPing()
       }
@@ -128,8 +158,6 @@ export function useRunWebSocket(
           if (!raw.event_type) return
           if (raw.seq <= lastSeqRef.current) return
           lastSeqRef.current = raw.seq
-
-          console.log('[WS]', `#${raw.seq}`, raw.event_type, raw.payload)
 
           const event: WsEvent = {
             run_id: raw.run_id || id,
@@ -146,33 +174,30 @@ export function useRunWebSocket(
             confirmation_id: raw.payload?.confirmation_id || null,
           }
 
-          setEvents((prev) => [...prev, event])
-          onEventRef.current?.(event)
+          addEvent(event)
 
-          if (raw.event_type === 'RunCompleted') {
-            runStatusRef.current = 'completed'
-            setRunStatus('completed')
-          } else if (raw.event_type === 'RunFailed') {
-            runStatusRef.current = 'failed'
-            setRunStatus('failed')
-          } else if (raw.event_type === 'RunPaused') {
-            runStatusRef.current = 'paused'
-            setRunStatus('paused')
-          } else if (raw.event_type === 'RunResumed') {
-            runStatusRef.current = 'running'
-            setRunStatus('running')
+          const nextStatus = mapEventTypeToStatus(raw.event_type)
+          if (nextStatus) {
+            runStatusRef.current = nextStatus
+            setRunStatus(nextStatus)
           }
-        } catch { /* ignore non-json / malformed */ }
+        } catch {
+          /* ignore non-json / malformed */
+        }
       }
 
       ws.onclose = (event) => {
         stopPing()
         wsRef.current = null
-        setIsConnected(false)
-
+        setWebSocketConnected(false)
         if (disposed) return
         if (event.code === 1000) return
-        if (runStatusRef.current === 'completed' || runStatusRef.current === 'failed') return
+        if (
+          runStatusRef.current === 'completed' ||
+          runStatusRef.current === 'failed'
+        ) {
+          return
+        }
         scheduleReconnect(id)
       }
 
@@ -190,9 +215,14 @@ export function useRunWebSocket(
         reconnectTimerRef.current = null
       }
       teardownSocket()
-      setIsConnected(false)
+      setWebSocketConnected(false)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId])
 
-  return { events, runStatus, isConnected }
+  return {
+    events: storeEvents,
+    runStatus: storeRunStatus,
+    isConnected: storeConnected,
+  }
 }

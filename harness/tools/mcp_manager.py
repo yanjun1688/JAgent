@@ -27,6 +27,7 @@ class _MCPSession:
 
     name: str
     session: ClientSession
+    tool_names: list[str] = field(default_factory=list)
     _transport_cm: Any = field(default=None, repr=False)
     _session_cm: Any = field(default=None, repr=False)
 
@@ -104,6 +105,8 @@ class MCPServerManager:
                 "inputSchema": getattr(t, "inputSchema", None),
             } for t in tools_result.tools]
 
+            mcp_sess.tool_names = [t.name for t in tools_result.tools]
+
             _logger.info(
                 "Connected MCP server '%s': %d tools",
                 cfg.name, len(tools_info),
@@ -137,6 +140,14 @@ class MCPServerManager:
             return entry.session
         return entry  # backward compat for tests
 
+    def get_tool_names(self, name: str) -> list[str]:
+        entry = self._sessions.get(name)
+        if entry is None:
+            return []
+        if isinstance(entry, _MCPSession):
+            return entry.tool_names
+        return []
+
     @property
     def server_names(self) -> list[str]:
         return list(self._sessions.keys())
@@ -144,9 +155,14 @@ class MCPServerManager:
     # ── Private helpers ──────────────────────────────────────────
 
     async def _connect_stdio(self, cfg: MCPConnectionConfig) -> _MCPSession:
+        command = list(cfg.command)
+        if sys.platform == "win32" and command:
+            exe = command[0].removesuffix(".cmd").removesuffix(".exe").lower()
+            if exe in ("npx", "npm", "node"):
+                command = ["cmd", "/c"] + command
         server_params = StdioServerParameters(
-            command=cfg.command[0],
-            args=cfg.command[1:],
+            command=command[0],
+            args=command[1:],
             env=cfg.environment or None,
         )
         transport_cm = stdio_client(server_params)

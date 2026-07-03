@@ -39,11 +39,6 @@
 │     RunMonitor: on_append 实时监听               │
 │     异常检测 · 循环检测 · Token 预警 · 反馈注入   │
 ├─────────────────────────────────────────────────┤
-│  Quality Evaluator (V0.8)    ← 受信              │
-│     EvaluatorRunner: on_append 异步触发          │
-│     StepCompletenessCheck · AnswerAccuracyCheck  │
-│     语义质量评估 · fire-and-forget · 非阻塞       │
-├─────────────────────────────────────────────────┤
 │  Agent Kernel (LLM)          ← 非受信            │
 │     think → 选择工具 → 推理决策 (串行回退路径)     │
 │     被动接收反馈（不感知监控机制）                │
@@ -100,11 +95,6 @@ ContextCompressed (结构化 EpisodeSummary) · ContextCheckpointed (快照)
 FeedbackInjected (由 RunMonitor 自动写入)
 ```
 
-**质量评估 (V0.8)**:
-```
-QualityCheckCompleted (由 EvaluatorRunner 自动写入)
-```
-
 所有事件 Append-Only 存储在 SQLite，`PRIMARY KEY (run_id, seq)` 保证全局有序，`fold_events()` 纯函数可重建任意时刻状态快照。写入后自动通过 WebSocket 广播给前端。
 
 ## 项目结构
@@ -141,10 +131,6 @@ harness/
 │   └── context_manager.py      # Context Manager — 自动压缩 + EpisodeSummary + Checkpoint (V0.5+)
 ├── monitoring/
 │   └── run_monitor.py          # RunMonitor — on_append 实时监控 + 循环/失败检测 + 反馈注入
-├── evaluator/                     # V0.8 Quality Evaluator — 独立语义质量评估
-│   ├── base.py                    #   QualityCheck(ABC) + RuleQualityCheck + LLMQualityCheck
-│   ├── checks.py                  #   StepCompletenessCheck + AnswerAccuracyCheck
-│   └── runner.py                  #   EvaluatorRunner — on_append 异步触发 + create_task
 ├── analysis/
 │   ├── schemas.py              # 9 个 Pydantic 响应模型 (Dashboard/ToolTrace/RetryableInfo)
 │   └── service.py              # AnalysisService — 6 个聚合查询引擎 (V1.0)
@@ -189,7 +175,6 @@ tests/                          # 341 项测试全部通过
 ├── test_monitoring.py          # V0.6 监控: 22
 ├── test_dag_executor.py        # V0.7 DAG 执行: 26
 ├── test_planner.py             # V0.7 Planner: 26
-├── test_evaluator.py           # V0.8 Evaluator: 26
 └── test_analysis.py            # V1.0 分析: 15
 
 ## 开发进度
@@ -208,7 +193,6 @@ tests/                          # 341 项测试全部通过
 | V0.6 | RunMonitor + FeedbackInjected + Scheduler 反馈注入 | ✓ 完成 | 22 |
 | V0.6+ | 架构加固: Skill 路由/输出校验/循环检测/side_effects/幂等验证 | ✓ 完成 | 10 |
 | V0.7 | Planner-Executor + DAG: Planner/DagExecutor/PlanGuardrail/7 新事件/降级 | ✓ 完成 | 52 |
-| V0.8 | Quality Evaluator: StepCompletenessCheck / AnswerAccuracyCheck / EvaluatorRunner | ✓ 完成 | 26 |
 | V1.0 | 分析平台: AnalysisService + 6 API 端点 + 操作锚点 | ✓ 完成 | 15 |
 
 **总计: 341 项测试，全部通过。**
@@ -339,7 +323,6 @@ curl -X POST http://localhost:8000/api/v1/runs \
 | **V0.6** | RunMonitor + FeedbackInjected + Scheduler 反馈注入 + 循环检测 | ✓ 完成 |
 | **V0.6+** | 架构加固：Skill 路由 / 输出校验 / side_effects 消费 / 幂等键验证 | ✓ 完成 |
 | **V0.7** | **Planner-Executor + DAG**: 规划执行分离 / 拓扑并行 / 系统状态注入 | ✓ 完成 |
-| **V0.8** | **Quality Evaluator**: independent semantic evaluation (StepCompleteness + AnswerAccuracy) | ✓ 完成 |
 | **V1.0** | 分析平台: AnalysisService + 6 API + 操作锚点 + 时间窗口 + 分页 | ✓ 完成 |
 | **V1.0+** | 生产就绪：分层记忆 + 权限 + 分布式 Worker + 业务适配 | 🔜 待开始 |
 
@@ -354,6 +337,10 @@ curl -X POST http://localhost:8000/api/v1/runs \
 | 沙盒执行 | subprocess / asyncio coroutine |
 | 浏览器工具 | Playwright (async) |
 | 前端 | React 18 + Vite + TypeScript |
+
+## 联系方式
+
+hyanjun546@gmail.com
 
 ## License
 

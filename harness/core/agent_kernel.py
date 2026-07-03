@@ -1,13 +1,17 @@
-"""Agent kernel implementations (L4) — mock + LLM-backed kernels."""
+"""Agent kernel implementations (L4) — LLM-backed kernel.
+
+Consumes ChatResponse (structured tool_calls) directly from LLMClient — no
+regex round-trip, tool_call_id preserved end-to-end.  Multi-turn history is
+rebuilt per OpenAI convention (assistant.tool_calls + role=tool pairs).
+"""
 
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
-from harness.core.fold import RunState
-from harness.core.llm_client import LLMClient
+from harness.core.fold import RunState, ToolResult
+from harness.core.llm_client import ChatResponse, LLMClient
 from harness.core.logger import agent_logger
 from harness.core.scheduler import AgentKernel, ThinkResult
 from harness.core.system_prompt import AgentPhase, build_tool_schemas, get_prompt
@@ -17,64 +21,21 @@ from harness.models.tools import ToolDefinition
 _logger = agent_logger("kernel")
 
 _STOP_MARKER = "<STOP>"
-_ANSWER_RE = re.compile(r"ANSWER:\s*(.+?)(?:\n|$)")
-_THOUGHT_RE = re.compile(r"THOUGHT:\s*(.+?)(?:\nTOOL:|\nANSWER:|\n<STOP>|$)", re.DOTALL)
-_TOOL_SPLIT_RE = re.compile(r"(?:^|\n)TOOL:\s*")
-_ARGS_GREEDY_RE = re.compile(r"ARGS:\s*(\{.*\})", re.DOTALL)
-
-_EXECUTION_MODE_DEFAULT = "serial"
 
 
-def _parse_segment(segment: str) -> tuple[str | None, dict[str, Any]]:
-    """Parse a single tool segment into (tool_name, tool_input).
-
-    segment looks like: 'tool_name\nARGS: {"key": "val"}\n...'
-    Uses greedy {.*} ARGS extraction since each segment is guaranteed
-    to contain at most one tool definition.
-    """
-    seg = segment.strip()
-    if not seg:
-        return None, {}
-
-    name_end = seg.find("\n")
-    tool_name = seg[:name_end].strip() if name_end >= 0 else seg.strip()
-
-    args_match = _ARGS_GREEDY_RE.search(seg)
-    if args_match:
-        try:
-            return tool_name, json.loads(args_match.group(1))
-        except json.JSONDecodeError:
-            pass
-    return tool_name, {}
+def _is_stop_signal(text: str) -> bool:
+    return _STOP_MARKER in text or "ANSWER:" in text
 
 
-def _parse_results(response: str) -> list[ThinkResult]:
-    answer_match = _ANSWER_RE.search(response)
-    if answer_match:
-        answer = answer_match.group(1).strip()
-        thought = f"Answered directly: {answer[:80]}"
-        return [ThinkResult(thought=thought, tool_name=None, direct_answer=answer)]
-
-    thought_match = _THOUGHT_RE.search(response)
-    thought = thought_match.group(1).strip() if thought_match else response.strip()
-
-    # Split by TOOL: — unified path handles both single and multi-tool.
-    # Each segment after the first is one tool definition.
-    # This avoids greedy-matching of ARGS across tool boundaries.
-    segments = _TOOL_SPLIT_RE.split(response)
-    if len(segments) > 1:
-        results = []
-        for seg in segments[1:]:
-            tool_name, tool_input = _parse_segment(seg)
-            if tool_name:
-                results.append(ThinkResult(thought=thought, tool_name=tool_name, tool_input=tool_input))
-        if results:
-            return results
-
-    if _STOP_MARKER in response:
-        return [ThinkResult(thought=thought, tool_name=None)]
-
-    return [ThinkResult(thought=thought, tool_name=None)]
+def _extract_answer(text: str) -> str | None:
+    idx = text.find("ANSWER:")
+    if idx < 0:
+        return None
+    after = text[idx + len("ANSWER:"):].strip()
+    if not after:
+        return None
+    end = after.find("\n")
+    return after.split("\n", 1)[0].strip() if end < 0 else after[:end].strip()
 
 
 class MockAgentKernel(AgentKernel):
@@ -115,28 +76,97 @@ class MockAgentKernel(AgentKernel):
 
 
 class LLMAgentKernel(AgentKernel):
-    """Real LLM-backed kernel using OpenAI/DeepSeek API."""
+    """Real LLM-backed kernel using OpenAI-compatible APIs.
+
+    Uses function-calling tools API. Returns structured ChatResponse.tool_calls
+    preserved with id → ThinkResult.tool_call_id. Falls back to text ANSWER/
+    <STOP> parsing only when the model emits plain content (no tool_calls).
+    """
 
     def __init__(self, client: LLMClient) -> None:
         self.client = client
 
     async def _generate_stop_summary(
-        self, messages: list[dict[str, Any]], response: str
+        self, messages: list[dict[str, Any]], response_text: str
     ) -> str | None:
         summary_messages = [
             {"role": "system", "content": "You are a helpful assistant. Summarize the completed task for the user in plain text. Do not use any special format prefixes like ANSWER: or THOUGHT:. Just write naturally."},
             *messages[1:],
-            {"role": "assistant", "content": response},
+            {"role": "assistant", "content": response_text},
             {"role": "user", "content": "The task is now complete. Based on everything done above, provide a brief final response to the user summarizing what was accomplished. Be concise and helpful. Do not use any tools."},
         ]
         try:
-            summary = await self.client.chat(summary_messages, max_tokens=512)
-            summary = summary.removeprefix("ANSWER:").removeprefix("THOUGHT:").strip()
+            resp = await self.client.chat(summary_messages, max_tokens=512)
+            summary = resp.content.removeprefix("ANSWER:").removeprefix("THOUGHT:").strip()
             _logger.info("[summary] Generated user-facing answer: %s", summary)
             return summary
         except Exception as exc:
             _logger.warning("[summary] Failed to generate: %s", exc)
             return None
+
+    def _build_history_messages(self, state: RunState) -> list[dict[str, Any]]:
+        """Rebuild multi-turn history per OpenAI tool_calls protocol.
+
+        Walking a seq-ordered timeline of (thought | result) entries:
+          - a `thought` opens a new assistant message and flushes the previous
+            assistant plus its 1:1 paired `role=tool` result messages
+          - a `result` attaches a tool_call to the current assistant message
+            (creating an empty-content assistant if none is open — happens
+            when the preceding thought was outside the window)
+        On flush, each assistant.tool_calls id must have a matching role=tool
+        message appended immediately after, per OpenAI strict pairing rules.
+        """
+        window = max(state.keep_recent_count, 2) if state.summary else 5
+        window = max(window, 2)
+        thoughts = state.thought_history[-window:]
+        results = state.tool_results[-window:]
+        timeline: list[tuple[int, str, Any]] = []
+        for t in thoughts:
+            timeline.append((t.seq, "thought", t))
+        for tr in results:
+            timeline.append((tr.event_seq, "result", tr))
+        timeline.sort(key=lambda x: x[0])
+
+        messages: list[dict[str, Any]] = []
+        current_assistant: dict[str, Any] | None = None
+        pending_tool_call_ids: list[str] = []
+
+        def _flush() -> None:
+            nonlocal current_assistant, pending_tool_call_ids
+            if current_assistant is None:
+                return
+            messages.append(current_assistant)
+            for tcid in pending_tool_call_ids:
+                tr_by_id = next((r for r in results if r.tool_call_id == tcid), None)
+                if tr_by_id is not None:
+                    messages.append(self._tool_result_message(tr_by_id))
+            current_assistant = None
+            pending_tool_call_ids = []
+
+        for _, kind, item in timeline:
+            if kind == "thought":
+                _flush()
+                current_assistant = {"role": "assistant", "content": item.thought}
+            else:
+                tr: ToolResult = item
+                if current_assistant is None:
+                    current_assistant = {"role": "assistant", "content": ""}
+                tool_calls_list = current_assistant.setdefault("tool_calls", [])
+                tool_calls_list.append({
+                    "id": tr.tool_call_id,
+                    "type": "function",
+                    "function": {"name": tr.tool_name, "arguments": "{}"},
+                })
+                pending_tool_call_ids.append(tr.tool_call_id)
+        _flush()
+        return messages
+
+    @staticmethod
+    def _tool_result_message(tr: ToolResult) -> dict[str, Any]:
+        status_str = tr.status.value if hasattr(tr.status, "value") else str(tr.status)
+        body = tr.output if tr.output is not None else (tr.error or "")
+        content = f"{status_str}: {body}"
+        return {"role": "tool", "tool_call_id": tr.tool_call_id, "content": content}
 
     async def think(
         self,
@@ -145,26 +175,23 @@ class LLMAgentKernel(AgentKernel):
         state: RunState,
         feedback: str | None = None,
     ) -> list[ThinkResult]:
+        schemas = build_tool_schemas(tool_defs) if tool_defs else None
+        use_fn = schemas is not None
+        phase = AgentPhase.SERIAL_THINK_FN if use_fn else AgentPhase.SERIAL_THINK_TEXT
         tool_list = "\n".join(
             f"- **{td.name}**: {td.description}"
             + (" (dangerous — requires confirmation)" if td.requires_confirmation else "")
             for td in tool_defs
         ) or "(no tools available)"
-        system_prompt = get_prompt(AgentPhase.SERIAL_THINK, intent=intent, tool_list=tool_list)
+        system_prompt = get_prompt(phase, intent=intent, tool_list=tool_list)
         _logger.info("[think] phase=%s len=%d chars intent=%s tools=%d",
-                      AgentPhase.SERIAL_THINK.value, len(system_prompt),
-                      intent[:80], len(tool_defs))
-        schemas = build_tool_schemas(tool_defs)
+                     phase.value, len(system_prompt), intent[:80], len(tool_defs))
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
         if feedback:
             messages.append({"role": "system", "content": f"## Monitoring Feedback\n{feedback}"})
 
-        # When a context summary is available (from ContextManager compression),
-        # use it plus recent items instead of the full 5-item window.
-        # The keep_recent_count comes from the compression mode:
-        #   normal → 2, emergency → 3 (keep 3 recent rounds untouched)
         if state.summary:
             if isinstance(state.summary, EpisodeSummary):
                 parts = []
@@ -182,47 +209,60 @@ class LLMAgentKernel(AgentKernel):
             else:
                 summary_text = state.summary
             messages.append({"role": "system", "content": f"Previous context summary:\n{summary_text}"})
-            window = max(state.keep_recent_count, 2)
-        else:
-            window = 5
 
-        timeline: list[tuple[str, Any]] = []
-        for t in state.thought_history[-window:]:
-            if hasattr(t, "seq"):
-                timeline.append(("thought", t))
-        for tr in state.tool_results[-window:]:
-            if hasattr(tr, "event_seq"):
-                timeline.append(("result", tr))
-        timeline.sort(key=lambda x: x[1].seq if x[0] == "thought" else x[1].event_seq)
+        messages.extend(self._build_history_messages(state))
 
-        for kind, item in timeline:
-            if kind == "thought":
-                choice = f" ({item.tool_choice})" if item.tool_choice else ""
-                messages.append({"role": "assistant", "content": f"THOUGHT{choice}: {item.thought}"})
-            else:
-                content = f"Tool '{item.tool_name}' result ({item.status}): {item.output or item.error}"
-                messages.append({"role": "user", "content": content})
-
-        import json as _json
-        _logger.info("[think] === SERIAL_THINK MESSAGES (%d msgs) ===", len(messages))
+        _logger.info("[think] === %s MESSAGES (%d msgs) ===", phase.value, len(messages))
         for _i, _m in enumerate(messages):
-            _logger.info("[think]   msg[%d] role=%s\n%s", _i, _m["role"], _m["content"])
-        _logger.info("[think] === END SERIAL_THINK MESSAGES ===")
+            _logger.info("[think]   msg[%d] role=%s\n%s", _i, _m["role"], _m.get("content", ""))
+        _logger.info("[think] === END MESSAGES ===")
 
-        response = await self.client.chat(messages, tools=schemas)
-        results = _parse_results(response)
+        resp = await self.client.chat(messages, tools=schemas) if schemas else await self.client.chat(messages)
+        return await self._consume_response(resp, messages)
 
-        tool_names = [r.tool_name for r in results if r.tool_name]
-        if tool_names:
-            _logger.info("[PARSE] → %d tool(s): %s", len(tool_names), ", ".join(tool_names))
+    async def _consume_response(self, resp: ChatResponse, messages: list[dict[str, Any]]) -> list[ThinkResult]:
+        results: list[ThinkResult] = []
+        if resp.tool_calls:
+            thought = resp.content or ""
+            for tc in resp.tool_calls:
+                results.append(ThinkResult(
+                    thought=thought,
+                    tool_name=tc.name,
+                    tool_input=tc.arguments,
+                    tool_call_id=tc.id,
+                ))
+            tc_names = [r.tool_name for r in results if r.tool_name]
+            if tc_names:
+                _logger.info("[PARSE] → %d tool(s): %s", len(tc_names), ", ".join(tc_names))
+            return results
 
-        # Stop detected with single result and no direct answer — generate summary
-        # Only when explicit stop/answer markers exist (not on format anomalies)
-        if len(results) == 1 and results[0].tool_name is None and not results[0].direct_answer and ("<STOP>" in response or "ANSWER:" in response):
-            result = results[0]
-            summary = await self._generate_stop_summary(messages, response)
+        content = resp.content or ""
+        if not content.strip():
+            _logger.warning("[PARSE] Empty response (no content and no tool_calls) finish=%s", resp.finish_reason)
+
+        answer = _extract_answer(content)
+        if answer is not None:
+            thought = f"Answered directly: {answer[:80]}"
+            return [ThinkResult(thought=thought, tool_name=None, direct_answer=answer)]
+
+        if _STOP_MARKER in content or "ANSWER:" in content:
+            summary = await self._generate_stop_summary(messages, content)
             if summary:
-                results[0] = ThinkResult(thought=result.thought, direct_answer=summary)
+                thought = content
+                if "\n<STOP>" in thought:
+                    thought = thought.split("\n<STOP>")[0]
+                if _STOP_MARKER in thought:
+                    thought = thought.split(_STOP_MARKER)[0]
+                if thought.startswith("THOUGHT:"):
+                    thought = thought[len("THOUGHT:"):].strip()
+                return [ThinkResult(thought=thought[:200], tool_name=None, direct_answer=summary)]
+            if _STOP_MARKER in content:
+                stop_idx = content.find(_STOP_MARKER)
+                thought = content[:stop_idx].strip()
+                if thought.startswith("THOUGHT:"):
+                    thought = thought[len("THOUGHT:"):].strip()
+                return [ThinkResult(thought=thought, tool_name=None)]
+            return [ThinkResult(thought=content.strip(), tool_name=None)]
 
-        _logger.info("[PARSE] → %d result(s)", len(results))
-        return results
+        _logger.info("[PARSE] → plain thought (no tool, no stop, no answer)")
+        return [ThinkResult(thought=content.strip(), tool_name=None)]

@@ -559,3 +559,43 @@ class TestManagerWithCallFn:
         mgr._sessions["srv1"] = mock_stdio_patch
         result = await mcp_call_fn({"tool_name": "browser_navigate", "arguments": {"url": "http://test"}})
         assert result["success"] is True
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  Platform command normalization
+# ═════════════════════════════════════════════════════════════════════
+
+
+def _normalize_command(command: list[str], platform: str) -> list[str]:
+    cmd = list(command)
+    if platform == "win32" and cmd:
+        exe = cmd[0].removesuffix(".cmd").removesuffix(".exe").lower()
+        if exe in ("npx", "npm", "node"):
+            cmd = ["cmd", "/c"] + cmd
+    return cmd
+
+
+class TestPlatformNormalization:
+    def test_npx_wrapped_on_windows(self):
+        result = _normalize_command(["npx", "-y", "@playwright/mcp"], "win32")
+        assert result == ["cmd", "/c", "npx", "-y", "@playwright/mcp"]
+
+    def test_npx_not_wrapped_on_linux(self):
+        result = _normalize_command(["npx", "-y", "@playwright/mcp"], "linux")
+        assert result == ["npx", "-y", "@playwright/mcp"]
+
+    def test_npm_wrapped_on_windows(self):
+        result = _normalize_command(["npm", "run", "start"], "win32")
+        assert result == ["cmd", "/c", "npm", "run", "start"]
+
+    def test_non_wrappable_command_unchanged_on_windows(self):
+        result = _normalize_command(["python", "script.py"], "win32")
+        assert result == ["python", "script.py"]
+
+    def test_empty_command_unchanged(self):
+        result = _normalize_command([], "win32")
+        assert result == []
+
+    def test_node_wrapped_on_windows(self):
+        result = _normalize_command(["node", "server.js"], "win32")
+        assert result == ["cmd", "/c", "node", "server.js"]

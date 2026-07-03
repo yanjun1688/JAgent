@@ -121,7 +121,7 @@ class AnalysisService:
         since = since or 0
 
         rows = await self._fetch_events_by_types(_TYPE_TOOL_LIFECYCLE, since, until)
-        events = [self._row_to_event(r) for r in rows]
+        events = [e for e in (self._row_to_event(r) for r in rows) if e is not None]
 
         stats: dict[str, dict] = {}
         for e in events:
@@ -170,7 +170,7 @@ class AnalysisService:
         since = since or 0
 
         rows = await self._fetch_events_by_types({EventType.GUARDRAIL_TRIGGERED}, since, until)
-        events = [self._row_to_event(r) for r in rows]
+        events = [e for e in (self._row_to_event(r) for r in rows) if e is not None]
 
         stats: dict[str, dict] = {}
         for e in events:
@@ -442,11 +442,27 @@ class AnalysisService:
         return detail
 
     @staticmethod
-    def _row_to_event(row: dict) -> Event:
+    def _row_to_event(row: dict) -> Event | None:
+        """Returns None for rows with a legacy/unknown event_type.
+
+        Tolerates event_type values removed from the enum in refactors
+        (e.g. QualityCheckCompleted from V0.8). Append-Only invariant
+        forbids DELETE, so historical rows persist and would otherwise
+        crash the analysis read path.
+        """
+        try:
+            et = EventType(row["event_type"])
+        except ValueError:
+            _log.warning(
+                "Skipping analysis row with unknown event_type=%r "
+                "(run=%s seq=%s) — likely legacy event",
+                row["event_type"], row.get("run_id"), row.get("seq"),
+            )
+            return None
         return Event(
             run_id=row["run_id"],
             seq=row["seq"],
-            event_type=EventType(row["event_type"]),
+            event_type=et,
             payload=json.loads(row["payload"]),
             idempotency_key=row["idempotency_key"],
             created_at=row["created_at"],

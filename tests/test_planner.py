@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from harness.core.llm_client import ChatResponse
 from harness.core.planner import Planner, PlanGuardrail
 from harness.core.fold import RunState
 from harness.models.plan import DagPlan, DagStep
@@ -19,7 +20,7 @@ class _MockLLM:
 
     async def chat(self, messages, **kwargs):
         self.last_messages = messages
-        return "Mock answer"
+        return ChatResponse(content="Mock answer")
 
 
 @pytest.fixture
@@ -438,65 +439,11 @@ class TestAnswerContextBug5:
 
 
 class TestToolFilteringBug8:
-    """Bug 8: Filter tool descriptions by intent relevance to reduce prompt size."""
+    """Bug 8: Always feed all tools — no filtering by intent."""
 
-    def test_keywords_extracted_from_tool_def(self):
-        """_extract_tool_keywords should produce words from name, description, params."""
-        from harness.models.tools import SideEffect, SuccessIndicator, ToolDefinition
-
-        td = ToolDefinition(
-            name="http_request",
-            description="Send HTTP requests to remote servers",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "Target URL to fetch"},
-                    "method": {"type": "string"},
-                },
-                "required": ["url"],
-            },
-            output_schema={},
-            idempotency_key_fields=[], side_effects=[], timeout_ms=5000,
-        )
-        kw = Planner._extract_tool_keywords(td)
-        assert "http_request" in kw, "Should include tool name"
-        assert "http" in kw, "Should include description words"
-        assert "requests" in kw, "Should include description words"
-        assert "url" in kw, "Should include parameter names"
-        assert "target" in kw, "Should include parameter description words"
-
-    def test_tools_filtered_by_intent_relevance(self):
-        """_filter_tools_by_intent should keep matching tools and file_op."""
-        from harness.models.tools import SideEffect, SuccessIndicator, ToolDefinition
-
-        tools = [
-            ToolDefinition(name="file_op", description="Read/write files", input_schema={}, output_schema={},
-                           idempotency_key_fields=[], side_effects=[], timeout_ms=5000),
-            ToolDefinition(name="browser", description="Browse web pages", input_schema={}, output_schema={},
-                           idempotency_key_fields=[], side_effects=[], timeout_ms=5000),
-            ToolDefinition(name="http_request", description="Send HTTP requests", input_schema={}, output_schema={},
-                           idempotency_key_fields=[], side_effects=[], timeout_ms=5000),
-        ]
-        filtered = Planner._filter_tools_by_intent("navigate to a web page and capture screenshot", tools)
-        filtered_names = {td.name for td in filtered}
-        assert "browser" in filtered_names, "browser should match 'web page' intent"
-        assert "file_op" in filtered_names, "file_op should always be included"
-        assert "http_request" not in filtered_names, "http_request should not match browser intent"
-
-    def test_filtered_empty_returns_all(self):
-        """When no tools match, all tools should be returned (safety fallback)."""
-        from harness.models.tools import SideEffect, SuccessIndicator, ToolDefinition
-
-        tools = [
-            ToolDefinition(name="browser", description="Browse web pages", input_schema={}, output_schema={},
-                           idempotency_key_fields=[], side_effects=[], timeout_ms=5000),
-        ]
-        filtered = Planner._filter_tools_by_intent("calculate 2+2", tools)
-        assert len(filtered) == 1, "Unmatched intent should return all tools as fallback"
-
-    def test_build_tool_descriptions_filters_with_intent(self):
-        """_build_tool_descriptions(intent=...) should filter, _build_tool_descriptions() shows all."""
-        from harness.models.tools import SideEffect, SuccessIndicator, ToolDefinition
+    def test_build_tool_descriptions_always_includes_all(self):
+        """_build_tool_descriptions() always returns all tools."""
+        from harness.models.tools import SideEffect, ToolDefinition
 
         registry = ToolRegistry()
         registry.register(
@@ -528,11 +475,7 @@ class TestToolFilteringBug8:
         )
         planner = Planner(llm_client=_MockLLM(), registry=registry, store=None)
 
-        all_desc = planner._build_tool_descriptions()
-        assert "browser" in all_desc, "Without intent, all tools should be included"
-        assert "echo" in all_desc, "Without intent, all tools should be included"
-
-        filtered = planner._build_tool_descriptions(intent="search the web and take screenshots")
-        assert "browser" in filtered, "Browser should match web/screenshot intent"
-        assert "echo" not in filtered, "echo should be filtered out for non-echo intent"
-        assert "mcp_call" not in filtered, "mcp_call should be filtered out for browser intent"
+        desc = planner._build_tool_descriptions()
+        assert "browser" in desc, "browser should always be included"
+        assert "echo" in desc, "echo should always be included"
+        assert "mcp_call" in desc, "mcp_call should always be included"

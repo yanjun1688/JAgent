@@ -6,11 +6,12 @@ Every publicly readable field has an explicit type — no bare dicts crossing th
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CreateRunRequest(BaseModel):
     intent: str
+    conversation_id: str | None = None
 
 
 class ConfirmRequest(BaseModel):
@@ -50,6 +51,7 @@ class RunDetailResponse(BaseModel):
     summary: Any = None
     pause_reason: str | None = None
     pending_confirmations: list[PendingConfirmationItem] = []
+    conversation_id: str | None = None
 
 
 class EventResponse(BaseModel):

@@ -1,9 +1,10 @@
 from harness.core.agent_kernel import LLMAgentKernel, MockAgentKernel
 from harness.core.context_manager import ContextManager
 from harness.core.dag_executor import DagExecutor
-from harness.core.dag_types import StepResult, StepStatus
+from harness.core.dag_types import ExecState, StepResult, TaskState
 from harness.core.fold import RunState, RunStatus, ThoughtEntry, ToolResult, ToolResultStatus, fold_events
-from harness.core.llm_client import LLMClient, MockLLMClient, OpenAILLMClient
+from harness.core.llm_client import ChatResponse, LLMClient, MockLLMClient, OpenAILLMClient
+from harness.core.logger import setup_logging
 from harness.core.planner import PlanGuardrail, Planner
 from harness.core.scheduler import AgentKernel, AgentLoopScheduler, PlanningExecutorScheduler, SchedulerConfig, ThinkResult
 from harness.models.plan import DagPlan, DagStep
@@ -21,8 +22,6 @@ from harness.models.events import (
     FeedbackInjectedPayload,
     FeedbackSource,
     GuardrailTriggeredPayload,
-    QualityCheckCompletedPayload,
-    QualityIssuePayload,
     RunCompletedPayload,
     RunFailedPayload,
     RunPausedPayload,
@@ -43,15 +42,6 @@ from harness.models.tools import (
     ToolDefinition,
 )
 from harness.storage.event_store import EventStore, SequenceConflictError
-from harness.evaluator import (
-    AnswerAccuracyCheck,
-    EvaluatorRunner,
-    LLMQualityCheck,
-    QualityCheck,
-    QualityReport,
-    RuleQualityCheck,
-    StepCompletenessCheck,
-)
 from harness.tools import (
     BROWSER_DEF,
     FILE_OP_DEF,
@@ -105,8 +95,6 @@ __all__ = [
     "RunResumedPayload",
     "RunCompletedPayload",
     "RunFailedPayload",
-    "QualityCheckCompletedPayload",
-    "QualityIssuePayload",
     # Tool models
     "ToolDefinition",
     "SideEffect",
@@ -154,11 +142,13 @@ __all__ = [
     "ToolResult",
     "ToolResultStatus",
     "fold_events",
+    "setup_logging",
     "AgentLoopScheduler",
     "AgentKernel",
     "ThinkResult",
     "SchedulerConfig",
     "LLMClient",
+    "ChatResponse",
     "MockLLMClient",
     "OpenAILLMClient",
     "MockAgentKernel",
@@ -173,15 +163,8 @@ __all__ = [
     "PlanGuardrail",
     "DagExecutor",
     "StepResult",
-    "StepStatus",
+    "ExecState",
+    "TaskState",
     "DagPlan",
     "DagStep",
-    # V0.8 Evaluator
-    "EvaluatorRunner",
-    "QualityCheck",
-    "QualityReport",
-    "RuleQualityCheck",
-    "LLMQualityCheck",
-    "StepCompletenessCheck",
-    "AnswerAccuracyCheck",
 ]

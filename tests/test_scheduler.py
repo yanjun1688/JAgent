@@ -12,8 +12,8 @@ from harness import (
     EventType,
     MockAgentKernel,
     RetryPolicy,
+    ExecState,
     StepResult,
-    StepStatus,
     RunStatus,
     SchedulerConfig,
     SideEffect,
@@ -310,6 +310,7 @@ class TestPlanStateChain:
         """Verify _execute_plan uses the passed state.seq for context_manager,
         not a freshly-refreshed state."""
         from harness.core.dag_executor import DagExecutor
+        from harness.core.llm_client import ChatResponse
         from harness.core.planner import Planner
         from harness.core.scheduler.plan import PlanningExecutorScheduler
         from harness.models.plan import DagPlan, DagStep
@@ -317,7 +318,7 @@ class TestPlanStateChain:
 
         class _MockLLM:
             async def chat(self, messages, **kwargs):
-                return "Mock answer"
+                return ChatResponse(content="Mock answer")
 
         executor = ToolExecutor(store)
         registry = ToolRegistry()
@@ -338,7 +339,7 @@ class TestPlanStateChain:
         # execute_layer succeeds
         async def _exec(run_id, p, plan_id, layer, layer_idx, layers, all_results):
             for sid in layer:
-                all_results[sid] = StepResult(step_id=sid, status=StepStatus.COMPLETED, output={})
+                all_results[sid] = StepResult(step_id=sid, exec_state=ExecState.COMPLETED, output={})
             return True
 
         dag.execute_layer = AsyncMock(side_effect=_exec)
@@ -357,6 +358,7 @@ class TestPlanStateChain:
     async def test_feedback_consumed_after_plan_revised(self, store: EventStore):
         """After PlanRevised, consumed feedbacks should not appear in next _get_feedback_text."""
         from harness.core.dag_executor import DagExecutor
+        from harness.core.llm_client import ChatResponse
         from harness.core.planner import Planner
         from harness.core.scheduler.plan import PlanningExecutorScheduler
         from harness.models.plan import DagPlan, DagStep
@@ -364,7 +366,7 @@ class TestPlanStateChain:
 
         class _MockLLM:
             async def chat(self, messages, **kwargs):
-                return "Mock answer"
+                return ChatResponse(content="Mock answer")
 
         monitor = RunMonitor(store, max_tokens=10, token_warning_ratio=0.5)
         monitor.attach()
@@ -386,7 +388,7 @@ class TestPlanStateChain:
         # First: plan with feedback → execute_layer fails → revise succeeds
         async def _exec(run_id, p, plan_id, layer, layer_idx, layers, all_results):
             for sid in layer:
-                all_results[sid] = StepResult(step_id=sid, status=StepStatus.FAILED, error="test fail")
+                all_results[sid] = StepResult(step_id=sid, exec_state=ExecState.FAILED, error="test fail")
             return False
 
         dag.execute_layer = AsyncMock(side_effect=_exec)
@@ -450,6 +452,7 @@ class TestStaticPlanUnboundLocalError:
         → bug triggered UnboundLocalError. Fix sets ok = False.
         """
         from harness.core.dag_executor import DagExecutor, PlanSuspended
+        from harness.core.llm_client import ChatResponse
         from harness.core.planner import Planner
         from harness.core.scheduler.plan import PlanningExecutorScheduler
         from harness.models.plan import DagPlan, DagStep
@@ -457,7 +460,7 @@ class TestStaticPlanUnboundLocalError:
 
         class _MockLLM:
             async def chat(self, messages, **kwargs):
-                return "Mock answer"
+                return ChatResponse(content="Mock answer")
 
         executor = ToolExecutor(store)
         registry = ToolRegistry()
@@ -478,7 +481,7 @@ class TestStaticPlanUnboundLocalError:
         # s2 result is already written as failed by dag_executor internals
         # We simulate: the exception is raised, and s2 is already in results as failed
         async def _exec(run_id, plan, plan_id, layer, layer_idx, layers, all_results):
-            all_results["s2"] = StepResult(step_id="s2", status=StepStatus.FAILED, error="fail")
+            all_results["s2"] = StepResult(step_id="s2", exec_state=ExecState.FAILED, error="fail")
             raise PlanSuspended(confirmations=[("s1", "cid-1")])
 
         dag.execute_layer = AsyncMock(side_effect=_exec)
@@ -491,9 +494,9 @@ class TestStaticPlanUnboundLocalError:
             nonlocal retry_calls
             retry_calls += 1
             if retry_calls == 1:
-                return StepResult(step_id=step_id, status=StepStatus.CONFIRMATION_NEEDED,
+                return StepResult(step_id=step_id, exec_state=ExecState.PENDING,
                                   confirmation_id="cid-1")
-            return StepResult(step_id=step_id, status=StepStatus.COMPLETED, output={})
+            return StepResult(step_id=step_id, exec_state=ExecState.COMPLETED, output={})
 
         dag.retry_step = AsyncMock(side_effect=_retry)
 
@@ -534,6 +537,7 @@ class TestMaxIterationsPlanningExecutor:
     async def test_max_iterations_enforced(self, store: EventStore):
         """With max_iterations=2 and infinite revisit, should fail with exceeded."""
         from harness.core.dag_executor import DagExecutor
+        from harness.core.llm_client import ChatResponse
         from harness.core.planner import Planner
         from harness.core.scheduler.plan import PlanningExecutorScheduler
         from harness.models.plan import DagPlan, DagStep
@@ -541,7 +545,7 @@ class TestMaxIterationsPlanningExecutor:
 
         class _MockLLM:
             async def chat(self, messages, **kwargs):
-                return "Mock answer"
+                return ChatResponse(content="Mock answer")
 
         executor = ToolExecutor(store)
         registry = ToolRegistry()
@@ -558,7 +562,7 @@ class TestMaxIterationsPlanningExecutor:
         # execute_layer always fails → triggers revise → revise returns new plan → loop
         async def _exec(run_id, plan, plan_id, layer, layer_idx, layers, all_results):
             for sid in layer:
-                all_results[sid] = StepResult(step_id=sid, status=StepStatus.FAILED, error="fail")
+                all_results[sid] = StepResult(step_id=sid, exec_state=ExecState.FAILED, error="fail")
             return False
 
         dag.execute_layer = AsyncMock(side_effect=_exec)
@@ -578,6 +582,7 @@ class TestCancelDuringDagConfirmation:
     async def test_cancel_during_static_confirmation_loop(self, store: EventStore):
         """Cancel during DAG static confirmation loop → immediate termination."""
         from harness.core.dag_executor import DagExecutor, PlanSuspended
+        from harness.core.llm_client import ChatResponse
         from harness.core.planner import Planner
         from harness.core.scheduler.plan import PlanningExecutorScheduler
         from harness.models.plan import DagPlan, DagStep
@@ -585,7 +590,7 @@ class TestCancelDuringDagConfirmation:
 
         class _MockLLM:
             async def chat(self, messages, **kwargs):
-                return "Mock answer"
+                return ChatResponse(content="Mock answer")
 
         executor = ToolExecutor(store)
         registry = ToolRegistry()
@@ -606,7 +611,7 @@ class TestCancelDuringDagConfirmation:
 
         # retry_step keeps returning confirmation_needed (infinite loop without cancel)
         dag.retry_step = AsyncMock(return_value=StepResult(
-            step_id="s1", status=StepStatus.CONFIRMATION_NEEDED, confirmation_id="cid-1",
+            step_id="s1", exec_state=ExecState.PENDING, confirmation_id="cid-1",
         ))
 
         run_id = "run-cancel-dag-confirm"
@@ -641,13 +646,14 @@ class TestPlanningExecutorScheduler:
     async def test_instantiation_and_dag_fields(self, store: EventStore):
         """Smoke test: PlanningExecutorScheduler can be created with all deps."""
         from harness.core.dag_executor import DagExecutor
+        from harness.core.llm_client import ChatResponse
         from harness.core.planner import Planner
         from harness.core.scheduler.plan import PlanningExecutorScheduler
         from harness.tools.registry import ToolRegistry
 
         class _MockLLM:
             async def chat(self, messages, **kwargs):
-                return "Mock answer"
+                return ChatResponse(content="Mock answer")
 
         executor = ToolExecutor(store)
         registry = ToolRegistry()
@@ -664,13 +670,14 @@ class TestPlanningExecutorScheduler:
     async def test_confirm_retries_configured_for_dag_path(self, store: EventStore):
         """Verify max_confirm_retries is accessible for DAG scheduler."""
         from harness.core.dag_executor import DagExecutor
+        from harness.core.llm_client import ChatResponse
         from harness.core.planner import Planner
         from harness.core.scheduler.plan import PlanningExecutorScheduler
         from harness.tools.registry import ToolRegistry
 
         class _MockLLM:
             async def chat(self, messages, **kwargs):
-                return "Mock answer"
+                return ChatResponse(content="Mock answer")
 
         executor = ToolExecutor(store)
         registry = ToolRegistry()
@@ -693,13 +700,14 @@ class TestPlanningExecutorSchedulerExecution:
     def _make_env(store: EventStore):
         """Create a minimal PlanningExecutorScheduler with mock-friendly deps."""
         from harness.core.dag_executor import DagExecutor
+        from harness.core.llm_client import ChatResponse
         from harness.core.planner import Planner
         from harness.core.scheduler.plan import PlanningExecutorScheduler
         from harness.tools.registry import ToolRegistry
 
         class _MockLLM:
             async def chat(self, messages, **kwargs):
-                return "yes"  # must contain "yes" for classifier to pass
+                return ChatResponse(content="yes")  # must contain "yes" for classifier to pass
 
         executor = ToolExecutor(store)
         registry = ToolRegistry()
@@ -724,7 +732,7 @@ class TestPlanningExecutorSchedulerExecution:
             for sid in layer:
                 all_results[sid] = StepResult(
                     step_id=sid,
-                    status=StepStatus.COMPLETED if succeed else StepStatus.FAILED,
+                    exec_state=ExecState.COMPLETED if succeed else ExecState.FAILED,
                     output={},
                 )
             return succeed
@@ -919,7 +927,7 @@ class TestPlanningExecutorSchedulerExecution:
 
         # retry_step keeps returning confirmation_needed
         dag.retry_step = AsyncMock(return_value=StepResult(
-            step_id="s1", status=StepStatus.CONFIRMATION_NEEDED, confirmation_id="cid-1",
+            step_id="s1", exec_state=ExecState.PENDING, confirmation_id="cid-1",
         ))
 
         run_id = "run-confirm-exceed"
@@ -959,7 +967,7 @@ class TestPlanningExecutorSchedulerExecution:
             for sid in layer:
                 all_results[sid] = StepResult(
                     step_id=sid,
-                    status=StepStatus.SOFT_ERROR if sid == "s2" else StepStatus.COMPLETED,
+                    exec_state=ExecState.SOFT_ERROR if sid == "s2" else ExecState.COMPLETED,
                     output={"success": True} if sid == "s1" else {"success": False},
                     error="soft error" if sid == "s2" else None,
                 )

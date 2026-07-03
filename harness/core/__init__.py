@@ -1,6 +1,6 @@
 from harness.core.agent_kernel import LLMAgentKernel, MockAgentKernel
 from harness.core.dag_executor import DagExecutor, PlanSuspended
-from harness.core.dag_types import StepResult, StepStatus
+from harness.core.dag_types import ExecState, StepResult, TaskState
 from harness.core.dag_vars import deep_resolve, resolve_variables_in_input, substitute_vars, truncate_output
 from harness.core.fold import RunState, RunStatus, ThoughtEntry, ToolResult, ToolResultStatus, fold_events
 from harness.core.llm_client import LLMClient, MockLLMClient
@@ -31,7 +31,8 @@ __all__ = [
     "DagExecutor",
     "PlanSuspended",
     "StepResult",
-    "StepStatus",
+    "ExecState",
+    "TaskState",
     "resolve_variables_in_input",
     "substitute_vars",
     "deep_resolve",

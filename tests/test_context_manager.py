@@ -609,8 +609,8 @@ class TestKernelSummaryConsumption:
         td = _make_tool("echo")
 
         await kernel.think("test task", [td], state)
-        last_call = mock_llm.calls[-1]
-        msgs = last_call["messages"]
-        thought_msgs = [m for m in msgs if m["role"] == "assistant" and "THOUGHT:" in m["content"]]
+        main_call = mock_llm.calls[0]
+        msgs = main_call["messages"]
+        thought_msgs = [m for m in msgs if m["role"] == "assistant"]
         assert len(thought_msgs) == 3  # window = max(keep_recent_count=3, 2) = 3
         assert "thought 4" in thought_msgs[-1]["content"]

@@ -59,15 +59,21 @@ class ContextManager:
         Returns dict with compress_thoughts, compress_results, keep_count fields,
         or None when no compression is needed.
           - Normal compression: compress everything, keep_count=2
-          - Emergency compression (over 80% threshold):
-              compress oldest 50% of events, keep recent 3 rounds (keep_count=3)
+          - Emergency compression (estimated tokens exceed the hard token limit,
+            or a custom overflow threshold above it): compress oldest 50% of
+            events, keep recent 3 rounds (keep_count=3)
         """
         estimate = precomputed_estimate if precomputed_estimate is not None else self._estimate_context_tokens(state)
         if estimate < self.compression_threshold:
             _log_monitor.debug("~%d tokens < %d threshold, skipping compression", estimate, self.compression_threshold)
             return None
 
-        if estimate < self.emergency_threshold:
+        # Boundary rule: emergency is reserved for actual overflow beyond the
+        # configured token limit.  Estimates between compression_threshold and
+        # token_limit use normal compression.  emergency_threshold_ratio values
+        # greater than 1.0 can still raise the overflow boundary when needed.
+        overflow_threshold = max(self.emergency_threshold, self.token_limit)
+        if estimate <= overflow_threshold:
             _log_compress.info("~%d tokens exceeds %d threshold → normal compression "
                                "(keep %d recent, compress %d thoughts + %d results)",
                                estimate, self.compression_threshold, 2,
@@ -105,9 +111,9 @@ class ContextManager:
                         )
                         mid = new_mid
 
-        _log_compress.info("~%d tokens exceeds %d emergency threshold → emergency compression "
+        _log_compress.info("~%d tokens exceeds %d overflow threshold → emergency compression "
                            "(compress oldest %d, keep %d recent)",
-                           estimate, self.emergency_threshold, mid, 3)
+                           estimate, overflow_threshold, mid, 3)
         return {
             "compress_thoughts": state.thought_history[:mid],
             "compress_results": state.tool_results[:mid],
@@ -311,7 +317,7 @@ class ContextManager:
         _log_compress.info("[summarize] === ACTIVITY TEXT (%d chars) ===\n%s\n=== END ACTIVITY TEXT ===",
                             len(activity_text), activity_text)
 
-        response = await self.llm_client.chat(
+        chat_resp = await self.llm_client.chat(
             [
                 {"role": "system", "content": get_prompt(AgentPhase.SUMMARIZE)},
                 {"role": "user", "content": activity_text},
@@ -319,6 +325,7 @@ class ContextManager:
             temperature=0.0,
             max_tokens=2048,
         )
+        response = chat_resp.content
 
         try:
             data = json.loads(response)
