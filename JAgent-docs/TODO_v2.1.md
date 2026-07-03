@@ -2,7 +2,7 @@
 
 > 基于 `harness_v2.1.md` 架构方向生成
 > 已完成里程碑：MVP → V0.2 → V0.3 → V0.4 → V0.4+ → V0.5 → V0.5+ → V0.6 → V0.6+ → V0.7 → V1.0 分析平台
-> 当前阶段：V0.8 — Quality Evaluator（已实现）+ `dynamic` 字段移除
+> 当前阶段：V0.7 — Planner-Executor + DAG（已实现）+ `dynamic` 字段移除
 > 下一阶段：V0.9 — 生命周期恢复（设计文档已就绪）
 
 ---
@@ -24,11 +24,10 @@
 | V1.0 | 分析平台：AnalysisService + 6 个 API 端点 + 操作锚点预埋 + 时间窗口 + 分页 | ✅ |
 | **V0.7** | **Planner-Executor + DAG：Planner / DagExecutor / PlanGuardrail / 7 个新事件 / dynamic 退化路径 / 降级回退** | ✅ |
 | **V0.7 (Phase 5)** | **旧 Scheduler 重构：BaseScheduler 执行基础设施统一 / _fail 合并 / AgentLoopScheduler 精简为纯降级路径 / 355 项测试全通过** | ✅ |
-| **V0.8** | **Quality Evaluator: StepCompletenessCheck / AnswerAccuracyCheck / EvaluatorRunner + `dynamic` 字段移除 + 执行路径统一** | ✅ |
 | **V0.9** | **生命周期恢复：服务器重启孤儿 Run 检测 + abandon/retry 决策** | 📄 设计完成 |
 
 当前基线：**341 项测试全通过**。
-当前阶段：V0.8 — Quality Evaluator 已实现。
+当前阶段：V0.7 — Planner-Executor + DAG 已实现。
 下一阶段：V0.9 — 生命周期恢复（设计文档已就绪，待用户审查）。
 
 > **已明确暂缓（用户决策，一期线上观察后再定）**：
@@ -79,7 +78,7 @@
 
 ---
 
-## V0.8 — 生命周期恢复（Lifecycle Recovery）
+## V0.9 — 生命周期恢复（Lifecycle Recovery）
 
 **状态**: 📄 设计完成（待审查）
 **前置依赖**: V0.7 Phase 5 完成（✅）

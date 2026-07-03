@@ -21,8 +21,6 @@ from harness.models.events import (
     FeedbackInjectedPayload,
     FeedbackSource,
     GuardrailTriggeredPayload,
-    QualityCheckCompletedPayload,
-    QualityIssuePayload,
     RunCompletedPayload,
     RunFailedPayload,
     RunPausedPayload,
@@ -43,15 +41,6 @@ from harness.models.tools import (
     ToolDefinition,
 )
 from harness.storage.event_store import EventStore, SequenceConflictError
-from harness.evaluator import (
-    AnswerAccuracyCheck,
-    EvaluatorRunner,
-    LLMQualityCheck,
-    QualityCheck,
-    QualityReport,
-    RuleQualityCheck,
-    StepCompletenessCheck,
-)
 from harness.tools import (
     BROWSER_DEF,
     FILE_OP_DEF,
@@ -105,8 +94,6 @@ __all__ = [
     "RunResumedPayload",
     "RunCompletedPayload",
     "RunFailedPayload",
-    "QualityCheckCompletedPayload",
-    "QualityIssuePayload",
     # Tool models
     "ToolDefinition",
     "SideEffect",
@@ -176,12 +163,4 @@ __all__ = [
     "StepStatus",
     "DagPlan",
     "DagStep",
-    # V0.8 Evaluator
-    "EvaluatorRunner",
-    "QualityCheck",
-    "QualityReport",
-    "RuleQualityCheck",
-    "LLMQualityCheck",
-    "StepCompletenessCheck",
-    "AnswerAccuracyCheck",
 ]

@@ -33,7 +33,6 @@ from harness.core.llm_client import MockLLMClient, OpenAILLMClient
 from harness.core.scheduler import SchedulerConfig, ThinkResult
 from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
 from harness.monitoring.run_monitor import RunMonitor
-from harness.evaluator import EvaluatorRunner, StepCompletenessCheck, AnswerAccuracyCheck
 from harness.storage.event_store import EventStore
 from harness.tools.browser_tool import BROWSER_DEF, browser_fn
 from harness.tools.executor import ToolExecutor
@@ -182,16 +181,6 @@ for td in api.tool_defs:
         registry.register(td, fn)
 api.registry = registry
 api.llm_client = client
-
-
-# ── 2.5 装配质量评估器 ──────────────────────────────────
-
-_evaluator_checks: list = [StepCompletenessCheck()]
-if USE_REAL_LLM:
-    _evaluator_checks.append(AnswerAccuracyCheck(llm_client=client))
-
-evaluator = EvaluatorRunner(checks=_evaluator_checks, store=store)
-evaluator.attach()
 
 
 # ── 3. 装配 ContextManager ─────────────────────────────────

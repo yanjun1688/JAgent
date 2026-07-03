@@ -30,7 +30,6 @@ class EventType(str, Enum):
     PLAN_REVISED = "PlanRevised"
     PLAN_COMPLETED = "PlanCompleted"
     PLAN_FAILED = "PlanFailed"
-    QUALITY_CHECK_COMPLETED = "QualityCheckCompleted"
 
 
 class ToolResultType(str, Enum):
@@ -235,24 +234,6 @@ class PlanFailedPayload(BaseModel):
     final_error: str
 
 
-class QualityIssuePayload(BaseModel):
-    type: str
-    severity: str
-    detail: str
-    source: str | None = None
-
-
-class QualityCheckCompletedPayload(BaseModel):
-    check_id: str
-    target: str
-    evaluator_type: str
-    verdict: str
-    score: float | None = None
-    issues: list[QualityIssuePayload] = Field(default_factory=list)
-    summary: str | None = None
-    duration_ms: int = 0
-
-
 # ── Payload model registry ─────────────────────────────────────
 
 PAYLOAD_MODEL_MAP: dict[EventType, type[BaseModel]] = {
@@ -279,7 +260,6 @@ PAYLOAD_MODEL_MAP: dict[EventType, type[BaseModel]] = {
     EventType.PLAN_REVISED: PlanRevisedPayload,
     EventType.PLAN_COMPLETED: PlanCompletedPayload,
     EventType.PLAN_FAILED: PlanFailedPayload,
-    EventType.QUALITY_CHECK_COMPLETED: QualityCheckCompletedPayload,
 }
 
 
