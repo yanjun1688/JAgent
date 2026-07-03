@@ -1,39 +1,51 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { colors } from '../api/analysis-styles'
-import type { ParsedEventDetail } from '../api/analysis-types'
 import { getRunTimeline } from '../api/analysis-client'
-import { createRun, confirmAction, resumeRun } from '../api/client'
+import { createRun, confirmAction, pauseRun, resumeRun } from '../api/client'
+import { useRunWebSocket, type WsEvent } from '../hooks/useRunWebSocket'
 import ThinkingPanel from './ThinkingPanel'
 
 interface Props {
   style?: React.CSSProperties
   initialRunId?: string
+  onRunChange?: (runId: string | null) => void
 }
 
-export default function ChatDrawer({ style, initialRunId }: Props) {
+export default function ChatDrawer({ style, initialRunId, onRunChange }: Props) {
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
   const [activeRunStatus, setActiveRunStatus] = useState<string>('')
-  const [events, setEvents] = useState<ParsedEventDetail[]>([])
+  const [timelineEvents, setTimelineEvents] = useState<WsEvent[]>([])
   const [input, setInput] = useState('')
   const [lastUserMessage, setLastUserMessage] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [thoughtOpen, setThoughtOpen] = useState(true)
   const bottomRef = useRef<HTMLDivElement>(null)
-  const wsRef = useRef<WebSocket | null>(null)
+
+  const { events: wsEvents, runStatus: wsRunStatus, isConnected } = useRunWebSocket(activeRunId)
+
+  const allEvents = useMemo(() => {
+    const tSeqs = new Set(timelineEvents.map((e) => e.seq))
+    const newWs = wsEvents.filter((e) => !tSeqs.has(e.seq))
+    return [...timelineEvents, ...newWs].sort((a, b) => a.seq - b.seq)
+  }, [timelineEvents, wsEvents])
+
+  useEffect(() => {
+    if (wsRunStatus) setActiveRunStatus(wsRunStatus)
+  }, [wsRunStatus])
 
   const finalAnswer = useMemo(() => {
-    const completed = events.find((e) => e.event_type === 'RunCompleted')
+    const completed = allEvents.find((e) => e.event_type === 'RunCompleted')
     if (completed) return String(completed.payload.result_summary || '')
-    const failed = events.find((e) => e.event_type === 'RunFailed')
+    const failed = allEvents.find((e) => e.event_type === 'RunFailed')
     if (failed) return String(failed.payload.final_error || '')
     return null
-  }, [events])
+  }, [allEvents])
 
   const pendingConfirmations = useMemo(() => {
     const received = new Set<string>()
-    const requested: ParsedEventDetail[] = []
-    for (const e of events) {
+    const requested: WsEvent[] = []
+    for (const e of allEvents) {
       if (e.event_type === 'ConfirmationReceived' && e.confirmation_id) {
         received.add(e.confirmation_id)
       }
@@ -42,68 +54,33 @@ export default function ChatDrawer({ style, initialRunId }: Props) {
       }
     }
     return requested.filter((e) => e.confirmation_id && !received.has(e.confirmation_id!))
-  }, [events])
+  }, [allEvents])
 
   const showConfirmationCard = useMemo(() => {
     if (pendingConfirmations.length === 0) return false
-    for (let i = events.length - 1; i >= 0; i--) {
-      if (events[i].event_type === 'RunResumed') return false
-      if (events[i].event_type === 'RunPaused' && events[i].payload.reason === 'waiting_confirmation') return true
+    for (let i = allEvents.length - 1; i >= 0; i--) {
+      if (allEvents[i].event_type === 'RunResumed') return false
+      if (allEvents[i].event_type === 'RunPaused' && allEvents[i].payload.reason === 'waiting_confirmation') return true
     }
     return false
-  }, [events, pendingConfirmations])
+  }, [allEvents, pendingConfirmations])
 
   async function handleConfirmResume(confirmationId: string, confirmed: boolean) {
     await confirmAction(activeRunId!, confirmationId, confirmed, '')
     await resumeRun(activeRunId!)
   }
 
-  const connectWs = useCallback((runId: string) => {
-    if (wsRef.current) {
-      wsRef.current.onclose = null
-      wsRef.current.close()
-    }
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/v1/runs/${runId}/events`)
-    wsRef.current = ws
-
-    ws.onmessage = (msg) => {
-      try {
-        const raw = JSON.parse(msg.data)
-        const event: ParsedEventDetail = {
-          run_id: raw.run_id || runId,
-          seq: raw.seq,
-          event_type: raw.event_type,
-          created_at: raw.created_at,
-          payload: raw.payload || {},
-          tool_call_id: raw.payload?.tool_call_id || null,
-          tool_name: raw.payload?.tool_name || null,
-          input: raw.payload?.input || null,
-          idempotency_key: raw.idempotency_key || null,
-          confirmation_id: raw.payload?.confirmation_id || null,
-          error: raw.payload?.error || null,
-          duration_ms: raw.payload?.duration_ms || null,
-          retryable: null,
-        }
-        setEvents((prev) => [...prev, event])
-        if (raw.event_type === 'RunCompleted' || raw.event_type === 'RunFailed') {
-          setActiveRunStatus(raw.event_type === 'RunCompleted' ? 'completed' : 'failed')
-        }
-      } catch { /* ignore malformed ws msg */ }
-    }
-    ws.onclose = () => { wsRef.current = null }
-  }, [])
-
-  useEffect(() => {
-    if (!initialRunId) return
-    setActiveRunId(initialRunId)
+  function loadRun(runId: string) {
+    setActiveRunId(runId)
+    onRunChange?.(runId)
     setActiveRunStatus('')
     setLastUserMessage(null)
     setLoading(true)
     setError(null)
-    getRunTimeline(initialRunId, 200, 0)
+    setTimelineEvents([])
+    getRunTimeline(runId, 200, 0)
       .then((timeline) => {
-        setEvents(timeline.timeline)
+        setTimelineEvents(timeline.timeline as WsEvent[])
         const started = timeline.timeline.find((e) => e.event_type === 'RunStarted')
         if (started) setLastUserMessage(String(started.payload.intent || ''))
         const last = timeline.timeline[timeline.timeline.length - 1]
@@ -114,26 +91,24 @@ export default function ChatDrawer({ style, initialRunId }: Props) {
         }
         const finished = last?.event_type === 'RunCompleted' || last?.event_type === 'RunFailed'
         setThoughtOpen(!finished)
-        if (!finished) connectWs(initialRunId)
       })
       .catch((err) => {
         const msg = err instanceof Error ? err.message : String(err)
-        console.error('[ChatDrawer] initialRunId load error:', err)
+        console.error('[ChatDrawer] loadRun error:', err)
         setError(msg)
       })
       .finally(() => setLoading(false))
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.onclose = null
-        wsRef.current.close()
-      }
-    }
+  }
+
+  useEffect(() => {
+    if (!initialRunId) return
+    loadRun(initialRunId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialRunId])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [events.length])
+  }, [allEvents.length])
 
   async function handleSubmit() {
     const text = input.trim()
@@ -143,21 +118,21 @@ export default function ChatDrawer({ style, initialRunId }: Props) {
     setLoading(true)
     setActiveRunId(null)
     setActiveRunStatus('running')
-    setEvents([])
+    setTimelineEvents([])
     setError(null)
     setThoughtOpen(true)
 
     try {
       const { run_id } = await createRun(text)
       setActiveRunId(run_id)
+      onRunChange?.(run_id)
       const timeline = await getRunTimeline(run_id, 200, 0)
-      setEvents(timeline.timeline)
+      setTimelineEvents(timeline.timeline as WsEvent[])
       const last = timeline.timeline[timeline.timeline.length - 1]
       if (last) {
         if (last.event_type === 'RunCompleted') setActiveRunStatus('completed')
         else if (last.event_type === 'RunFailed') setActiveRunStatus('failed')
       }
-      connectWs(run_id)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error('[ChatDrawer] handleSubmit error:', err)
@@ -166,7 +141,7 @@ export default function ChatDrawer({ style, initialRunId }: Props) {
     setLoading(false)
   }
 
-  const welcome = !activeRunId && events.length === 0
+  const welcome = !activeRunId && allEvents.length === 0
 
   return (
     <div
@@ -224,8 +199,8 @@ export default function ChatDrawer({ style, initialRunId }: Props) {
           )}
         </div>
         <span style={{ fontSize: 11, color: colors.textSecondary }}>
-          {events.length} event{events.length !== 1 ? 's' : ''}
-          {activeRunStatus === 'running' ? ' · live' : ''}
+          {allEvents.length} event{allEvents.length !== 1 ? 's' : ''}
+          {activeRunStatus === 'running' && isConnected ? ' · live' : ''}
         </span>
       </div>
 
@@ -274,7 +249,7 @@ export default function ChatDrawer({ style, initialRunId }: Props) {
             {/* thinking panel */}
             {activeRunId && (
               <ThinkingPanel
-                events={events}
+                events={allEvents}
                 open={thoughtOpen}
                 onToggle={() => setThoughtOpen(!thoughtOpen)}
                 loading={activeRunStatus === 'running'}
@@ -397,6 +372,40 @@ export default function ChatDrawer({ style, initialRunId }: Props) {
             background: activeRunStatus === 'running' ? colors.bg : '#fff',
           }}
         />
+        {activeRunStatus === 'running' && (
+          <button
+            onClick={() => pauseRun(activeRunId!)}
+            style={{
+              padding: '8px 14px',
+              background: '#ffb74d',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 8,
+              cursor: 'pointer',
+              fontSize: 13,
+              fontWeight: 600,
+            }}
+          >
+            ⏸ Pause
+          </button>
+        )}
+        {activeRunStatus === 'paused' && (
+          <button
+            onClick={() => resumeRun(activeRunId!)}
+            style={{
+              padding: '8px 14px',
+              background: '#66bb6a',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 8,
+              cursor: 'pointer',
+              fontSize: 13,
+              fontWeight: 600,
+            }}
+          >
+            ▶ Resume
+          </button>
+        )}
         <button
           type="submit"
           disabled={loading || !input.trim() || activeRunStatus === 'running'}

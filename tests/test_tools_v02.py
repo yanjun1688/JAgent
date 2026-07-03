@@ -218,6 +218,59 @@ class TestFileOpIntegration:
         assert result["success"] is False
 
 
+class TestToolResultEnrichmentBug6:
+    """Bug 6: Tool return values should include path/url/action for answer context."""
+
+    @pytest.fixture(autouse=True)
+    def _sandbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_sandbox_root(tmp)
+            yield tmp
+
+    async def test_file_op_write_includes_path(self):
+        result = await file_op_fn({"operation": "write", "path": "output.txt", "content": "hello"})
+        assert result["success"] is True
+        assert result["path"] == "output.txt", f"write should include path, got: {result}"
+
+    async def test_file_op_read_includes_path(self):
+        await file_op_fn({"operation": "write", "path": "data.txt", "content": "test"})
+        result = await file_op_fn({"operation": "read", "path": "data.txt"})
+        assert result["success"] is True
+        assert result["path"] == "data.txt", f"read should include path, got: {result}"
+        assert result["content"] == "test"
+
+    async def test_file_op_delete_includes_path(self):
+        await file_op_fn({"operation": "write", "path": "tmp.txt", "content": ""})
+        result = await file_op_fn({"operation": "delete", "path": "tmp.txt"})
+        assert result["success"] is True
+        assert result["path"] == "tmp.txt", f"delete should include path, got: {result}"
+
+    async def test_file_op_error_includes_path(self):
+        result = await file_op_fn({"operation": "read", "path": "missing.txt"})
+        assert result["success"] is False
+        assert result["path"] == "missing.txt", f"error response should include path, got: {result}"
+
+    async def test_http_request_schema_includes_url_and_method(self):
+        """HTTP output_schema should include url and method for answer LLM context."""
+        from harness.tools.http_request import HTTP_REQUEST_DEF
+        props = HTTP_REQUEST_DEF.output_schema.get("properties", {})
+        assert "url" in props, f"output_schema should include url, got: {list(props.keys())}"
+        assert "method" in props, f"output_schema should include method, got: {list(props.keys())}"
+
+    def test_browser_schema_includes_action_and_url(self):
+        """Browser output_schema should include action and url."""
+        from harness.tools.browser_tool import BROWSER_DEF
+        props = BROWSER_DEF.output_schema.get("properties", {})
+        assert "action" in props, f"output_schema should include action, got: {list(props.keys())}"
+        assert "url" in props, f"output_schema should include url, got: {list(props.keys())}"
+
+    def test_file_op_schema_includes_path(self):
+        """File op output_schema should include path."""
+        from harness.tools.file_op import FILE_OP_DEF
+        props = FILE_OP_DEF.output_schema.get("properties", {})
+        assert "path" in props, f"output_schema should include path, got: {list(props.keys())}"
+
+
 # ── SKILL ─────────────────────────────────────────────────────────
 
 

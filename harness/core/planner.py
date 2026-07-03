@@ -11,6 +11,7 @@ from typing import Any
 from harness.core.fold import RunState
 from harness.core.llm_client import LLMClient
 from harness.core.logger import agent_logger, fmtkv
+from harness.core.system_prompt import AgentPhase, get_prompt
 from harness.models.events import EpisodeSummary, EventType
 from harness.models.plan import DagPlan, DagStep
 from harness.models.tools import ToolDefinition
@@ -45,7 +46,12 @@ _STEP_SCHEMA_SIMPLE = {
 
 def _build_step_schema_text() -> str:
     """Return LLM-readable schema text with single braces (for direct use)."""
-    return """Each step MUST be a JSON object with exactly these fields:
+    return """Top-level JSON MUST contain:
+  - "intent" (string, required): a one-sentence summary of what this plan aims to accomplish. Rephrase the user's goal in your own words — DO NOT copy-paste the user intent verbatim.
+  - "steps" (array): list of step objects. Use [] for no-action plans.
+  - "dynamic" (boolean, optional): set true if the plan's steps must run strictly one at a time (e.g. conditional branching, interactive flows). Default false.
+
+Each step MUST be a JSON object with exactly these fields:
   - "id" (string, required): unique identifier, e.g. "s1"
   - "tool" (string, required): tool name from the available tools list
   - "input" (object, required): ALL parameters go inside this object.
@@ -80,58 +86,7 @@ def _validate_step(step: dict, step_index: int) -> str | None:
 # Pre-compute for _retry_prompt (single braces, no .format())
 _STEP_SCHEMA_RAW = _build_step_schema_text()
 
-# ── Prompts ─────────────────────────────────────────────────────
-
-_PLAN_PROMPT_TMPL = """You are a task planner. Given a user intent and available tools,
-create a step-by-step plan in JSON format. Each step calls one tool.
-
-## Rules
-1. Output ONLY valid JSON — no markdown, no code fences, no extra text.
-2. If the user's intent is a simple question/chat that needs no tools, return {"steps": []}.
-   The content after "## User Intent" will be used as the direct answer.
-
-## Output JSON format
-{step_schema}
-
-## Example 1 — Independent steps:
-User: "Search for weather in Tokyo and London"
-{"steps": [{"id": "s1", "tool": "browser_search", "input": {"query": "Tokyo weather"}}, {"id": "s2", "tool": "browser_search", "input": {"query": "London weather"}}]}
-
-## Example 2 — Dependent steps:
-User: "Search for Tokyo weather and save to a file"
-{"steps": [{"id": "s1", "tool": "browser_search", "input": {"query": "Tokyo weather"}}, {"id": "s2", "tool": "file_op", "input": {"path": "tokyo.txt", "content": "done"}, "depends_on": ["s1"]}]}
-
-## Data Flow
-Use $step_id.field to reference a previous step's output.
-
-## Available Tools
-{tool_descriptions}
-
-## User Intent
-{intent}
-"""
-
-_REVISE_PROMPT_TMPL = """You are a task planner reviewing execution results.
-Some steps completed, some may have failed. Decide what to do next.
-
-## Original User Intent
-{intent}
-
-{system_state}
-
-## Output JSON format
-{step_schema}
-
-Return a revised plan with only the REMAINING steps (steps that haven't been executed yet).
-If all steps are done, return {"steps": []}.
-If the task cannot be completed, return {"steps": [], "failed": true, "reason": "explanation"}.
-
-## Data Flow
-Use $step_id.field to reference a previous step's output.
-
-## Available Tools
-{tool_descriptions}
-"""
+# ── Retry prompt (dynamic, not a template) ────────────────────
 
 def _retry_prompt(last_error: str) -> str:
     """生成带具体错误信息的重试提示。"""
@@ -259,10 +214,11 @@ class Planner:
         feedback: str | None = None,
     ) -> DagPlan | None:
         prompt = self._build_plan_prompt(intent, feedback=feedback)
-        _log.info("[plan] Entry %s", fmtkv(
-            intent=intent[:80], feedback_len=len(feedback) if feedback else 0,
-            has_feedback=feedback is not None,
-        ))
+        _log.info("[plan] phase=%s len=%d %s\n=== PLAN PROMPT ===\n%s\n=== END PLAN PROMPT ===",
+                  AgentPhase.PLAN.value, len(prompt),
+                  fmtkv(intent=intent[:80], feedback_len=len(feedback) if feedback else 0,
+                        has_feedback=feedback is not None),
+                  prompt)
         last_error = ""
 
         for attempt in range(1, self.max_plan_retries + 2):
@@ -302,18 +258,19 @@ class Planner:
     ) -> DagPlan | None:
         intent = plan.intent[:200] if plan.intent else (intent_fallback[:200] if intent_fallback else "(unknown)")
         feedback_section = self._build_feedback_section(feedback)
-        _log.info("[revise] Entry %s", fmtkv(
-            intent=intent[:80], has_feedback=feedback is not None,
-            feedback_len=len(feedback) if feedback else 0,
-            completed=len([sid for sid, r in results.items()
-                          if isinstance(r, dict) and r.get("status") in ("completed", "idempotency_hit")]),
-        ))
-        prompt = _REVISE_PROMPT_TMPL.replace("{step_schema}", _build_step_schema_text())
-        prompt = prompt.replace("{intent}", intent)
-        prompt = prompt.replace("{system_state}", system_state)
-        prompt = prompt.replace("{tool_descriptions}", self._build_tool_descriptions())
-        if feedback_section:
-            prompt += f"\n{feedback_section}"
+        prompt = get_prompt(
+            AgentPhase.REVISE,
+            step_schema=_build_step_schema_text(),
+            intent=intent,
+            system_state=system_state,
+            tool_descriptions=self._build_tool_descriptions(),
+            feedback_section=feedback_section or "",
+        )
+        _log.info("[revise] phase=%s len=%d %s\n=== REVISE SYSTEM STATE ===\n%s\n=== END REVISE SYSTEM STATE ===",
+                  AgentPhase.REVISE.value, len(prompt),
+                  fmtkv(intent=intent[:80], has_feedback=feedback is not None,
+                        feedback_len=len(feedback) if feedback else 0),
+                  system_state)
         total_attempts = self.max_plan_retries + 1
         completed_step_ids = {
             sid for sid, r in results.items()
@@ -356,28 +313,37 @@ class Planner:
         user message so the LLM sees everything as content to answer, regardless
         of how different models handle multiple system messages.
         """
-        prompt = (
-            "You are a helpful assistant. Answer the user's question directly and naturally.\n"
-            "Do not call any tools. Just respond as a knowledgeable assistant.\n"
-            "Provide a complete answer with all the information gathered. "
-            "If the user asks for a comparison or recommendation, include that explicitly.\n"
-        )
+        prompt = get_prompt(AgentPhase.ANSWER)
+        _log.info("[answer] phase=%s len=%d", AgentPhase.ANSWER.value, len(prompt))
         messages = [{"role": "system", "content": prompt}]
 
         parts = []
         n_tool_results = len(state.tool_results)
 
         if state.tool_results:
+            tool_inputs = {
+                tc.tool_call_id: tc.input
+                for tc in state.tool_calls
+            }
             parts.append("[Tool execution results]")
-            for tr in state.tool_results:
-                parts.append(f"[{tr.tool_name}]")
+            for i, tr in enumerate(state.tool_results):
+                status_label = tr.status.value if hasattr(tr.status, 'value') else str(tr.status)
+                parts.append(f"## Step {i + 1}: {tr.tool_name} (status: {status_label})")
+                tc_input = tool_inputs.get(tr.tool_call_id)
+                if tc_input:
+                    input_str = str(tc_input)
+                    if len(input_str) > 2000:
+                        input_str = input_str[:2000] + "\n...(input truncated)..."
+                    parts.append(f"Input: {input_str}")
                 if tr.output is not None:
                     output_str = str(tr.output)
                     if len(output_str) > 5000:
                         output_str = output_str[:5000] + "\n...(truncated)..."
-                    parts.append(output_str)
-                elif tr.error:
+                    parts.append(f"Output: {output_str}")
+                if tr.error:
                     parts.append(f"Error: {tr.error}")
+                if tr.duration_ms:
+                    parts.append(f"Duration: {tr.duration_ms}ms")
                 parts.append("")
 
         if state.summary:
@@ -408,7 +374,7 @@ class Planner:
         total_chars = sum(len(m["content"]) for m in messages)
         _log.info("[answer] Sending %d messages (%d tool_results, %d chars) to LLM",
                   len(messages), n_tool_results, total_chars)
-        _log.info("[answer] === USER MESSAGE BEGIN ===\n%s\n=== USER MESSAGE END ===", user_content[:3000])
+        _log.info("[answer] === USER MESSAGE BEGIN ===\n%s\n=== USER MESSAGE END ===", user_content)
 
         response = await self.llm.chat(messages, temperature=0.7, max_tokens=16384)
         _log.info("[answer] LLM response: %d chars: %s", len(response), response)
@@ -426,17 +392,59 @@ class Planner:
         )
 
     def _build_plan_prompt(self, intent: str, feedback: str | None = None) -> str:
-        text = _PLAN_PROMPT_TMPL.replace("{step_schema}", _build_step_schema_text())
-        text = text.replace("{tool_descriptions}", self._build_tool_descriptions())
-        text = text.replace("{intent}", intent)
+        text = get_prompt(
+            AgentPhase.PLAN,
+            step_schema=_build_step_schema_text(),
+            tool_descriptions=self._build_tool_descriptions(intent=intent),
+            intent=intent,
+        )
         fb = self._build_feedback_section(feedback)
         if fb:
-            text = text.replace("## User Intent", fb + "## User Intent")
+            text = text.replace("## User Intent\n", fb + "## User Intent\n")
         return text
 
-    def _build_tool_descriptions(self) -> str:
+    @staticmethod
+    def _extract_tool_keywords(td: "ToolDefinition") -> set[str]:
+        """Extract relevance keywords from a tool definition."""
+        kw = set()
+        kw.add(td.name.lower())
+        for word in td.description.lower().split():
+            clean = word.strip(".,;:()[]")
+            if len(clean) >= 3:
+                kw.add(clean)
+        if td.input_schema and isinstance(td.input_schema, dict):
+            for pname in td.input_schema.get("properties", {}):
+                kw.add(pname.lower())
+            for pname, pinfo in td.input_schema.get("properties", {}).items():
+                desc = pinfo.get("description", "")
+                if desc:
+                    for word in desc.lower().split():
+                        clean = word.strip(".,;:()[]")
+                        if len(clean) >= 3:
+                            kw.add(clean)
+        return kw
+
+    @staticmethod
+    def _filter_tools_by_intent(intent: str, tool_defs: list["ToolDefinition"]) -> list["ToolDefinition"]:
+        """Return tools whose keywords appear in the intent, plus always-include tools."""
+        intent_lower = intent.lower()
+        ALWAYS_INCLUDE = {"file_op"}
+        relevant = []
+        for td in tool_defs:
+            if td.name in ALWAYS_INCLUDE:
+                relevant.append(td)
+                continue
+            keywords = Planner._extract_tool_keywords(td)
+            if any(kw in intent_lower for kw in keywords):
+                relevant.append(td)
+        return relevant if relevant else tool_defs
+
+    def _build_tool_descriptions(self, intent: str | None = None) -> str:
+        tool_defs = self.registry.list_tool_defs()
+        if intent and len(tool_defs) > 2:
+            tool_defs = self._filter_tools_by_intent(intent, tool_defs)
         lines = []
-        for td in self.registry.list_tool_defs():
+        for td in tool_defs:
             line = f"  - {td.name}: {td.description}"
             schema = td.input_schema
             if schema and isinstance(schema, dict):

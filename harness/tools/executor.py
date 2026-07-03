@@ -19,6 +19,7 @@ from harness.models.events import (
     ToolCalledPayload,
     ToolCompletedPayload,
     ToolFailedPayload,
+    ToolResultType,
     ToolTimeoutPayload,
 )
 from harness.models.tools import ToolDefinition
@@ -27,6 +28,7 @@ from harness.tools.guardrails import GuardrailRunner
 from harness.tools.idempotency import IdempotencyKeyGenerator
 from harness.tools.retry import RetryRunner
 from harness.tools.sandbox import Sandbox
+from harness.tools.semantic import SemanticEvaluator
 
 _guard_log = guard_logger("executor")
 _agent_log = agent_logger("executor")
@@ -77,6 +79,7 @@ class ToolExecutionResult:
     confirmation_id: str | None = None
     cached: bool = False
     retry_attempts: int = 0
+    has_semantic_error: bool = False
 
 
 class ToolExecutor:
@@ -141,7 +144,10 @@ class ToolExecutor:
             existing_tc = await self.store.find_by_idempotency_key(run_id, EventType.TOOL_COMPLETED, ik_key)
             if existing_tc is not None:
                 payload = ToolCompletedPayload.model_validate(existing_tc.payload)
-                _log_idem.info("[idem] Cache HIT (previous result @ seq=%d)", existing_tc.seq)
+                se_flag = payload.result_type == ToolResultType.SOFT_ERROR
+                _log_idem.info("[idem] Cache HIT (previous result @ seq=%d) semantic=%s error=%s",
+                               existing_tc.seq, "SOFT_ERROR" if se_flag else "SUCCESS",
+                               payload.error or "null")
                 return ToolExecutionResult(
                     status=ExecutionStatus.IDEMPOTENCY_HIT,
                     tool_call_id=payload.tool_call_id,
@@ -150,6 +156,8 @@ class ToolExecutor:
                     output=payload.output,
                     duration_ms=payload.duration_ms,
                     cached=True,
+                    has_semantic_error=se_flag,
+                    error=payload.error if se_flag else None,
                 )
             _log_idem.debug("[idem] Cache miss")
 
@@ -248,25 +256,40 @@ class ToolExecutor:
                 policy=tool_def.retry_policy,
             )
             duration_ms = int((time.monotonic() - step7_start) * 1000)
-            if isinstance(output, dict) and output.get("success") is False:
-                _log_sandbox.warning("[sandbox] Soft failure: %s (%dms)",
-                                     output.get("error", "success=False"), duration_ms)
-                error_msg = output.get("error", "Tool returned success=False")
-                tp = ToolFailedPayload(
+
+            # ── Step 7.5: Semantic evaluation ────────────────────
+            result_type, semantic_error = SemanticEvaluator.evaluate(output, tool_def)
+            if result_type == ToolResultType.SOFT_ERROR:
+                _log_sandbox.warning("[semantic] tool=%s SOFT_ERROR: %s (%dms)",
+                                     tool_name, semantic_error, duration_ms)
+                if tool_def.side_effects:
+                    _log_sandbox.info("[sidefx] tool=%s side_effects=%s",
+                                      tool_name, [s.value for s in tool_def.side_effects])
+                tp = ToolCompletedPayload(
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
-                    error=error_msg,
-                    retryable=False,
+                    output=output,
+                    duration_ms=duration_ms,
+                    result_type=ToolResultType.SOFT_ERROR,
+                    error=semantic_error,
                 )
-                await self.store.append_event(run_id, EventType.TOOL_FAILED, tp.model_dump())
+                await self.store.append_event(run_id, EventType.TOOL_COMPLETED, tp.model_dump(), idempotency_key=ik_key)
+                _log_sandbox.info("[semantic] Wrote TOOL_COMPLETED(SOFT_ERROR) tool=%s call_id=%s ik=%s",
+                                  tool_name, tool_call_id, ik_key or "null")
                 return ToolExecutionResult(
-                    status=ExecutionStatus.FAILED,
+                    status=ExecutionStatus.COMPLETED,
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     idempotency_key=ik_key,
-                    error=error_msg,
+                    output=output,
                     duration_ms=duration_ms,
+                    retry_attempts=retry_count,
+                    has_semantic_error=True,
+                    error=semantic_error,
                 )
+
+            _log_sandbox.debug("[semantic] tool=%s SUCCESS indicator=%s", tool_name,
+                               tool_def.success_indicator.field if tool_def.success_indicator else "null")
             _log_sandbox.info("[sandbox] Completed in %dms (retries=%d)", duration_ms, retry_count)
 
             if tool_def.output_schema:

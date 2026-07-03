@@ -1,0 +1,14 @@
+{
+  "servers": [
+    {
+      "name": "memory",
+      "command": ["cmd", "/c", "npx", "-y", "@modelcontextprotocol/server-memory"],
+      "enabled": true
+    },
+    {
+      "name": "fetch",
+      "command": ["cmd", "/c", "npx", "-y", "@modelcontextprotocol/server-fetch"],
+      "enabled": true
+    }
+  ]
+}

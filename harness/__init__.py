@@ -1,6 +1,7 @@
 from harness.core.agent_kernel import LLMAgentKernel, MockAgentKernel
 from harness.core.context_manager import ContextManager
 from harness.core.dag_executor import DagExecutor
+from harness.core.dag_types import StepResult, StepStatus
 from harness.core.fold import RunState, RunStatus, ThoughtEntry, ToolResult, ToolResultStatus, fold_events
 from harness.core.llm_client import LLMClient, MockLLMClient, OpenAILLMClient
 from harness.core.planner import PlanGuardrail, Planner
@@ -28,6 +29,7 @@ from harness.models.events import (
     ToolCalledPayload,
     ToolCompletedPayload,
     ToolFailedPayload,
+    ToolResultType,
     ToolTimeoutPayload,
 )
 from harness.monitoring.run_monitor import RunMonitor
@@ -35,6 +37,7 @@ from harness.models.tools import (
     Guardrail,
     RetryPolicy,
     SideEffect,
+    SuccessIndicator,
     ToolDefinition,
 )
 from harness.storage.event_store import EventStore, SequenceConflictError
@@ -75,6 +78,7 @@ __all__ = [
     "ToolCalledPayload",
     "ToolCompletedPayload",
     "ToolFailedPayload",
+    "ToolResultType",
     "ToolTimeoutPayload",
     "GuardrailTriggeredPayload",
     "ConfirmationRequestedPayload",
@@ -92,6 +96,7 @@ __all__ = [
     # Tool models
     "ToolDefinition",
     "SideEffect",
+    "SuccessIndicator",
     "Guardrail",
     "RetryPolicy",
     # Tool layer
@@ -152,6 +157,8 @@ __all__ = [
     "Planner",
     "PlanGuardrail",
     "DagExecutor",
+    "StepResult",
+    "StepStatus",
     "DagPlan",
     "DagStep",
 ]

@@ -6,6 +6,10 @@ import Dashboard from './pages/Dashboard'
 import ToolsPanel from './pages/ToolsPanel'
 import GuardrailPanel from './pages/GuardrailPanel'
 import RunAnalysis from './pages/RunAnalysis'
+import OpsDashboard from './pages/OpsDashboard'
+import OpsRunDetail from './pages/OpsRunDetail'
+import OpsSystem from './pages/OpsSystem'
+import OpsChatView from './pages/OpsChatView'
 import { colors } from './api/analysis-styles'
 
 const styles: Record<string, React.CSSProperties> = {
@@ -59,6 +63,9 @@ export default function App() {
           <NavLink to="/analysis/tools" label="Tools" />
           <NavLink to="/analysis/guardrails" label="Guardrails" />
           <NavLink to="/" label="Runs" />
+          <span style={{ color: '#444', fontSize: 13 }}>|</span>
+          <NavLink to="/ops" label="Ops" />
+          <NavLink to="/ops/system" label="System" />
         </div>
       </header>
       <div style={styles.container}>
@@ -69,6 +76,10 @@ export default function App() {
           <Route path="/analysis/tools" element={<ToolsPanel />} />
           <Route path="/analysis/guardrails" element={<GuardrailPanel />} />
           <Route path="/analysis/runs/:runId" element={<RunAnalysis />} />
+          <Route path="/ops" element={<OpsDashboard />} />
+          <Route path="/ops/chat" element={<OpsChatView />} />
+          <Route path="/ops/runs/:runId" element={<OpsRunDetail />} />
+          <Route path="/ops/system" element={<OpsSystem />} />
         </Routes>
       </div>
     </div>

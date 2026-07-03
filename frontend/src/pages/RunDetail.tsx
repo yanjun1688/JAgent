@@ -1,16 +1,15 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react'
+import React, { useEffect, useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   getRun,
-  getRunEvents,
   pauseRun,
   resumeRun,
   confirmAction,
   deleteRun,
-  connectEventStream,
   RunDetail as RunDetailType,
-  HarnessEvent,
 } from '../api/client'
+import type { WsEvent } from '../hooks/useRunWebSocket'
+import { useRunWebSocket } from '../hooks/useRunWebSocket'
 import ConfirmDialog from '../components/ConfirmDialog'
 
 const EVENT_COLORS: Record<string, string> = {
@@ -43,7 +42,6 @@ export default function RunDetail() {
   const { runId } = useParams<{ runId: string }>()
   const navigate = useNavigate()
   const [run, setRun] = useState<RunDetailType | null>(null)
-  const [events, setEvents] = useState<HarnessEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [confirmDialog, setConfirmDialog] = useState<{
     confirmationId: string
@@ -61,19 +59,13 @@ export default function RunDetail() {
     })
   }, [])
 
-  const wsRef = useRef<WebSocket | null>(null)
-  const lastSeqRef = useRef(0)
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const { events, runStatus, isConnected } = useRunWebSocket(runId ?? null)
 
   const load = useCallback(async () => {
     if (!runId) return
     try {
-      const [runData, eventsData] = await Promise.all([getRun(runId), getRunEvents(runId)])
+      const runData = await getRun(runId)
       setRun(runData)
-      setEvents(eventsData.events)
-      if (eventsData.events.length > 0) {
-        lastSeqRef.current = eventsData.events[eventsData.events.length - 1].seq
-      }
     } catch {
       navigate('/')
     } finally {
@@ -82,44 +74,16 @@ export default function RunDetail() {
   }, [runId, navigate])
 
   useEffect(() => {
+    setLoading(true)
     load()
-    if (!runId) return
+  }, [load])
 
-    let mounted = true
-
-    function startWs() {
-      if (!mounted) return
-      if (wsRef.current) {
-        wsRef.current.close()
-      }
-      const ws = connectEventStream(runId!, (event) => {
-        if (event.seq <= lastSeqRef.current) return
-        lastSeqRef.current = event.seq
-        setEvents((prev) => [...prev, event])
-        getRun(runId!).then(setRun).catch(() => {})
-      })
-      wsRef.current = ws
-
-      ws.onclose = () => {
-        reconnectTimerRef.current = setTimeout(startWs, 1000)
-      }
+  useEffect(() => {
+    if (!runId || !runStatus) return
+    if (runStatus !== run?.status) {
+      getRun(runId).then(setRun).catch(() => {})
     }
-
-    startWs()
-
-    return () => {
-      mounted = false
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current)
-        reconnectTimerRef.current = null
-      }
-      if (wsRef.current) {
-        wsRef.current.onclose = null
-        wsRef.current.close()
-        wsRef.current = null
-      }
-    }
-  }, [runId, load])
+  }, [runId, runStatus, run?.status])
 
   async function handlePause() {
     if (!runId) return
@@ -160,7 +124,7 @@ export default function RunDetail() {
     return new Date(ts * 1000).toLocaleTimeString()
   }
 
-  function eventSummary(e: HarnessEvent): string {
+  function eventSummary(e: WsEvent): string {
     const p = e.payload
     switch (e.event_type) {
       case 'RunStarted':
@@ -168,25 +132,25 @@ export default function RunDetail() {
       case 'AgentThought':
         return (p.thought as string).slice(0, 120)
       case 'ToolCalled':
-        return `${p.tool_name}(${JSON.stringify(p.input).slice(0, 80)})`
+        return `${e.tool_name}(${JSON.stringify(e.input).slice(0, 80)})`
       case 'ToolCompleted':
-        return `${p.tool_name} → ${JSON.stringify(p.output).slice(0, 80)}`
+        return `${e.tool_name} → ${JSON.stringify(p.output).slice(0, 80)}`
       case 'ToolFailed':
-        return `${p.tool_name} ✗ ${p.error}`
+        return `${e.tool_name} ✗ ${e.error}`
       case 'ToolTimeout':
-        return `${p.tool_name} ⏱ timeout ${p.timeout_ms}ms`
+        return `${e.tool_name} ⏱ timeout ${p.timeout_ms}ms`
       case 'GuardrailTriggered':
-        return `${p.tool_name} 🛡 ${p.guardrail_id}: ${p.reason}`
+        return `${e.tool_name} 🛡 ${p.guardrail_id}: ${p.reason}`
       case 'ConfirmationRequested':
-        return `${p.tool_name} ⚠ requires confirmation`
+        return `${e.tool_name} ⚠ requires confirmation`
       case 'ConfirmationReceived':
         return `→ ${p.confirmed ? 'confirmed' : 'denied'} by ${p.operator_id}`
       case 'DagStepStarted':
-        return `${p.tool_name} step ${p.step_id}`
+        return `${e.tool_name} step ${p.step_id}`
       case 'DagStepCompleted':
-        return `${p.tool_name} ✓ (${p.duration_ms}ms)`
+        return `${e.tool_name} ✓ (${e.duration_ms}ms)`
       case 'DagStepFailed':
-        return `${p.tool_name} ✗ ${p.error}`
+        return `${e.tool_name} ✗ ${e.error}`
       case 'PlanCreated':
         return `Plan: ${JSON.stringify(p).slice(0, 100)}`
       case 'PlanRevised':
@@ -247,9 +211,12 @@ export default function RunDetail() {
 
       <div style={{ display: 'flex', gap: 16, marginBottom: 24, fontSize: 14, color: '#666' }}>
         <span>Status: <strong>{run.status}</strong></span>
-        <span>Events: <strong>{run.event_count}</strong></span>
+        <span>Events: <strong>{events.length}</strong></span>
         {run.last_error ? <span style={{ color: '#ef5350' }}>Error: {run.last_error}</span> : null}
         {run.pause_reason ? <span>Paused: {run.pause_reason}</span> : null}
+        <span style={{ color: isConnected ? '#66bb6a' : '#ef5350' }}>
+          {isConnected ? '● live' : '○ disconnected'}
+        </span>
       </div>
 
       {run.status === 'paused' && run.pause_reason === 'waiting_confirmation' && run.pending_confirmations && run.pending_confirmations.length > 0 && (

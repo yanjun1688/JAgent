@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from harness.models.tools import Guardrail, SideEffect, ToolDefinition
+from harness.models.tools import Guardrail, SideEffect, SuccessIndicator, ToolDefinition
 
 CLIENT = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
 
@@ -45,6 +45,8 @@ HTTP_REQUEST_DEF = ToolDefinition(
     output_schema={
         "type": "object",
         "properties": {
+            "url": {"type": "string"},
+            "method": {"type": "string"},
             "status_code": {"type": "integer"},
             "headers": {"type": "object"},
             "body": {"type": "string"},
@@ -55,6 +57,7 @@ HTTP_REQUEST_DEF = ToolDefinition(
     side_effects=[SideEffect.EXTERNAL],
     guardrails=[Guardrail(guardrail_type="scope", config={})],
     timeout_ms=60000,
+    success_indicator=SuccessIndicator(field="status_code", op="lt", value=400),
 )
 
 
@@ -81,6 +84,8 @@ async def http_request_fn(input: dict[str, Any]) -> dict[str, Any]:
         body = body[:max_bytes] + f"\n... (truncated, {len(body)} total bytes)"
 
     result = {
+        "url": url,
+        "method": method,
         "status_code": response.status_code,
         "headers": dict(response.headers),
         "body": body,

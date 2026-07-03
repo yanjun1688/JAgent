@@ -13,6 +13,7 @@ import time
 from harness.core.fold import RunState
 from harness.core.llm_client import LLMClient
 from harness.core.logger import guard_logger
+from harness.core.system_prompt import AgentPhase, get_prompt
 from harness.models.events import (
     ContextCheckpointedPayload,
     ContextCompressedPayload,
@@ -25,16 +26,6 @@ _log_monitor = guard_logger("context.monitor")
 _log_compress = guard_logger("context.compress")
 _log_checkpoint = guard_logger("context.checkpoint")
 
-_SUMMARY_PROMPT = (
-    'You are a context compression system. Summarize the following agent activity log. '
-    'Output your response as a JSON object with these exact fields:\n'
-    '- "key_decisions": list of strings — the key decisions the agent made\n'
-    '- "tools_used": list of strings — which tools were called\n'
-    '- "key_findings": list of strings — important information discovered\n'
-    '- "errors_encountered": list of strings — any errors or warnings\n'
-    '- "current_plan": string or null — the plan at this point (if any)\n'
-    'Be factual and concise. Return ONLY valid JSON, no markdown or explanation.'
-)
 
 
 class ContextManager:
@@ -317,9 +308,12 @@ class ContextManager:
                 original_event_refs=refs,
             )
 
+        _log_compress.info("[summarize] === ACTIVITY TEXT (%d chars) ===\n%s\n=== END ACTIVITY TEXT ===",
+                            len(activity_text), activity_text)
+
         response = await self.llm_client.chat(
             [
-                {"role": "system", "content": _SUMMARY_PROMPT},
+                {"role": "system", "content": get_prompt(AgentPhase.SUMMARIZE)},
                 {"role": "user", "content": activity_text},
             ],
             temperature=0.0,

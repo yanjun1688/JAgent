@@ -146,14 +146,49 @@ class RunMonitor:
             tool_name = event.payload.get("tool_name", "")
             tc_info = self._pending_calls.get(rid, {}).pop(tc_id, None)
             ep_key = tc_info[2] if tc_info and len(tc_info) >= 3 else tool_name
+            payload_result_type = event.payload.get("result_type", "success")
+            was = 0
 
-            # Per-endpoint reset
-            per_ep = self._consecutive_per_ep.get(rid, {})
-            was = per_ep.get(ep_key, 0)
-            per_ep[ep_key] = 0
-            self._consecutive_failures[rid] = 0
-            if was > 0:
-                _log_anomaly.info("Failure streak reset (was %d) for '%s'", was, ep_key)
+            if payload_result_type == "soft_error":
+                _log_observe.info("Event: seq=%d type=%s result_type=soft_error tool=%s ep_key=%s",
+                                  event.seq, event.event_type.value, tool_name, ep_key)
+                per_ep = self._consecutive_per_ep.setdefault(rid, {})
+                count = per_ep.get(ep_key, 0) + 1
+                per_ep[ep_key] = count
+                self._consecutive_failures[rid] = count
+
+                err_text = event.payload.get("error", "soft_error")
+                error_type = self._extract_error_type(err_text)
+                per_tool = self._failures_per_tool.setdefault(rid, {})
+                per_tool[tool_name] = per_tool.get(tool_name, 0) + 1
+                err_map = self._failure_error_map.setdefault(rid, {}).setdefault(tool_name, {})
+                err_map[error_type] = err_map.get(error_type, 0) + 1
+
+                _log_anomaly.debug("SOFT_ERROR %s %s", fmtkv(
+                    run_id=rid, seq=event.seq, ep_key=ep_key, tool=tool_name,
+                    error_type=error_type, consecutive=count,
+                ))
+
+                if count >= 3:
+                    _log_anomaly.info("SOFT_ERROR anomaly threshold hit %s", fmtkv(
+                        run_id=rid, tool=tool_name, ep_key=ep_key, error_type=error_type,
+                        consecutive=count,
+                    ))
+                    await self._check_and_inject_feedback(rid, tool_name, ep_key, error_type, event.event_type, error_detail=err_text)
+                _log_anomaly.info("SOFT_ERROR accumulated %s", fmtkv(
+                    run_id=rid, ep_key=ep_key, tool=tool_name,
+                    consecutive=count, per_tool=per_tool.get(tool_name, 0),
+                    error_type=error_type,
+                ))
+            else:
+                _log_observe.info("Event: seq=%d type=%s result_type=success tool=%s ep_key=%s",
+                                  event.seq, event.event_type.value, tool_name, ep_key)
+                per_ep = self._consecutive_per_ep.get(rid, {})
+                was = per_ep.get(ep_key, 0)
+                per_ep[ep_key] = 0
+                self._consecutive_failures[rid] = 0
+                if was > 0:
+                    _log_anomaly.info("Failure streak reset (was %d) for '%s'", was, ep_key)
 
             # Resolution signal: only when the same endpoint succeeds
             if was >= 3 and ep_key == self._captured_ep_key.get(rid):
@@ -280,6 +315,7 @@ class RunMonitor:
             affected_tool=ep_key,
             error_type=dominant_error,
             error_detail=error_detail,
+            suggestion=self._generate_suggestion(tool, error_type),
             expires_at_seq=current_seq + 50,
         )
 
@@ -392,6 +428,70 @@ class RunMonitor:
         except Exception:
             _log_inject.exception("Failed to inject feedback for %s", run_id)
         return feedback_id
+
+    # ── Public state exposure ───────────────────────────────────────────────
+
+    def get_state(self, run_id: str | None = None) -> dict:
+        """Return a snapshot of current monitor state for observability.
+
+        When run_id is given, return per-run details. Otherwise return
+        a global summary across all monitored runs.
+        """
+        if run_id:
+            return self._run_state(run_id)
+        return self._global_state()
+
+    def _run_state(self, rid: str) -> dict:
+        per_ep = self._consecutive_per_ep.get(rid, {})
+        per_tool = self._failures_per_tool.get(rid, {})
+        err_map_raw = self._failure_error_map.get(rid, {})
+        err_map = {t: dict(d) for t, d in err_map_raw.items()}
+        return {
+            "run_id": rid,
+            "last_seen_seq": self._last_seen_seq.get(rid),
+            "consecutive_failures": self._consecutive_failures.get(rid, 0),
+            "consecutive_per_endpoint": dict(per_ep),
+            "failures_per_tool": dict(per_tool),
+            "failure_error_map": err_map,
+            "estimated_tokens": self._token_totals.get(rid, 0),
+            "token_warning_sent": rid in self._token_warning_sent,
+            "repeated_call_count": self._repeated_call_count.get(rid, 0),
+            "repeated_fail_count": self._repeat_fail_count.get(rid, 0),
+            "stuck_feedback_sent": self._stuck_feedback_sent.get(rid, 0),
+            "deduped_feedback_keys": sorted(
+                list(self._fed_ep_keys.get(rid, set()))
+            ) if rid in self._fed_ep_keys else [],
+            "pending_calls": len(self._pending_calls.get(rid, {})),
+            "config": {
+                "max_tokens": self.max_tokens,
+                "token_warning_ratio": self.token_warning_ratio,
+            },
+        }
+
+    def _global_state(self) -> dict:
+        monitored_runs = set(self._consecutive_failures.keys()) \
+            | set(self._token_totals.keys()) \
+            | set(self._pending_calls.keys())
+        runs: list[dict] = []
+        for rid in sorted(monitored_runs):
+            runs.append({
+                "run_id": rid,
+                "last_seen_seq": self._last_seen_seq.get(rid),
+                "consecutive_failures": self._consecutive_failures.get(rid, 0),
+                "estimated_tokens": self._token_totals.get(rid, 0),
+                "token_warning_sent": rid in self._token_warning_sent,
+                "endpoints_tracked": len(self._consecutive_per_ep.get(rid, {})),
+                "tools_with_failures": len(self._failures_per_tool.get(rid, {})),
+                "deduped_feedback_count": len(self._fed_ep_keys.get(rid, set())),
+            })
+        return {
+            "monitored_run_count": len(runs),
+            "runs": runs,
+            "config": {
+                "max_tokens": self.max_tokens,
+                "token_warning_ratio": self.token_warning_ratio,
+            },
+        }
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
 

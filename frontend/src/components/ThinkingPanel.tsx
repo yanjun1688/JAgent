@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { colors } from '../api/analysis-styles'
-import type { ParsedEventDetail } from '../api/analysis-types'
+import type { WsEvent } from '../hooks/useRunWebSocket'
 
 interface Props {
-  events: ParsedEventDetail[]
+  events: WsEvent[]
   open: boolean
   onToggle: () => void
   loading?: boolean
@@ -28,24 +28,22 @@ export default function ThinkingPanel({ events, open, onToggle, loading }: Props
         }
         .tp-dot {
           display: inline-block;
-          width: 6px;
-          height: 6px;
+          width: 8px;
+          height: 8px;
           border-radius: 50%;
-          background: #6c5ce7;
+          margin-right: 6px;
+          background: ${colors.primary};
           animation: tp-pulse 1.2s ease-in-out infinite;
         }
-        .tp-dot-green {
-          background: #66bb6a;
-          animation-delay: 0.2s;
-        }
+        .tp-dot:nth-child(2) { animation-delay: 0.2s; }
+        .tp-dot:nth-child(3) { animation-delay: 0.4s; }
       `}</style>
-
       <div
         style={{
+          background: '#f7f7fc',
+          borderRadius: 10,
           border: `1px solid ${colors.border}`,
-          borderRadius: 8,
-          background: '#f8f9fb',
-          fontSize: 12,
+          margin: '4px 0',
           overflow: 'hidden',
         }}
       >
@@ -53,72 +51,55 @@ export default function ThinkingPanel({ events, open, onToggle, loading }: Props
           onClick={onToggle}
           style={{
             display: 'flex',
+            justifyContent: 'space-between',
             alignItems: 'center',
-            gap: 6,
-            padding: '6px 10px',
+            padding: '8px 12px',
             cursor: 'pointer',
             userSelect: 'none',
-            borderBottom: open ? `1px solid ${colors.border}` : 'none',
-            background: '#f0f1f4',
+            fontSize: 13,
+            fontWeight: 600,
+            color: colors.text,
+            background: '#e8e8f4',
           }}
         >
-          <span
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {loading && (
+              <span style={{ display: 'inline-flex', alignItems: 'center' }}>
+                <span className="tp-dot" />
+                <span className="tp-dot" />
+                <span className="tp-dot" />
+              </span>
+            )}
+            Thinking {!open && internal.length > 0 ? `(${internal.length} steps)` : ''}
+          </span>
+          <span style={{ fontSize: 11, color: colors.textSecondary }}>
+            {open ? '▲' : '▼'}
+          </span>
+        </div>
+        {open && (
+          <div
             style={{
-              fontSize: 10,
-              color: '#999',
-              transition: 'transform 0.15s',
-              transform: open ? 'rotate(90deg)' : '',
+              padding: '8px 10px',
+              maxHeight: 320,
+              overflow: 'auto',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
             }}
           >
-            ▶
-          </span>
-          <span style={{ fontWeight: 600, fontSize: 12, color: '#555' }}>Thinking Process</span>
-          <span style={{ color: colors.textSecondary, fontSize: 10 }}>
-            {internal.length} step{internal.length !== 1 ? 's' : ''}
-          </span>
-          {open && loading && (
-            <span
-              style={{
-                marginLeft: 'auto',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 4,
-                color: '#6c5ce7',
-                fontSize: 10,
-                fontWeight: 600,
-              }}
-            >
-              <span className="tp-dot" />
-              Live
-            </span>
-          )}
-        </div>
-
-        {open && (
-          <div style={{ padding: '4px 0', maxHeight: 320, overflow: 'auto' }}>
-            {internal.length === 0 && !loading && (
-              <div style={{ padding: 12, color: '#999', textAlign: 'center' }}>No thinking steps yet</div>
-            )}
             {internal.length === 0 && loading && (
-              <div style={{ padding: 12, color: '#999', textAlign: 'center' }}>Initializing agent...</div>
-            )}
-            {internal.map((e) => (
-              <ThinkingStep key={e.seq} event={e} />
-            ))}
-            {loading && (
-              <div
-                style={{
-                  padding: '6px 10px',
-                  color: '#999',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
-              >
-                <span className="tp-dot" />
-                Processing...
+              <div style={{ textAlign: 'center', padding: 12, color: colors.textSecondary, fontSize: 12 }}>
+                Agent is thinking...
               </div>
             )}
+            {internal.length === 0 && !loading && (
+              <div style={{ textAlign: 'center', padding: 12, color: colors.textSecondary, fontSize: 12 }}>
+                No thinking steps yet.
+              </div>
+            )}
+            {internal.map((event, idx) => (
+              <ThinkingStep key={`${event.seq}-${idx}`} event={event} />
+            ))}
             <div ref={bottomRef} />
           </div>
         )}
@@ -127,127 +108,148 @@ export default function ThinkingPanel({ events, open, onToggle, loading }: Props
   )
 }
 
-function ThinkingStep({ event }: { event: ParsedEventDetail }) {
+function eventLabel(event: WsEvent): string {
+  switch (event.event_type) {
+    case 'AgentThought':
+      return 'Thinking...'
+    case 'ToolCalled':
+      return `Calling tool: ${event.tool_name || 'unknown'}`
+    case 'ToolCompleted':
+      return `Tool ${event.tool_name || ''} completed (${event.duration_ms ? (event.duration_ms / 1000).toFixed(1) + 's' : 'ok'})`
+    case 'ToolFailed':
+      return `Tool ${event.tool_name || ''} failed`
+    case 'ToolTimeout':
+      return `Tool ${event.tool_name || ''} timed out`
+    case 'GuardrailTriggered':
+      return `Guardrail blocked: ${event.tool_name || ''}`
+    case 'ConfirmationRequested':
+      return `Awaiting confirmation: ${event.tool_name || ''}`
+    case 'ConfirmationReceived':
+      return `Confirmation: ${event.payload.confirmed ? 'Approved' : 'Denied'}`
+    case 'ContextCompressed':
+      return 'Context compressed'
+    case 'ContextCheckpointed':
+      return 'Checkpoint saved'
+    case 'FeedbackInjected':
+      return `Feedback: ${String(event.payload.feedback_text || '').slice(0, 80)}`
+    case 'PlanCreated':
+      return 'Plan created'
+    case 'PlanRevised':
+      return 'Plan revised'
+    case 'PlanCompleted':
+      return 'Plan completed'
+    case 'PlanFailed':
+      return 'Plan failed'
+    default:
+      return event.event_type
+  }
+}
+
+function ThinkingStep({ event }: { event: WsEvent }) {
   const [expanded, setExpanded] = useState(false)
 
-  const isError = ['ToolFailed', 'ToolTimeout'].includes(event.event_type)
-  const hasDetail = event.event_type === 'AgentThought' || event.event_type === 'ToolCalled'
+  const isThought = event.event_type === 'AgentThought'
+  const showExpand = event.event_type === 'AgentThought' || event.event_type === 'ToolCalled'
 
-  const time = new Date(event.created_at * 1000).toLocaleTimeString()
-
-  const dotColor = isError
-    ? '#ef5350'
-    : event.event_type === 'ToolCompleted'
-      ? '#66bb6a'
-      : event.event_type === 'AgentThought'
-        ? '#6c5ce7'
-        : event.event_type === 'ToolCalled'
-          ? '#ffb74d'
-          : '#ccc'
-
-  const line1 = (() => {
-    switch (event.event_type) {
-      case 'AgentThought':
-        return 'Thinking...'
-      case 'ToolCalled':
-        return `Calling tool: ${event.tool_name || 'unknown'}`
-      case 'ToolCompleted':
-        return `Tool ${event.tool_name || ''} completed (${event.duration_ms ? (event.duration_ms / 1000).toFixed(1) + 's' : 'ok'})`
-      case 'ToolFailed':
-        return `Tool ${event.tool_name || ''} failed`
-      case 'ToolTimeout':
-        return `Tool ${event.tool_name || ''} timed out`
-      case 'GuardrailTriggered':
-        return `Guardrail blocked: ${event.tool_name || ''}`
-      case 'ConfirmationRequested':
-        return `Awaiting confirmation: ${event.tool_name || ''}`
-      case 'ConfirmationReceived':
-        return `Confirmation: ${event.payload.confirmed ? 'Approved' : 'Denied'}`
-      case 'ContextCompressed':
-        return 'Context compressed'
-      case 'RunPaused':
-        return 'Run paused'
-      case 'RunResumed':
-        return 'Run resumed'
-      case 'FeedbackInjected':
-        return `Feedback: ${String(event.payload.feedback_text || '').slice(0, 80)}`
-      default:
-        return event.event_type
-    }
-  })()
+  const stepColors: Record<string, string> = {
+    AgentThought: colors.primary,
+    ToolCalled: '#ff9800',
+    ToolCompleted: '#4caf50',
+    ToolFailed: colors.red,
+    ToolTimeout: colors.red,
+    GuardrailTriggered: '#ff5722',
+    ConfirmationRequested: '#ff9800',
+    ConfirmationReceived: colors.success,
+    ContextCompressed: '#607d8b',
+    ContextCheckpointed: '#607d8b',
+    PlanCreated: '#7c4dff',
+    PlanRevised: '#ff9800',
+    PlanCompleted: '#4caf50',
+    PlanFailed: colors.red,
+    FeedbackInjected: '#e91e63',
+  }
 
   return (
     <div
-      onClick={() => hasDetail && setExpanded(!expanded)}
       style={{
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: 8,
-        padding: '3px 10px',
-        cursor: hasDetail ? 'pointer' : 'default',
-        background: isError ? '#fff5f5' : 'transparent',
-        borderLeft: `3px solid ${isError ? '#ef5350' : 'transparent'}`,
+        fontSize: 12,
+        padding: '4px 8px',
+        borderRadius: 6,
+        background: '#fff',
+        border: `1px solid ${colors.border}`,
       }}
     >
-      <span
+      <div
+        onClick={() => showExpand && setExpanded(!expanded)}
         style={{
-          flexShrink: 0,
-          display: 'inline-block',
-          width: 6,
-          height: 6,
-          borderRadius: '50%',
-          marginTop: 7,
-          background: dotColor,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          cursor: showExpand ? 'pointer' : 'default',
         }}
-      />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, lineHeight: '20px' }}>
-          <span
-            style={{
-              fontSize: 12,
-              color: isError ? '#ef5350' : event.event_type === 'ToolCompleted' ? '#66bb6a' : '#555',
-              fontWeight: isError ? 600 : 400,
-            }}
-          >
-            {line1}
+      >
+        <span
+          style={{
+            display: 'inline-block',
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            flexShrink: 0,
+            background: stepColors[event.event_type] || '#999',
+          }}
+        />
+        <span style={{ fontWeight: 600, color: colors.text }}>
+          {eventLabel(event)}
+        </span>
+        {showExpand && (
+          <span style={{ marginLeft: 'auto', fontSize: 10, color: colors.textSecondary }}>
+            {expanded ? '▲' : '▼'}
           </span>
-          <span style={{ color: '#bbb', fontSize: 9, flexShrink: 0 }}>{time}</span>
+        )}
+      </div>
+
+      {/* Agent thought content */}
+      {isThought && expanded && (
+        <div
+          style={{
+            marginTop: 6,
+            padding: '6px 8px',
+            background: '#f0f0f8',
+            borderRadius: 4,
+            fontSize: 12,
+            color: colors.textSecondary,
+            fontStyle: 'italic',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            maxHeight: 200,
+            overflow: 'auto',
+          }}
+        >
+          {String(event.payload.thought || '').slice(0, 600)}
         </div>
-        {expanded && event.event_type === 'AgentThought' && (
+      )}
+
+      {/* Tool input */}
+      {expanded && event.event_type === 'ToolCalled' && event.input && (
+        <div style={{ marginTop: 4 }}>
+          <div style={{ fontSize: 10, color: colors.textSecondary, marginBottom: 2 }}>Input:</div>
           <pre
             style={{
-              margin: '2px 0 0',
+              margin: 0,
               fontSize: 11,
-              color: '#666',
+              background: '#f5f5f5',
+              padding: '4px 6px',
+              borderRadius: 4,
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-all',
               maxHeight: 120,
               overflow: 'auto',
-              lineHeight: 1.4,
-              fontFamily: 'inherit',
-            }}
-          >
-            {String(event.payload.thought || '').slice(0, 600)}
-          </pre>
-        )}
-        {expanded && event.event_type === 'ToolCalled' && event.input && (
-          <pre
-            style={{
-              margin: '2px 0 0',
-              fontSize: 10,
-              color: '#888',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-all',
-              maxHeight: 100,
-              overflow: 'auto',
-              lineHeight: 1.3,
-              fontFamily: 'inherit',
             }}
           >
             {JSON.stringify(event.input, null, 1).slice(0, 300)}
           </pre>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   )
 }

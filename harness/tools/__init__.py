@@ -16,6 +16,7 @@ from harness.tools.mcp_call import MCP_CALL_DEF, connect_mcp_server, disconnect_
 from harness.tools.registry import ToolRegistry
 from harness.tools.retry import RetryRunner
 from harness.tools.sandbox import Sandbox, SandboxResult
+from harness.tools.semantic import SemanticEvaluator
 from harness.tools.skill import Skill
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "RetryRunner",
     "Sandbox",
     "SandboxResult",
+    "SemanticEvaluator",
     # V0.2
     "ToolRegistry",
     "HTTP_REQUEST_DEF",
