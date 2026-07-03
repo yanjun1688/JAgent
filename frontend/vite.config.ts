@@ -11,7 +11,10 @@ export default defineConfig({
         ws: true,
         configure: (proxy) => {
           proxy.on('error', (err) => {
-            if ((err as NodeJS.ErrnoException).code === 'ECONNRESET') return
+            const code = (err as NodeJS.ErrnoException).code
+            if (code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'ECONNABORTED') return
+            // AggregateError from Node 16+ connection failures
+            if ((err as Error).name === 'AggregateError') return
             console.error('Vite proxy error:', err)
           })
         },

@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from harness.models.tools import Guardrail, SideEffect, ToolDefinition
+from harness.core.logger import agent_logger
+from harness.models.tools import Guardrail, SideEffect, SuccessIndicator, ToolDefinition
+
+if TYPE_CHECKING:
+    from harness.tools.mcp_manager import MCPServerManager
+
+_logger = agent_logger("mcp.call")
 
 MCP_CALL_DEF = ToolDefinition(
     name="mcp_call",
@@ -12,7 +18,7 @@ MCP_CALL_DEF = ToolDefinition(
         "properties": {
             "server_name": {
                 "type": "string",
-                "description": "Name of the MCP server (omit if using the default server)",
+                "description": "Name of the MCP server (omit to use the first connected server)",
             },
             "tool_name": {
                 "type": "string",
@@ -38,15 +44,20 @@ MCP_CALL_DEF = ToolDefinition(
     side_effects=[SideEffect.EXTERNAL],
     guardrails=[Guardrail(guardrail_type="scope", config={})],
     timeout_ms=60000,
+    success_indicator=SuccessIndicator(field="success", op="eq", value=True),
 )
 
+_manager: MCPServerManager | None = None
 
-_mcp_sessions: dict[str, Any] = {}
+
+def set_manager(manager: MCPServerManager) -> None:
+    global _manager
+    _manager = manager
 
 
-def _get_session(server_name: str | None) -> Any:
-    key = server_name or "__default__"
-    return _mcp_sessions.get(key)
+def get_manager() -> MCPServerManager | None:
+    global _manager
+    return _manager
 
 
 async def mcp_call_fn(input: dict[str, Any]) -> dict[str, Any]:
@@ -54,12 +65,28 @@ async def mcp_call_fn(input: dict[str, Any]) -> dict[str, Any]:
     tool_name = input["tool_name"]
     arguments = input.get("arguments", {})
 
-    session = _get_session(server_name)
-    if session is None:
-        return {
-            "success": False,
-            "error": f"No active MCP session for server '{server_name or 'default'}'. Connect first.",
-        }
+    manager = get_manager()
+    if manager is None:
+        _logger.warning("mcp_call failed: no manager")
+        return {"success": False, "error": "MCP Manager not initialized. No MCP servers configured."}
+
+    if server_name:
+        session = manager.get_session(server_name)
+        if session is None:
+            _logger.warning("mcp_call failed: unknown server '%s'", server_name)
+            return {
+                "success": False,
+                "error": f"No active MCP session for server '{server_name}'.",
+            }
+    else:
+        servers = manager.server_names
+        if not servers:
+            _logger.warning("mcp_call failed: no sessions")
+            return {"success": False, "error": "No active MCP sessions. Configure MCP servers first."}
+        session = manager.get_session(servers[0])
+        server_name = servers[0]
+
+    _logger.info("mcp_call %s/%s args=%s", server_name, tool_name, str(arguments))
 
     try:
         result = await session.call_tool(tool_name, arguments)
@@ -67,16 +94,20 @@ async def mcp_call_fn(input: dict[str, Any]) -> dict[str, Any]:
         content_parts = []
         if hasattr(result, "content"):
             for item in result.content:
-                if hasattr(item, "text"):
-                    content_parts.append(item.text)
-                elif hasattr(item, "data"):
-                    content_parts.append(str(item.data))
+                text = getattr(item, "text", None)
+                data = getattr(item, "data", None)
+                if text is not None:
+                    content_parts.append(text)
+                elif data is not None:
+                    content_parts.append(str(data))
                 else:
                     content_parts.append(str(item))
 
+        _logger.info("mcp_call %s/%s -> success (%d items)", server_name, tool_name, len(content_parts))
         return {"success": True, "content": content_parts}
 
     except Exception as exc:
+        _logger.warning("mcp_call %s/%s -> failed: %s", server_name, tool_name, exc)
         return {"success": False, "error": f"MCP tool '{tool_name}' failed: {exc}"}
 
 
@@ -85,33 +116,21 @@ async def connect_mcp_server(
     command: list[str] | None = None,
     url: str | None = None,
 ) -> dict[str, Any]:
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import stdio_client
+    from harness.models.mcp_config import MCPConfig, MCPConnectionConfig
+    from harness.tools.mcp_manager import MCPServerManager
 
-    if command:
-        server_params = StdioServerParameters(command=command[0], args=command[1:])
-        transport = await stdio_client(server_params).__aenter__()
-        session = await ClientSession(transport[0], transport[1]).__aenter__()
-        await session.initialize()
-    elif url:
-        from mcp.client.sse import sse_client
-        transport = await sse_client(url).__aenter__()
-        session = await ClientSession(transport[0], transport[1]).__aenter__()
-        await session.initialize()
-    else:
-        return {"success": False, "error": "Either command or url must be provided"}
+    manager = get_manager()
+    if manager is None:
+        manager = MCPServerManager(MCPConfig())
+        set_manager(manager)
 
-    _mcp_sessions[server_name] = session
-    tools_result = await session.list_tools()
-    tools_info = [{"name": t.name, "description": t.description} for t in tools_result.tools]
-    return {"success": True, "tools": tools_info}
+    cfg = MCPConnectionConfig(name=server_name, command=command, url=url, enabled=True)
+    result = await manager.connect_server(cfg)
+    return result
 
 
 async def disconnect_mcp_server(server_name: str) -> dict[str, Any]:
-    session = _mcp_sessions.pop(server_name, None)
-    if session:
-        try:
-            await session.__aexit__(None, None, None)
-        except Exception:
-            pass
-    return {"success": True}
+    manager = get_manager()
+    if manager is None:
+        return {"success": False, "error": "MCP Manager not initialized"}
+    return await manager.disconnect_server(server_name)

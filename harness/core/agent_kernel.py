@@ -10,7 +10,7 @@ from harness.core.fold import RunState
 from harness.core.llm_client import LLMClient
 from harness.core.logger import agent_logger
 from harness.core.scheduler import AgentKernel, ThinkResult
-from harness.core.system_prompt import build_system_prompt, build_tool_schemas
+from harness.core.system_prompt import AgentPhase, build_tool_schemas, get_prompt
 from harness.models.events import EpisodeSummary
 from harness.models.tools import ToolDefinition
 
@@ -19,7 +19,7 @@ _logger = agent_logger("kernel")
 _STOP_MARKER = "<STOP>"
 _ANSWER_RE = re.compile(r"ANSWER:\s*(.+?)(?:\n|$)")
 _THOUGHT_RE = re.compile(r"THOUGHT:\s*(.+?)(?:\nTOOL:|\nANSWER:|\n<STOP>|$)", re.DOTALL)
-_TOOL_SPLIT_RE = re.compile(r"\nTOOL: ")
+_TOOL_SPLIT_RE = re.compile(r"(?:^|\n)TOOL:\s*")
 _ARGS_GREEDY_RE = re.compile(r"ARGS:\s*(\{.*\})", re.DOTALL)
 
 _EXECUTION_MODE_DEFAULT = "serial"
@@ -58,44 +58,23 @@ def _parse_results(response: str) -> list[ThinkResult]:
     thought_match = _THOUGHT_RE.search(response)
     thought = thought_match.group(1).strip() if thought_match else response.strip()
 
-    # Split by \nTOOL: — each segment after the first is one tool definition.
-    # This avoids greedy-matching across tool boundaries.
+    # Split by TOOL: — unified path handles both single and multi-tool.
+    # Each segment after the first is one tool definition.
+    # This avoids greedy-matching of ARGS across tool boundaries.
     segments = _TOOL_SPLIT_RE.split(response)
     if len(segments) > 1:
-        seen_thought = False
         results = []
-        for seg in segments:
-            if not seen_thought:
-                seen_thought = True
-                continue
+        for seg in segments[1:]:
             tool_name, tool_input = _parse_segment(seg)
             if tool_name:
                 results.append(ThinkResult(thought=thought, tool_name=tool_name, tool_input=tool_input))
         if results:
             return results
 
-    # Single-tool fallback: separate TOOL / ARGS scan
-    tool_fb = re.search(r"TOOL:\s*(\S+)", response)
-    if tool_fb:
-        tool_name = tool_fb.group(1)
-        tool_input: dict[str, Any] = {}
-        args_fb = _ARGS_GREEDY_RE.search(response)
-        if args_fb:
-            try:
-                tool_input = json.loads(args_fb.group(1))
-            except json.JSONDecodeError:
-                pass
-        return [ThinkResult(thought=thought, tool_name=tool_name, tool_input=tool_input)]
-
     if _STOP_MARKER in response:
         return [ThinkResult(thought=thought, tool_name=None)]
 
     return [ThinkResult(thought=thought, tool_name=None)]
-
-
-# Deprecated — kept for test compat, use _parse_results
-def _parse_response(response: str) -> ThinkResult:
-    return _parse_results(response)[0]
 
 
 class MockAgentKernel(AgentKernel):
@@ -141,6 +120,24 @@ class LLMAgentKernel(AgentKernel):
     def __init__(self, client: LLMClient) -> None:
         self.client = client
 
+    async def _generate_stop_summary(
+        self, messages: list[dict[str, Any]], response: str
+    ) -> str | None:
+        summary_messages = [
+            {"role": "system", "content": "You are a helpful assistant. Summarize the completed task for the user in plain text. Do not use any special format prefixes like ANSWER: or THOUGHT:. Just write naturally."},
+            *messages[1:],
+            {"role": "assistant", "content": response},
+            {"role": "user", "content": "The task is now complete. Based on everything done above, provide a brief final response to the user summarizing what was accomplished. Be concise and helpful. Do not use any tools."},
+        ]
+        try:
+            summary = await self.client.chat(summary_messages, max_tokens=512)
+            summary = summary.removeprefix("ANSWER:").removeprefix("THOUGHT:").strip()
+            _logger.info("[summary] Generated user-facing answer: %s", summary)
+            return summary
+        except Exception as exc:
+            _logger.warning("[summary] Failed to generate: %s", exc)
+            return None
+
     async def think(
         self,
         intent: str,
@@ -148,7 +145,15 @@ class LLMAgentKernel(AgentKernel):
         state: RunState,
         feedback: str | None = None,
     ) -> list[ThinkResult]:
-        system_prompt = build_system_prompt(intent, tool_defs)
+        tool_list = "\n".join(
+            f"- **{td.name}**: {td.description}"
+            + (" (dangerous — requires confirmation)" if td.requires_confirmation else "")
+            for td in tool_defs
+        ) or "(no tools available)"
+        system_prompt = get_prompt(AgentPhase.SERIAL_THINK, intent=intent, tool_list=tool_list)
+        _logger.info("[think] phase=%s len=%d chars intent=%s tools=%d",
+                      AgentPhase.SERIAL_THINK.value, len(system_prompt),
+                      intent[:80], len(tool_defs))
         schemas = build_tool_schemas(tool_defs)
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -198,6 +203,12 @@ class LLMAgentKernel(AgentKernel):
                 content = f"Tool '{item.tool_name}' result ({item.status}): {item.output or item.error}"
                 messages.append({"role": "user", "content": content})
 
+        import json as _json
+        _logger.info("[think] === SERIAL_THINK MESSAGES (%d msgs) ===", len(messages))
+        for _i, _m in enumerate(messages):
+            _logger.info("[think]   msg[%d] role=%s\n%s", _i, _m["role"], _m["content"])
+        _logger.info("[think] === END SERIAL_THINK MESSAGES ===")
+
         response = await self.client.chat(messages, tools=schemas)
         results = _parse_results(response)
 
@@ -209,19 +220,9 @@ class LLMAgentKernel(AgentKernel):
         # Only when explicit stop/answer markers exist (not on format anomalies)
         if len(results) == 1 and results[0].tool_name is None and not results[0].direct_answer and ("<STOP>" in response or "ANSWER:" in response):
             result = results[0]
-            summary_messages = [
-                {"role": "system", "content": "You are a helpful assistant. Summarize the completed task for the user in plain text. Do not use any special format prefixes like ANSWER: or THOUGHT:. Just write naturally."},
-                *messages[1:],
-                {"role": "assistant", "content": response},
-                {"role": "user", "content": "The task is now complete. Based on everything done above, provide a brief final response to the user summarizing what was accomplished. Be concise and helpful. Do not use any tools."},
-            ]
-            try:
-                summary = await self.client.chat(summary_messages, max_tokens=512)
-                summary = summary.removeprefix("ANSWER:").removeprefix("THOUGHT:").strip()
-                _logger.info("[summary] Generated user-facing answer: %s", summary)
+            summary = await self._generate_stop_summary(messages, response)
+            if summary:
                 results[0] = ThinkResult(thought=result.thought, direct_answer=summary)
-            except Exception as exc:
-                _logger.warning("[summary] Failed to generate: %s", exc)
 
         _logger.info("[PARSE] → %d result(s)", len(results))
         return results

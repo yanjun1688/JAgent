@@ -125,7 +125,8 @@ export function formatDuration(ms: number): string {
   return `${min}m ${sec}s`
 }
 
-export function fmt(n: number): string {
+export function fmt(n: number | null | undefined): string {
+  if (n == null) return '-'
   return n.toLocaleString()
 }
 

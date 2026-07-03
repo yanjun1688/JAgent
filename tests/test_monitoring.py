@@ -466,3 +466,213 @@ class TestMonitorLifecycle:
         assert len(store._post_append) == 0
         monitor.attach()
         assert len(store._post_append) == 1
+
+
+# ── P1: DAG_STEP_FAILED with tool_name dedup ────────────────────
+
+
+class TestDagStepFailedDedup:
+    """P1: DAG_STEP_FAILED with tool_name uses same dedup key as TOOL_FAILED."""
+
+    async def _state_feedbacks(self, store, run_id="run-p1-dedup"):
+        events = await store.get_events(run_id)
+        state = fold_events(events)
+        return state.feedbacks
+
+    @pytest.mark.asyncio
+    async def test_dag_step_failed_with_tool_name_does_not_duplicate(self, store: EventStore):
+        """3x TOOL_FAILED + 3x DAG_STEP_FAILED with same tool_name → only 1 feedback."""
+        monitor = RunMonitor(store)
+        monitor.attach()
+        for i in range(3):
+            await _write_event(store, "run-p1-dedup", EventType.TOOL_FAILED, {
+                "tool_call_id": f"t{i}", "tool_name": "browser",
+                "error": "NotImplementedError: Browser action failed",
+                "retryable": False,
+            })
+        fb = await self._state_feedbacks(store)
+        assert len(fb) == 1, f"Expected 1 feedback from TOOL_FAILED, got {len(fb)}"
+        assert fb[0].affected_tool == "browser"
+
+        for i in range(3, 6):
+            await _write_event(store, "run-p1-dedup", EventType.DAG_STEP_FAILED, {
+                "plan_id": "p1", "step_id": f"s{i}",
+                "tool_name": "browser",
+                "error": "NotImplementedError: Browser action failed",
+                "retryable": False,
+            })
+        fb = await self._state_feedbacks(store)
+        assert len(fb) == 1, (
+            f"P1: DAG_STEP_FAILED with tool_name='browser' should dedup against TOOL_FAILED. "
+            f"Got {len(fb)} feedbacks"
+        )
+
+
+# ── P2: Feedback includes actionable suggestion ─────────────────
+
+
+class TestFeedbackSuggestion:
+    """P2: _check_and_inject_feedback includes _generate_suggestion output."""
+
+    async def _last_feedback(self, store, run_id="run-p2-sugg"):
+        events = await store.get_events(run_id)
+        state = fold_events(events)
+        return state.feedbacks[-1] if state.feedbacks else None
+
+    @pytest.mark.asyncio
+    async def test_browser_not_implemented_includes_suggestion(self, store: EventStore):
+        monitor = RunMonitor(store)
+        monitor.attach()
+        for i in range(3):
+            await _write_event(store, "run-p2-sugg", EventType.TOOL_FAILED, {
+                "tool_call_id": f"t{i}", "tool_name": "browser",
+                "error": "NotImplementedError: xyz",
+                "retryable": False,
+            })
+        fb = await self._last_feedback(store)
+        assert fb is not None
+        assert fb.suggestion is not None, f"P2: browser NotImplementedError should have suggestion"
+        assert "http_request" in fb.suggestion
+
+    @pytest.mark.asyncio
+    async def test_unknown_error_type_has_no_suggestion(self, store: EventStore):
+        monitor = RunMonitor(store)
+        monitor.attach()
+        for i in range(3):
+            await _write_event(store, "run-p2-nosugg", EventType.TOOL_FAILED, {
+                "tool_call_id": f"t{i}", "tool_name": "browser",
+                "error": "SomeUnknownError: something",
+                "retryable": False,
+            })
+        fb = await self._last_feedback(store, run_id="run-p2-nosugg")
+        assert fb is not None
+        assert fb.suggestion is None, f"P2: unknown error should have no suggestion"
+
+
+# ── Feedback chain tests: consumed_at_seq + since_seq ────────────
+
+
+class TestGetFeedbackTextSinceSeq:
+    """_get_feedback_text with since_seq parameter filters correctly."""
+
+    @pytest.mark.asyncio
+    async def test_since_seq_filters_old_feedbacks(self, store: EventStore):
+        """Feedbacks injected at or before since_seq should be excluded."""
+        tool_def = ToolDefinition(
+            name="dummy", description="", idempotency_key_fields=[],
+            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(max_retries=0),
+        )
+        kernel = MockAgentKernel([ThinkResult(thought="done")])
+        executor = ToolExecutor(store)
+        # Use low max_tokens to trigger token warning with a small thought
+        monitor = RunMonitor(store, max_tokens=10, token_warning_ratio=0.5)
+        monitor.attach()
+
+        scheduler = AgentLoopScheduler(
+            store=store, executor=executor, kernel=kernel,
+            tool_defs=[tool_def], tool_fns={"dummy": dummy_tool},
+            config=SchedulerConfig(max_iterations=3), monitor=monitor,
+        )
+
+        await store.append_event("run1", EventType.RUN_STARTED, {
+            "intent": "test", "context_snapshot": {},
+        })
+        # Inject feedback A at a specific seq
+        long_thought_a = "word " * 200
+        await store.append_event("run1", EventType.AGENT_THOUGHT, {
+            "thought": long_thought_a, "token_count": 1,
+        })
+
+        events = await store.get_events("run1")
+        state = fold_events(events)
+
+        # since_seq=None returns all unconsumed feedbacks
+        fb_all = scheduler._get_feedback_text(state, since_seq=None)
+        assert fb_all is not None, "Should have feedback without since_seq filter"
+        assert "Token warning" in fb_all
+
+        # since_seq=state.seq should include feedbacks injected at seq > state.seq
+        fb_filtered = scheduler._get_feedback_text(state, since_seq=state.seq)
+        if fb_filtered is not None:
+            assert "Token warning" in fb_filtered
+
+    @pytest.mark.asyncio
+    async def test_consumed_feedback_excluded(self, store: EventStore):
+        """Feedbacks with consumed_at_seq set should be excluded from _get_feedback_text."""
+        tool_def = ToolDefinition(
+            name="dummy", description="", idempotency_key_fields=[],
+            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(max_retries=0),
+        )
+        kernel = MockAgentKernel([ThinkResult(thought="done")])
+        executor = ToolExecutor(store)
+        monitor = RunMonitor(store)
+        monitor.attach()
+
+        scheduler = AgentLoopScheduler(
+            store=store, executor=executor, kernel=kernel,
+            tool_defs=[tool_def], tool_fns={"dummy": dummy_tool},
+            config=SchedulerConfig(max_iterations=3), monitor=monitor,
+        )
+
+        # Simulate: FeedbackInjected → PlanCreated → PlanRevised (which marks consumed)
+        await store.append_event("run1", EventType.RUN_STARTED, {
+            "intent": "test", "context_snapshot": {},
+        })
+        long_thought = "word " * 200
+        await store.append_event("run1", EventType.AGENT_THOUGHT, {
+            "thought": long_thought, "token_count": 1,
+        })
+        # PlanRevised event marks feedbacks as consumed in fold
+        await store.append_event("run1", EventType.PLAN_CREATED, {
+            "plan_id": "p1", "intent": "test",
+            "steps_summary": "1 step", "layer_count": 1,
+        })
+        await store.append_event("run1", EventType.PLAN_REVISED, {
+            "plan_id": "p1", "revision_reason": "step_failure",
+            "remaining_steps_summary": "revised",
+        })
+
+        events = await store.get_events("run1")
+        state = fold_events(events)
+        # All feedbacks should have consumed_at_seq set
+        for fb in state.feedbacks:
+            assert fb.consumed_at_seq is not None, f"Feedback should be consumed after PlanRevised"
+
+        fb_text = scheduler._get_feedback_text(state)
+        assert fb_text is None, (
+            f"Consumed feedbacks should not appear in _get_feedback_text. "
+            f"Got: {fb_text}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_since_seq_none_returns_all_unconsumed(self, store: EventStore):
+        """since_seq=None (default) should return all active unconsumed feedbacks."""
+        tool_def = ToolDefinition(
+            name="dummy", description="", idempotency_key_fields=[],
+            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(max_retries=0),
+        )
+        kernel = MockAgentKernel([ThinkResult(thought="done")])
+        executor = ToolExecutor(store)
+        monitor = RunMonitor(store, max_tokens=10, token_warning_ratio=0.5)
+        monitor.attach()
+
+        scheduler = AgentLoopScheduler(
+            store=store, executor=executor, kernel=kernel,
+            tool_defs=[tool_def], tool_fns={"dummy": dummy_tool},
+            config=SchedulerConfig(max_iterations=3), monitor=monitor,
+        )
+
+        await store.append_event("run1", EventType.RUN_STARTED, {
+            "intent": "test", "context_snapshot": {},
+        })
+        long_thought = "word " * 200
+        await store.append_event("run1", EventType.AGENT_THOUGHT, {
+            "thought": long_thought, "token_count": 1,
+        })
+
+        events = await store.get_events("run1")
+        state = fold_events(events)
+
+        fb_text = scheduler._get_feedback_text(state, since_seq=None)
+        assert fb_text is not None
+        assert "Token warning" in fb_text

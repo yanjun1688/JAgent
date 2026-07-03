@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from harness.models.events import (
     AgentThoughtPayload,
@@ -22,6 +23,7 @@ from harness.models.events import (
     ToolCalledPayload,
     ToolCompletedPayload,
     ToolFailedPayload,
+    ToolResultType,
     ToolTimeoutPayload,
     PlanCreatedPayload,
     PlanCompletedPayload,
@@ -42,6 +44,7 @@ class RunStatus(str, Enum):
 
 class ToolResultStatus(str, Enum):
     COMPLETED = "completed"
+    SOFT_ERROR = "soft_error"
     FAILED = "failed"
     TIMEOUT = "timeout"
     GUARDRAIL_BLOCKED = "guardrail_blocked"
@@ -60,7 +63,7 @@ class ToolResult:
     tool_call_id: str
     tool_name: str
     status: ToolResultStatus
-    output: object = None
+    output: Any = None
     error: str | None = None
     duration_ms: int = 0
     idempotency_key: str | None = None
@@ -134,10 +137,11 @@ def fold_events(events: list[Event]) -> RunState:
                     ToolResult(
                         tool_call_id=p.tool_call_id,
                         tool_name=p.tool_name,
-                        status=ToolResultStatus.COMPLETED,
+                        status=ToolResultStatus.SOFT_ERROR if p.result_type == ToolResultType.SOFT_ERROR else ToolResultStatus.COMPLETED,
                         output=p.output,
                         duration_ms=p.duration_ms,
                         event_seq=event.seq,
+                        error=p.error,
                     )
                 )
 
@@ -238,6 +242,8 @@ def fold_events(events: list[Event]) -> RunState:
 
             case EventType.FEEDBACK_INJECTED:
                 p = FeedbackInjectedPayload(**event.payload)
+                if p.injected_at_seq is None:
+                    p = p.model_copy(update={"injected_at_seq": event.seq})
                 state.feedbacks.append(p)
 
             case EventType.PLAN_CREATED:
@@ -259,14 +265,20 @@ def fold_events(events: list[Event]) -> RunState:
 
             case EventType.DAG_STEP_COMPLETED:
                 p = DagStepCompletedPayload(**event.payload)
+                step_status = p.status if p.status else "completed"
                 if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
                     existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
                     if existing:
-                        existing["status"] = "completed"
+                        existing["status"] = step_status
                         existing["output_summary"] = p.output_summary
+                        if p.error:
+                            existing["error"] = p.error
                     else:
-                        state.latest_plan["steps"].append({"step_id": p.step_id, "status": "completed",
-                                                           "output_summary": p.output_summary})
+                        step_data = {"step_id": p.step_id, "status": step_status,
+                                     "output_summary": p.output_summary}
+                        if p.error:
+                            step_data["error"] = p.error
+                        state.latest_plan["steps"].append(step_data)
 
             case EventType.DAG_STEP_FAILED:
                 p = DagStepFailedPayload(**event.payload)
@@ -280,7 +292,12 @@ def fold_events(events: list[Event]) -> RunState:
 
             case EventType.PLAN_REVISED:
                 p = PlanRevisedPayload(**event.payload)
+                state.feedbacks = [
+                    fb.model_copy(update={"consumed_at_seq": event.seq}) if fb.consumed_at_seq is None else fb
+                    for fb in state.feedbacks
+                ]
                 if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                    state.latest_plan["intent"] = p.intent
                     state.latest_plan["revision_reason"] = p.revision_reason
                     state.latest_plan["remaining_steps_summary"] = p.remaining_steps_summary
 

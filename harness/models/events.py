@@ -32,6 +32,11 @@ class EventType(str, Enum):
     PLAN_FAILED = "PlanFailed"
 
 
+class ToolResultType(str, Enum):
+    SUCCESS = "success"
+    SOFT_ERROR = "soft_error"
+
+
 # ── Payload Models ──────────────────────────────────────────────
 
 
@@ -59,6 +64,8 @@ class ToolCompletedPayload(BaseModel):
     tool_name: str
     output: Any
     duration_ms: int
+    result_type: ToolResultType = ToolResultType.SUCCESS
+    error: str | None = None
 
 
 class ToolFailedPayload(BaseModel):
@@ -165,6 +172,8 @@ class FeedbackInjectedPayload(BaseModel):
     suggestion: str | None = None
     expires_at_seq: int | None = None
     resolves_feedback_id: str | None = None
+    consumed_at_seq: int | None = None
+    injected_at_seq: int | None = None
 
     @staticmethod
     def compute_feedback_id(run_id: str, category: str, field_a: str, field_b: str) -> str:
@@ -192,6 +201,8 @@ class DagStepCompletedPayload(BaseModel):
     plan_id: str
     step_id: str
     output_summary: str = ""
+    status: str = "completed"
+    error: str | None = None
 
 
 class DagStepFailedPayload(BaseModel):
@@ -199,11 +210,13 @@ class DagStepFailedPayload(BaseModel):
     step_id: str
     error: str
     retryable: bool = False
+    tool_name: str = ""
 
 
 class PlanRevisedPayload(BaseModel):
     plan_id: str
     revision_reason: str
+    intent: str = ""
     remaining_steps_summary: str = ""
 
 

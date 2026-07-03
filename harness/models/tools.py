@@ -1,11 +1,24 @@
 """Tool Layer contract models — ToolDefinition, SideEffect, Guardrail, RetryPolicy."""
 
 from enum import Enum
-from typing import Any, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field
 
 JSONSchema: TypeAlias = dict[str, Any]
+
+
+class SuccessIndicator(BaseModel):
+    """Declares how to determine if a tool's output is semantically successful.
+
+    During post-execution evaluation the executor reads ``field`` from the
+    output dict and compares it against ``value`` using ``op``.  When the
+    comparison succeeds the output is considered a semantic success; otherwise
+    it is a SOFT_ERROR (still TOOL_COMPLETED, not TOOL_FAILED).
+    """
+    field: str
+    op: Literal["eq", "ne", "lt", "lte", "gt", "gte", "in"]
+    value: Any
 
 
 class SideEffect(str, Enum):
@@ -45,3 +58,4 @@ class ToolDefinition(BaseModel):
     depends_on: list[DependencyConstraint] = []
     dangerous_with: list[str] = []
     max_parallel: int = 10
+    success_indicator: SuccessIndicator | None = None

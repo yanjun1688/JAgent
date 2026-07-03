@@ -27,6 +27,7 @@ from harness.models.events import (
     ToolCalledPayload,
     ToolCompletedPayload,
     ToolFailedPayload,
+    ToolResultType,
     ToolTimeoutPayload,
 )
 from harness.models.plan import DagPlan, DagStep
@@ -34,6 +35,7 @@ from harness.models.tools import (
     Guardrail,
     RetryPolicy,
     SideEffect,
+    SuccessIndicator,
     ToolDefinition,
 )
 
@@ -68,9 +70,11 @@ __all__ = [
     "ToolCalledPayload",
     "ToolCompletedPayload",
     "ToolFailedPayload",
+    "ToolResultType",
     "ToolTimeoutPayload",
     "Guardrail",
     "RetryPolicy",
     "SideEffect",
+    "SuccessIndicator",
     "ToolDefinition",
 ]

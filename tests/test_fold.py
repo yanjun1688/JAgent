@@ -517,6 +517,61 @@ class TestFoldFeedbackInjected:
         state = fold_events(events)
         assert state.feedbacks == []
 
+    def test_feedback_injected_at_seq_set_by_fold(self):
+        """Fold should set injected_at_seq on FeedbackInjectedPayload from event.seq."""
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.FEEDBACK_INJECTED, {"feedback_text": "first", "priority": "high"}),
+            _event("r1", 5, EventType.FEEDBACK_INJECTED, {"feedback_text": "second", "priority": "medium"}),
+        ]
+        state = fold_events(events)
+        assert len(state.feedbacks) == 2
+        assert state.feedbacks[0].injected_at_seq == 2
+        assert state.feedbacks[1].injected_at_seq == 5
+
+    def test_plan_revised_marks_feedbacks_consumed(self):
+        """PlanRevised should set consumed_at_seq on all unconsumed feedbacks."""
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.FEEDBACK_INJECTED, {"feedback_text": "warning", "priority": "high"}),
+            _event("r1", 3, EventType.FEEDBACK_INJECTED, {"feedback_text": "info", "priority": "low"}),
+            _event("r1", 4, EventType.PLAN_CREATED, {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1}),
+            _event("r1", 5, EventType.PLAN_REVISED, {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"}),
+        ]
+        state = fold_events(events)
+        assert len(state.feedbacks) == 2
+        # Both feedbacks should be marked consumed at seq=5 (the PlanRevised seq)
+        assert state.feedbacks[0].consumed_at_seq == 5
+        assert state.feedbacks[1].consumed_at_seq == 5
+
+    def test_plan_revised_does_not_double_consume(self):
+        """Subsequent PlanRevised should not overwrite consumed_at_seq of already-consumed feedbacks."""
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.FEEDBACK_INJECTED, {"feedback_text": "warning", "priority": "high"}),
+            _event("r1", 3, EventType.PLAN_CREATED, {"plan_id": "p1", "intent": "test", "steps_summary": "1 step", "layer_count": 1}),
+            _event("r1", 4, EventType.PLAN_REVISED, {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"}),
+            _event("r1", 5, EventType.FEEDBACK_INJECTED, {"feedback_text": "new_issue", "priority": "high"}),
+            _event("r1", 6, EventType.PLAN_CREATED, {"plan_id": "p2", "intent": "revised", "steps_summary": "1 step", "layer_count": 1}),
+            _event("r1", 7, EventType.PLAN_REVISED, {"plan_id": "p2", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"}),
+        ]
+        state = fold_events(events)
+        assert len(state.feedbacks) == 2
+        # First feedback consumed at seq=4 (first PlanRevised)
+        assert state.feedbacks[0].consumed_at_seq == 4
+        # Second feedback consumed at seq=7 (second PlanRevised)
+        assert state.feedbacks[1].consumed_at_seq == 7
+
+    def test_feedback_without_plan_revised_not_consumed(self):
+        """Feedbacks without any PlanRevised should have consumed_at_seq=None."""
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.FEEDBACK_INJECTED, {"feedback_text": "warning", "priority": "high"}),
+        ]
+        state = fold_events(events)
+        assert len(state.feedbacks) == 1
+        assert state.feedbacks[0].consumed_at_seq is None
+
 
 class TestFoldContextCompressedPruning:
     """V0.7: ContextCompressed prunes thought_history and tool_results via original_event_refs."""

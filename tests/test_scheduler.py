@@ -1,6 +1,7 @@
 """Integration tests for Agent Loop Scheduler (L3)."""
 
 import asyncio
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -11,6 +12,8 @@ from harness import (
     EventType,
     MockAgentKernel,
     RetryPolicy,
+    StepResult,
+    StepStatus,
     RunStatus,
     SchedulerConfig,
     SideEffect,
@@ -18,6 +21,7 @@ from harness import (
     ToolDefinition,
     ToolExecutor,
 )
+from harness.core.scheduler import BaseScheduler
 from harness.monitoring.run_monitor import RunMonitor
 
 
@@ -291,8 +295,783 @@ async def test_pause_on_confirmation_needed(store: EventStore):
     task.cancel()
     try:
         await task
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, Exception):
         pass
+
+
+# ── State chain fix tests ───────────────────────────────────────
+
+
+class TestDynamicPlanStateChain:
+    """Verify _execute_dynamic_plan uses passed-in state, not internal _refresh_state."""
+
+    @pytest.mark.asyncio
+    async def test_dynamic_plan_uses_passed_state_for_context_manager(self, store: EventStore):
+        """Verify _execute_dynamic_plan uses the passed state.seq for context_manager,
+        not a freshly-refreshed state."""
+        from harness.core.dag_executor import DagExecutor
+        from harness.core.planner import Planner
+        from harness.core.scheduler.plan import PlanningExecutorScheduler
+        from harness.models.plan import DagPlan, DagStep
+        from harness.tools.registry import ToolRegistry
+
+        class _MockLLM:
+            async def chat(self, messages, **kwargs):
+                return "Mock answer"
+
+        executor = ToolExecutor(store)
+        registry = ToolRegistry()
+        dag = DagExecutor(executor, store, registry)
+        planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
+        cm = ContextManager(store, token_limit=10000, compression_threshold_ratio=0.5, checkpoint_interval=1)
+        sched = PlanningExecutorScheduler(
+            store, executor, planner, dag, [], {},
+            context_manager=cm,
+        )
+
+        plan = DagPlan(intent="test", steps=[
+            DagStep(id="s1", tool="echo", input={"msg": "hello"}),
+        ], dynamic=True)
+        planner.plan = AsyncMock(return_value=plan)
+        planner.last_raw_response = "mock"
+
+        # execute_layer succeeds
+        async def _exec(run_id, p, plan_id, layer, layer_idx, layers, all_results):
+            for sid in layer:
+                all_results[sid] = StepResult(step_id=sid, status=StepStatus.COMPLETED, output={})
+            return True
+
+        dag.execute_layer = AsyncMock(side_effect=_exec)
+        dag.build_dag_status_text = Mock(return_value="")
+        planner.revise = AsyncMock(return_value=DagPlan(intent="test", steps=[]))
+        planner.generate_answer = AsyncMock(return_value="Done")
+
+        state = await sched.run("run-chain-1", "test chain")
+        assert state.status == RunStatus.COMPLETED
+        events = await store.get_events("run-chain-1")
+        assert any(e.event_type == EventType.CONTEXT_CHECKPOINTED for e in events), (
+            "Context manager should have checkpointed during dynamic plan execution"
+        )
+
+    @pytest.mark.asyncio
+    async def test_feedback_consumed_after_plan_revised(self, store: EventStore):
+        """After PlanRevised, consumed feedbacks should not appear in next _get_feedback_text."""
+        from harness.core.dag_executor import DagExecutor
+        from harness.core.planner import Planner
+        from harness.core.scheduler.plan import PlanningExecutorScheduler
+        from harness.models.plan import DagPlan, DagStep
+        from harness.tools.registry import ToolRegistry
+
+        class _MockLLM:
+            async def chat(self, messages, **kwargs):
+                return "Mock answer"
+
+        monitor = RunMonitor(store, max_tokens=10, token_warning_ratio=0.5)
+        monitor.attach()
+
+        executor = ToolExecutor(store)
+        registry = ToolRegistry()
+        dag = DagExecutor(executor, store, registry)
+        planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
+        sched = PlanningExecutorScheduler(
+            store, executor, planner, dag, [], {},
+            monitor=monitor,
+        )
+
+        plan = DagPlan(intent="test", steps=[
+            DagStep(id="s1", tool="echo", input={"msg": "hello"}),
+        ])
+        planner.plan = AsyncMock(return_value=plan)
+
+        # First: plan with feedback → execute_layer fails → revise succeeds
+        async def _exec(run_id, p, plan_id, layer, layer_idx, layers, all_results):
+            for sid in layer:
+                all_results[sid] = StepResult(step_id=sid, status=StepStatus.FAILED, error="test fail")
+            return False
+
+        dag.execute_layer = AsyncMock(side_effect=_exec)
+        dag.build_dag_status_text = Mock(return_value="")
+        planner.revise = AsyncMock(return_value=DagPlan(intent="test", steps=[]))
+        planner.generate_answer = AsyncMock(return_value="Done")
+        planner.last_raw_response = "mock"
+
+        # Pre-inject a feedback by triggering token warning via a long thought
+        await store.append_event("run-chain-2", EventType.RUN_STARTED, {
+            "intent": "test", "context_snapshot": {},
+        })
+        await store.append_event("run-chain-2", EventType.AGENT_THOUGHT, {
+            "thought": "word " * 200, "token_count": 1,
+        })
+
+        # Verify feedback is in store before scheduler runs
+        pre_events = await store.get_events("run-chain-2")
+        from harness.core.fold import fold_events
+        pre_state = fold_events(pre_events)
+        initial_fb_count = len(pre_state.feedbacks)
+        assert initial_fb_count >= 1, "Should have token warning feedback before scheduler runs"
+
+        # Now run scheduler — it will use the existing events and produce PlanRevised
+        # which should mark the feedback as consumed
+        state = await sched.run("run-chain-2", "test chain")
+        # Should have completed (empty plan after revise)
+        assert state.status in (RunStatus.COMPLETED, RunStatus.FAILED)
+
+        final_events = await store.get_events("run-chain-2")
+        final_state = fold_events(final_events)
+
+        # Check that PlanRevised was written
+        assert any(e.event_type == EventType.PLAN_REVISED for e in final_events), (
+            f"Expected PLAN_REVISED in events: {[e.event_type.value for e in final_events]}"
+        )
+
+        # After PlanRevised, all feedbacks should be consumed
+        for fb in final_state.feedbacks:
+            assert fb.consumed_at_seq is not None, (
+                f"All feedbacks should have consumed_at_seq after PlanRevised. "
+                f"Feedback '{fb.feedback_text}' has consumed_at_seq={fb.consumed_at_seq}"
+            )
+
+
+
+# ── 3.x CRITICAL bug regression tests ────────────────────────────
+
+
+class TestStaticPlanUnboundLocalError:
+    """Verify fix: PlanSuspended on layer 0 with failures does NOT raise UnboundLocalError."""
+
+    @pytest.mark.asyncio
+    async def test_confirmation_and_failure_in_first_layer(self, store: EventStore):
+        """PlanSuspended + layer_failures non-empty → ok = False assigned → no UnboundLocalError.
+
+        Trigger: DAG layer 0 has steps [s1(confirm), s2(failed)].
+        execute_layer raises PlanSuspended (s1 needs confirmation).
+        s2 already failed in dag_executor (DAG_STEP_FAILED written, result stored).
+        After confirmations, layer_failures = [s2] → ok was never assigned
+        → bug triggered UnboundLocalError. Fix sets ok = False.
+        """
+        from harness.core.dag_executor import DagExecutor, PlanSuspended
+        from harness.core.planner import Planner
+        from harness.core.scheduler.plan import PlanningExecutorScheduler
+        from harness.models.plan import DagPlan, DagStep
+        from harness.tools.registry import ToolRegistry
+
+        class _MockLLM:
+            async def chat(self, messages, **kwargs):
+                return "Mock answer"
+
+        executor = ToolExecutor(store)
+        registry = ToolRegistry()
+        dag = DagExecutor(executor, store, registry)
+        planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
+        sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {})
+        sched.config.pause_timeout_ms = 999999
+
+        plan = DagPlan(intent="test", steps=[
+            DagStep(id="s1", tool="echo", input={"msg": "a"}),
+            DagStep(id="s2", tool="echo", input={"msg": "b"}),
+        ])
+        planner.plan = AsyncMock(return_value=plan)
+        planner.generate_answer = AsyncMock(return_value="Done")
+        planner.last_raw_response = "mock"
+
+        # execute_layer raises PlanSuspended (s1 needs confirmation)
+        # s2 result is already written as failed by dag_executor internals
+        # We simulate: the exception is raised, and s2 is already in results as failed
+        async def _exec(run_id, plan, plan_id, layer, layer_idx, layers, all_results):
+            all_results["s2"] = StepResult(step_id="s2", status=StepStatus.FAILED, error="fail")
+            raise PlanSuspended(confirmations=[("s1", "cid-1")])
+
+        dag.execute_layer = AsyncMock(side_effect=_exec)
+        dag.build_dag_status_text = Mock(return_value="")
+
+        # retry_step: first call needs_confirmation, second call completed
+        retry_calls = 0
+
+        async def _retry(run_id, plan, step_id, results):
+            nonlocal retry_calls
+            retry_calls += 1
+            if retry_calls == 1:
+                return StepResult(step_id=step_id, status=StepStatus.CONFIRMATION_NEEDED,
+                                  confirmation_id="cid-1")
+            return StepResult(step_id=step_id, status=StepStatus.COMPLETED, output={})
+
+        dag.retry_step = AsyncMock(side_effect=_retry)
+
+        # Run in background — resume to progress through confirmations
+        run_id = "run-unbound"
+        task = asyncio.create_task(sched.run(run_id, "test"))
+        await asyncio.sleep(0.2)
+
+        # Resume to complete the confirmation
+        await sched.resume(run_id)
+        await asyncio.sleep(0.1)
+        await sched.resume(run_id)  # second resume for the second confirmation retry
+        await asyncio.sleep(0.2)
+
+        try:
+            state = await asyncio.wait_for(task, timeout=3.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            state = None
+
+        # The point: no UnboundLocalError was raised.
+        # If the bug were still present, the task would have crashed.
+        events = await store.get_events(run_id)
+        assert any(e.event_type == EventType.PLAN_REVISED for e in events) or \
+               any(e.event_type == EventType.RUN_FAILED for e in events), \
+               "Expected PLAN_REVISED or RUN_FAILED (confirm → layer failure → revise/fallback)"
+
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+class TestMaxIterationsPlanningExecutor:
+    """Verify max_iterations is enforced for PlanningExecutorScheduler."""
+
+    @pytest.mark.asyncio
+    async def test_max_iterations_enforced(self, store: EventStore):
+        """With max_iterations=2 and infinite revisit, should fail with exceeded."""
+        from harness.core.dag_executor import DagExecutor
+        from harness.core.planner import Planner
+        from harness.core.scheduler.plan import PlanningExecutorScheduler
+        from harness.models.plan import DagPlan, DagStep
+        from harness.tools.registry import ToolRegistry
+
+        class _MockLLM:
+            async def chat(self, messages, **kwargs):
+                return "Mock answer"
+
+        executor = ToolExecutor(store)
+        registry = ToolRegistry()
+        dag = DagExecutor(executor, store, registry)
+        planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
+        config = SchedulerConfig(max_iterations=2)
+        sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=config)
+
+        # plan always returns steps → not empty → loop continues
+        plan = DagPlan(intent="test", steps=[DagStep(id="s1", tool="echo", input={})])
+        planner.plan = AsyncMock(return_value=plan)
+        planner.last_raw_response = "mock"
+
+        # execute_layer always fails → triggers revise → revise returns new plan → loop
+        async def _exec(run_id, plan, plan_id, layer, layer_idx, layers, all_results):
+            for sid in layer:
+                all_results[sid] = StepResult(step_id=sid, status=StepStatus.FAILED, error="fail")
+            return False
+
+        dag.execute_layer = AsyncMock(side_effect=_exec)
+        dag.build_dag_status_text = Mock(return_value="")
+        planner.revise = AsyncMock(return_value=plan)  # same plan → loop continues
+
+        state = await sched.run("run-max-iters", "test")
+        assert state.status == RunStatus.FAILED
+        err = (state.last_error or "").lower()
+        assert "max iterations" in err or "self-heal exceeded" in err
+
+
+class TestCancelDuringDagConfirmation:
+    """Verify cancel during DAG confirmation loop terminates quickly."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_static_confirmation_loop(self, store: EventStore):
+        """Cancel during DAG static confirmation loop → immediate termination."""
+        from harness.core.dag_executor import DagExecutor, PlanSuspended
+        from harness.core.planner import Planner
+        from harness.core.scheduler.plan import PlanningExecutorScheduler
+        from harness.models.plan import DagPlan, DagStep
+        from harness.tools.registry import ToolRegistry
+
+        class _MockLLM:
+            async def chat(self, messages, **kwargs):
+                return "Mock answer"
+
+        executor = ToolExecutor(store)
+        registry = ToolRegistry()
+        dag = DagExecutor(executor, store, registry)
+        planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
+        sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {})
+        sched.config.pause_timeout_ms = 999999
+
+        plan = DagPlan(intent="test", steps=[DagStep(id="s1", tool="echo", input={})])
+        planner.plan = AsyncMock(return_value=plan)
+        planner.last_raw_response = "mock"
+
+        # execute_layer raises PlanSuspended, enters confirmation loop
+        dag.execute_layer = AsyncMock(
+            side_effect=PlanSuspended(confirmations=[("s1", "cid-1")])
+        )
+        dag.build_dag_status_text = Mock(return_value="")
+
+        # retry_step keeps returning confirmation_needed (infinite loop without cancel)
+        dag.retry_step = AsyncMock(return_value=StepResult(
+            step_id="s1", status=StepStatus.CONFIRMATION_NEEDED, confirmation_id="cid-1",
+        ))
+
+        run_id = "run-cancel-dag-confirm"
+        task = asyncio.create_task(sched.run(run_id, "test"))
+        await asyncio.sleep(0.2)
+
+        # Now cancel — should terminate the confirmation loop
+        await sched.cancel(run_id)
+        await asyncio.sleep(0.3)
+
+        events = await store.get_events(run_id)
+        assert any(e.event_type == EventType.RUN_FAILED for e in events), (
+            f"Expected RUN_FAILED after cancel, got: {[e.event_type.value for e in events]}"
+        )
+
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+class TestPlanningExecutorScheduler:
+    """Problem 2: basic tests for PlanningExecutorScheduler (DAG path)."""
+
+    @pytest.mark.asyncio
+    async def test_is_subclass_of_base_scheduler(self):
+        from harness.core.scheduler import BaseScheduler, PlanningExecutorScheduler
+        assert issubclass(PlanningExecutorScheduler, BaseScheduler)
+
+    @pytest.mark.asyncio
+    async def test_instantiation_and_dag_fields(self, store: EventStore):
+        """Smoke test: PlanningExecutorScheduler can be created with all deps."""
+        from harness.core.dag_executor import DagExecutor
+        from harness.core.planner import Planner
+        from harness.core.scheduler.plan import PlanningExecutorScheduler
+        from harness.tools.registry import ToolRegistry
+
+        class _MockLLM:
+            async def chat(self, messages, **kwargs):
+                return "Mock answer"
+
+        executor = ToolExecutor(store)
+        registry = ToolRegistry()
+        dag_executor = DagExecutor(executor, store, registry)
+        planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
+        scheduler = PlanningExecutorScheduler(
+            store, executor, planner, dag_executor, [], {},
+        )
+
+        assert scheduler.planner is planner
+        assert scheduler.dag_executor is dag_executor
+
+    @pytest.mark.asyncio
+    async def test_confirm_retries_configured_for_dag_path(self, store: EventStore):
+        """Verify max_confirm_retries is accessible for DAG scheduler."""
+        from harness.core.dag_executor import DagExecutor
+        from harness.core.planner import Planner
+        from harness.core.scheduler.plan import PlanningExecutorScheduler
+        from harness.tools.registry import ToolRegistry
+
+        class _MockLLM:
+            async def chat(self, messages, **kwargs):
+                return "Mock answer"
+
+        executor = ToolExecutor(store)
+        registry = ToolRegistry()
+        dag_executor = DagExecutor(executor, store, registry)
+        planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
+        config = SchedulerConfig(max_confirm_retries=3)
+        scheduler = PlanningExecutorScheduler(
+            store, executor, planner, dag_executor, [], {}, config=config,
+        )
+
+        assert scheduler.config.max_confirm_retries == 3
+
+
+class TestPlanningExecutorSchedulerExecution:
+    """Execution tests for PlanningExecutorScheduler DAG self-heal loop."""
+
+    # ── helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_env(store: EventStore):
+        """Create a minimal PlanningExecutorScheduler with mock-friendly deps."""
+        from harness.core.dag_executor import DagExecutor
+        from harness.core.planner import Planner
+        from harness.core.scheduler.plan import PlanningExecutorScheduler
+        from harness.tools.registry import ToolRegistry
+
+        class _MockLLM:
+            async def chat(self, messages, **kwargs):
+                return "yes"  # must contain "yes" for classifier to pass
+
+        executor = ToolExecutor(store)
+        registry = ToolRegistry()
+        dag = DagExecutor(executor, store, registry)
+        planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
+        sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {})
+        return sched, planner, dag
+
+    @staticmethod
+    def _plan(*, step_ids: list[str] | None = None, dynamic: bool = False):
+        """Build a DagPlan with one-layer independent steps."""
+        from harness.models.plan import DagPlan, DagStep
+
+        ids = step_ids if step_ids is not None else ["s1"]
+        steps = [DagStep(id=sid, tool="echo", input={"msg": sid}) for sid in ids]
+        return DagPlan(intent="test", steps=steps, dynamic=dynamic)
+
+    @staticmethod
+    def _mock_exec_layer(*, succeed: bool = True):
+        """Return an AsyncMock for execute_layer that populates results."""
+        async def _execute(run_id, plan, plan_id, layer, layer_idx, layers, all_results):
+            for sid in layer:
+                all_results[sid] = StepResult(
+                    step_id=sid,
+                    status=StepStatus.COMPLETED if succeed else StepStatus.FAILED,
+                    output={},
+                )
+            return succeed
+        return AsyncMock(side_effect=_execute)
+
+    # ── 1. All layers succeed ────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_static_all_layers_succeed(self, store: EventStore):
+        """DAG path: all layers complete successfully → RUN_COMPLETED."""
+        sched, planner, dag = self._make_env(store)
+
+        planner.plan = AsyncMock(return_value=self._plan(step_ids=["s1", "s2"]))
+        planner.generate_answer = AsyncMock(return_value="Done")
+        planner.last_raw_response = "mock plan response"
+        dag.execute_layer = self._mock_exec_layer(succeed=True)
+        dag.build_dag_status_text = Mock(return_value="")
+
+        planner.revise = AsyncMock()  # track if ever called
+
+        state = await sched.run("run-all-ok", "test")
+        events = await store.get_events("run-all-ok")
+
+        assert state.status == RunStatus.COMPLETED
+        assert any(e.event_type == EventType.PLAN_CREATED for e in events)
+        assert any(e.event_type == EventType.PLAN_COMPLETED for e in events)
+        assert any(e.event_type == EventType.RUN_COMPLETED for e in events)
+        # No PLAN_REVISED — all-ok revise was removed
+        assert not any(e.event_type == EventType.PLAN_REVISED for e in events)
+        # planner.revise should never be called
+        planner.revise.assert_not_called()
+
+    # ── 2. Layer fails → revise returns steps → self-heal continues ──
+
+    @pytest.mark.asyncio
+    async def test_layer_fails_revise_continues(self, store: EventStore):
+        """Self-heal: layer fails → revise returns remaing steps → while-loop re-executes → COMPLETED."""
+        sched, planner, dag = self._make_env(store)
+
+        initial_plan = self._plan(step_ids=["s1", "s2"])
+        revised_plan = self._plan(step_ids=["s2_retry"])
+
+        planner.plan = AsyncMock(return_value=initial_plan)
+        planner.generate_answer = AsyncMock(return_value="Done")
+        planner.last_raw_response = "mock plan response"
+
+        # First call fails, second call (with revised plan) succeeds
+        exec_call_count = 0
+
+        async def _exec_side(run_id, plan, plan_id, layer, layer_idx, layers, all_results):
+            nonlocal exec_call_count
+            exec_call_count += 1
+            if exec_call_count == 1:
+                for sid in layer:
+                    all_results[sid] = {"status": "failed", "output": {}}
+                return False  # fail → trigger revise
+            # Second call with revised plan
+            for sid in layer:
+                all_results[sid] = {"status": "completed", "output": {}}
+            return True
+
+        dag.execute_layer = AsyncMock(side_effect=_exec_side)
+        dag.build_dag_status_text = Mock(return_value="")
+
+        # revise returns a new plan with remaining steps
+        planner.revise = AsyncMock(return_value=revised_plan)
+
+        state = await sched.run("run-heal", "test")
+        events = await store.get_events("run-heal")
+
+        assert state.status == RunStatus.COMPLETED
+        # Two PLAN_CREATED events: one for initial, one for revised plan
+        created = [e for e in events if e.event_type == EventType.PLAN_CREATED]
+        assert len(created) == 2
+        # One PLAN_REVISED before the self-heal restart
+        assert len([e for e in events if e.event_type == EventType.PLAN_REVISED]) >= 1
+        # One PLAN_COMPLETED
+        assert any(e.event_type == EventType.PLAN_COMPLETED for e in events)
+        assert any(e.event_type == EventType.RUN_COMPLETED for e in events)
+        planner.revise.assert_awaited_once()
+
+    # ── 3. Layer fails → revise returns empty → complete ─────────────
+
+    @pytest.mark.asyncio
+    async def test_layer_fails_revise_empty_completes(self, store: EventStore):
+        """Layer fails → revise says no steps left → finalize → COMPLETED."""
+        sched, planner, dag = self._make_env(store)
+
+        planner.plan = AsyncMock(return_value=self._plan(step_ids=["s1"]))
+        planner.generate_answer = AsyncMock(return_value="Done")
+        planner.last_raw_response = "mock"
+
+        dag.execute_layer = self._mock_exec_layer(succeed=False)
+        dag.build_dag_status_text = Mock(return_value="")
+
+        planner.revise = AsyncMock(return_value=self._plan(step_ids=[]))  # no steps = done
+
+        state = await sched.run("run-empty-revise", "test")
+        events = await store.get_events("run-empty-revise")
+
+        assert state.status == RunStatus.COMPLETED
+        assert any(e.event_type == EventType.PLAN_CREATED for e in events)
+        assert any(e.event_type == EventType.PLAN_REVISED for e in events)
+        assert any(e.event_type == EventType.RUN_COMPLETED for e in events)
+
+    # ── 4. Layer fails → revise returns None → _fail ─────────────────
+
+    @pytest.mark.asyncio
+    async def test_layer_fails_revise_none_fails(self, store: EventStore):
+        """Layer fails → revise fails (None) → RUN_FAILED."""
+        sched, planner, dag = self._make_env(store)
+
+        planner.plan = AsyncMock(return_value=self._plan(step_ids=["s1"]))
+        planner.last_raw_response = "mock"
+
+        dag.execute_layer = self._mock_exec_layer(succeed=False)
+        dag.build_dag_status_text = Mock(return_value="")
+        planner.revise = AsyncMock(return_value=None)
+
+        state = await sched.run("run-revise-none", "test")
+        events = await store.get_events("run-revise-none")
+
+        assert state.status == RunStatus.FAILED
+        # Should write RUN_FAILED
+        assert any(e.event_type == EventType.RUN_FAILED for e in events)
+
+    # ── 5. Cancel during DAG execution ───────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_dag_execution(self, store: EventStore):
+        """Cancel during DAG execution → RUN_FAILED."""
+        from harness.models.plan import DagPlan, DagStep
+
+        sched, planner, dag = self._make_env(store)
+
+        # Plan with 2 dependent steps → 2 layers: [s1], [s2]
+        plan = DagPlan(intent="test", steps=[
+            DagStep(id="s1", tool="echo", input={"msg": "a"}),
+            DagStep(id="s2", tool="echo", input={"msg": "b"}, depends_on=["s1"]),
+        ])
+        planner.plan = AsyncMock(return_value=plan)
+        planner.last_raw_response = "mock"
+
+        # execute_layer: first layer slow, second layer fast
+        # Call cancel during first layer → it's detected at second layer check
+        started = asyncio.Event()
+
+        async def _exec(run_id, plan, plan_id, layer, layer_idx, layers, all_results):
+            for sid in layer:
+                all_results[sid] = {"status": "completed", "output": {}}
+            if layer_idx == 0:
+                started.set()
+                await asyncio.sleep(0.3)  # slow enough for cancel to be called
+            return True
+
+        dag.execute_layer = AsyncMock(side_effect=_exec)
+
+        run_id = "run-cancel-dag"
+        task = asyncio.create_task(sched.run(run_id, "test"))
+
+        await started.wait()
+        await asyncio.sleep(0.05)
+        await sched.cancel(run_id)
+
+        # Wait for task to finish (cancel flag detected at layer 1 entry → _fail)
+        try:
+            state = await asyncio.wait_for(task, timeout=3.0)
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        events = await store.get_events(run_id)
+        assert any(e.event_type == EventType.RUN_FAILED for e in events)
+
+    # ── 6. Confirmation retries exceeded in DAG path ─────────────────
+
+    @pytest.mark.asyncio
+    async def test_dag_confirmation_retries_exceeded(self, store: EventStore):
+        """DAG confirmation loop: max_confirm_retries exceeded → RUN_FAILED."""
+        from harness.core.dag_executor import PlanSuspended
+
+        sched, planner, dag = self._make_env(store)
+        sched.config = SchedulerConfig(max_confirm_retries=2, pause_timeout_ms=999999)
+
+        planner.plan = AsyncMock(return_value=self._plan(step_ids=["s1"]))
+        planner.last_raw_response = "mock"
+
+        # execute_layer raises PlanSuspended
+        dag.execute_layer = AsyncMock(side_effect=PlanSuspended(
+            confirmations=[("s1", "cid-1")],
+        ))
+        dag.build_dag_status_text = Mock(return_value="")
+
+        # retry_step keeps returning confirmation_needed
+        dag.retry_step = AsyncMock(return_value=StepResult(
+            step_id="s1", status=StepStatus.CONFIRMATION_NEEDED, confirmation_id="cid-1",
+        ))
+
+        run_id = "run-confirm-exceed"
+        task = asyncio.create_task(sched.run(run_id, "test"))
+        await asyncio.sleep(0.3)
+
+        # Resume 3 times — exceeds max_confirm_retries=2
+        for _ in range(3):
+            await sched.resume(run_id)
+            await asyncio.sleep(0.05)
+
+        await asyncio.sleep(0.5)
+
+        events = await store.get_events(run_id)
+        assert any(e.event_type == EventType.RUN_FAILED for e in events), (
+            f"Expected RUN_FAILED, got: {[e.event_type.value for e in events]}"
+        )
+
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # ── Bug 4: SOFT_ERROR should trigger revise ───────────────────────
+
+    @pytest.mark.asyncio
+    async def test_soft_error_triggers_revise(self, store: EventStore):
+        """Bug 4: SOFT_ERROR steps must trigger a revise even when layer returns True."""
+        sched, planner, dag = self._make_env(store)
+
+        planner.plan = AsyncMock(return_value=self._plan(step_ids=["s1", "s2"]))
+        planner.generate_answer = AsyncMock(return_value="Done")
+        planner.last_raw_response = "mock plan response"
+
+        async def _exec_with_soft_error(run_id, plan, plan_id, layer, layer_idx, layers, all_results):
+            for sid in layer:
+                all_results[sid] = StepResult(
+                    step_id=sid,
+                    status=StepStatus.SOFT_ERROR if sid == "s2" else StepStatus.COMPLETED,
+                    output={"success": True} if sid == "s1" else {"success": False},
+                    error="soft error" if sid == "s2" else None,
+                )
+            return True  # layer "succeeds" — SOFT_ERROR is not a hard failure
+
+        dag.execute_layer = AsyncMock(side_effect=_exec_with_soft_error)
+        dag.build_dag_status_text = Mock(return_value="")
+
+        planner.revise = AsyncMock(return_value=self._plan(step_ids=[]))
+
+        state = await sched.run("run-soft-error-revise", "test")
+        events = await store.get_events("run-soft-error-revise")
+
+        assert state.status == RunStatus.COMPLETED
+        planner.revise.assert_awaited_once()
+        assert any(e.event_type == EventType.PLAN_REVISED for e in events), (
+            "Bug 4: SOFT_ERROR should trigger a revise, writing PLAN_REVISED"
+        )
+        revised = [e for e in events if e.event_type == EventType.PLAN_REVISED]
+        assert any("soft_error" in (e.payload.get("revision_reason", "") or "") for e in revised), (
+            "Bug 4: PLAN_REVISED reason should indicate it was triggered by soft_error"
+        )
+
+
+class TestBoundaryCases:
+    """Problem 4: boundary tests for BaseScheduler methods."""
+
+    @pytest.mark.asyncio
+    async def test_run_reentry_raises_runtime_error(self, store: EventStore):
+        async def slow_fn(input):
+            await asyncio.sleep(0.5)
+            return {"ok": True}
+
+        tool_def = ToolDefinition(
+            name="slow", description="Slow", idempotency_key_fields=[],
+            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(),
+        )
+        kernel = MockAgentKernel([ThinkResult(thought="Slow work", tool_name="slow", tool_input={})])
+        executor = ToolExecutor(store)
+        scheduler = AgentLoopScheduler(store, executor, kernel, [tool_def], {"slow": slow_fn})
+        run_id = "run-reentry"
+
+        task = asyncio.create_task(scheduler.run(run_id, "Reentry test"))
+        await asyncio.sleep(0.05)
+        try:
+            with pytest.raises(RuntimeError, match="already running"):
+                await scheduler.run(run_id, "Duplicate")
+        finally:
+            await scheduler.cancel(run_id)
+            await asyncio.sleep(0.1)
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_is_paused_on_pending_confirmation(self, store: EventStore):
+        dangerous_def = ToolDefinition(
+            name="delete_file", description="Delete",
+            idempotency_key_fields=["path"], side_effects=[SideEffect.DELETE],
+            requires_confirmation=True, timeout_ms=5000, retry_policy=RetryPolicy(),
+        )
+        kernel = MockAgentKernel(
+            [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
+        )
+        executor = ToolExecutor(store)
+        scheduler = AgentLoopScheduler(
+            store, executor, kernel, [dangerous_def], {"delete_file": lambda i: {"deleted": i["path"]}},
+            config=SchedulerConfig(pause_timeout_ms=999999),
+        )
+        run_id = "run-is-paused"
+        task = asyncio.create_task(scheduler.run(run_id, "Is paused test"))
+        await asyncio.sleep(0.3)
+
+        # Confirmation wait uses _confirm_events, is_paused checks _pause_events
+        # So is_paused should be False for confirmation (they're separate now)
+        assert scheduler.is_paused(run_id) is False
+
+        await scheduler.cancel(run_id)
+        task.cancel()
+        await asyncio.sleep(0.1)
+
+    @pytest.mark.asyncio
+    async def test_cancel_terminates_confirmation_loop(self, store: EventStore):
+        dangerous_def = ToolDefinition(
+            name="delete_file", description="Delete",
+            idempotency_key_fields=["path"], side_effects=[SideEffect.DELETE],
+            requires_confirmation=True, timeout_ms=5000, retry_policy=RetryPolicy(),
+        )
+        kernel = MockAgentKernel(
+            [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
+        )
+        executor = ToolExecutor(store)
+        scheduler = AgentLoopScheduler(
+            store, executor, kernel, [dangerous_def], {"delete_file": lambda i: {"deleted": i["path"]}},
+            config=SchedulerConfig(pause_timeout_ms=999999),
+        )
+        run_id = "run-cancel-confirm"
+        task = asyncio.create_task(scheduler.run(run_id, "Cancel confirm test"))
+        await asyncio.sleep(0.3)
+
+        await scheduler.cancel(run_id)
+        await asyncio.sleep(0.3)
+
+        # After cancel, the run should be done (or cancelled)
+        assert task.done() or task.cancelled()
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 @pytest.mark.asyncio
@@ -405,8 +1184,8 @@ async def test_timeout_race_concurrent_resume_and_fail(store: EventStore):
 
     task.cancel()
     try:
-        await task
-    except (asyncio.CancelledError, Exception):
+        await asyncio.wait_for(task, timeout=2.0)
+    except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
         pass
 
     events = await store.get_events(run_id)
@@ -791,3 +1570,160 @@ class TestInheritanceFromBaseScheduler:
         executor = ToolExecutor(store)
         s = AgentLoopScheduler(store, executor, kernel, [], {})
         assert s.is_active("nonexistent") is False
+
+
+class TestSeparatePauseConfirmEvents:
+    """CT-2: _handle_pause and _wait_for_resume should use separate asyncio.Events."""
+
+    @pytest.mark.asyncio
+    async def test_separate_event_dicts_exist(self, store: EventStore):
+        kernel = MockAgentKernel([ThinkResult(thought="done")])
+        executor = ToolExecutor(store)
+        s = AgentLoopScheduler(store, executor, kernel, [], {})
+        assert hasattr(s, "_confirm_events")
+        assert s._confirm_events is not s._pause_events
+
+    @pytest.mark.asyncio
+    async def test_cancel_sets_both_events(self, store: EventStore):
+        dangerous_def = ToolDefinition(
+            name="delete_file", description="Delete",
+            idempotency_key_fields=["path"], side_effects=[SideEffect.DELETE],
+            requires_confirmation=True, timeout_ms=5000, retry_policy=RetryPolicy(),
+        )
+        kernel = MockAgentKernel(
+            [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
+        )
+        executor = ToolExecutor(store)
+        scheduler = AgentLoopScheduler(
+            store, executor, kernel, [dangerous_def], {"delete_file": lambda i: {"deleted": i["path"]}},
+            config=SchedulerConfig(pause_timeout_ms=999999),
+        )
+        run_id = "run-ct2-cancel"
+        task = asyncio.create_task(scheduler.run(run_id, "CT-2 cancel test"))
+        await asyncio.sleep(0.3)
+
+        await scheduler.cancel(run_id)
+        assert scheduler._cancel_flags.get(run_id).is_set()
+        assert scheduler._confirm_events.get(run_id).is_set()
+        task.cancel()
+        await asyncio.sleep(0.1)
+
+
+class TestConfirmRetryLimit:
+    """CT-4/5: confirmation loops should have a max retry limit."""
+
+    def test_scheduler_config_has_max_confirm_retries(self):
+        config = SchedulerConfig(max_confirm_retries=5)
+        assert config.max_confirm_retries == 5
+
+    def test_max_confirm_retries_default(self):
+        config = SchedulerConfig()
+        assert config.max_confirm_retries > 0
+
+    @pytest.mark.asyncio
+    async def test_confirm_retry_limit_exceeded(self, store: EventStore):
+        """After max_confirm_retries, the loop should fail the run."""
+        dangerous_def = ToolDefinition(
+            name="delete_file", description="Delete",
+            idempotency_key_fields=["path"], side_effects=[SideEffect.DELETE],
+            requires_confirmation=True, timeout_ms=5000, retry_policy=RetryPolicy(),
+        )
+        kernel = MockAgentKernel(
+            [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
+        )
+        executor = ToolExecutor(store)
+        config = SchedulerConfig(max_confirm_retries=2, pause_timeout_ms=999999)
+        scheduler = AgentLoopScheduler(
+            store, executor, kernel, [dangerous_def], {"delete_file": lambda i: {"deleted": i["path"]}},
+            config=config,
+        )
+        run_id = "run-ct4"
+        task = asyncio.create_task(scheduler.run(run_id, "CT-4 test"))
+        await asyncio.sleep(0.3)
+
+        # Simulate calling resume 3 times (exceeds limit of 2)
+        for _ in range(3):
+            await scheduler.resume(run_id)
+            await asyncio.sleep(0.1)
+
+        events = await store.get_events(run_id)
+        # Should have RUN_FAILED due to max_confirm_retries exceeded
+        assert EventType.RUN_FAILED in [e.event_type for e in events]
+
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+class TestFailCancelsTask:
+    """CT-6: _fail() should cancel the running asyncio.Task."""
+
+    @pytest.mark.asyncio
+    async def test_fail_cancels_running_task(self, store: EventStore):
+        dangerous_def = ToolDefinition(
+            name="delete_file", description="Delete",
+            idempotency_key_fields=["path"], side_effects=[SideEffect.DELETE],
+            requires_confirmation=True, timeout_ms=5000, retry_policy=RetryPolicy(),
+        )
+        kernel = MockAgentKernel(
+            [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
+        )
+        executor = ToolExecutor(store)
+        scheduler = AgentLoopScheduler(
+            store, executor, kernel, [dangerous_def], {"delete_file": lambda i: {"deleted": i["path"]}},
+        )
+        run_id = "run-ct6"
+        task = asyncio.create_task(scheduler.run(run_id, "CT-6 test"))
+        await asyncio.sleep(0.3)
+
+        assert run_id in scheduler._running_tasks
+        await scheduler._fail(run_id, "Forced fail")
+
+        await asyncio.sleep(0.1)
+        assert task.cancelled() or task.done()
+
+
+class TestSeparateTimeoutConfigs:
+    """CT-7/8: confirmation timeout and pause timeout should be independently configurable."""
+    
+    def test_confirm_timeout_separate_from_pause_timeout(self):
+        config = SchedulerConfig(confirm_timeout_ms=5000, pause_timeout_ms=30000)
+        assert config.confirm_timeout_ms == 5000
+        assert config.pause_timeout_ms == 30000
+
+    def test_confirm_timeout_defaults_to_pause_timeout(self):
+        config = SchedulerConfig(pause_timeout_ms=30000)
+        assert config.confirm_timeout_ms == 30000
+
+    @pytest.mark.asyncio
+    async def test_confirm_timeout_uses_confirm_config(self, store: EventStore):
+        dangerous_def = ToolDefinition(
+            name="delete_file", description="Delete",
+            idempotency_key_fields=["path"], side_effects=[SideEffect.DELETE],
+            requires_confirmation=True, timeout_ms=5000, retry_policy=RetryPolicy(),
+        )
+        kernel = MockAgentKernel(
+            [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
+        )
+        executor = ToolExecutor(store)
+        # Short confirm timeout, long pause timeout
+        config = SchedulerConfig(confirm_timeout_ms=100, pause_timeout_ms=999999)
+        scheduler = AgentLoopScheduler(
+            store, executor, kernel, [dangerous_def], {"delete_file": lambda i: {"deleted": i["path"]}},
+            config=config,
+        )
+        run_id = "run-ct7"
+        task = asyncio.create_task(scheduler.run(run_id, "CT-7 test"))
+        await asyncio.sleep(1.0)  # wait longer than confirm_timeout_ms but shorter than pause_timeout_ms
+
+        events = await store.get_events(run_id)
+        # Should have RUN_FAILED due to confirmation timeout (100ms)
+        assert EventType.RUN_FAILED in [e.event_type for e in events]
+
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass

@@ -2,11 +2,17 @@
 
 import pytest
 
-from harness.core.agent_kernel import MockAgentKernel, _parse_response, _parse_results
+from harness.core.agent_kernel import MockAgentKernel, LLMAgentKernel, _parse_results
+from harness.core.fold import RunState
 from harness.core.llm_client import MockLLMClient
 from harness.core.scheduler import ThinkResult
-from harness.core.system_prompt import build_system_prompt, build_tool_schemas
+from harness.core.system_prompt import AgentPhase, build_tool_schemas, get_prompt
 from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
+
+
+def _parse_single(response: str) -> ThinkResult:
+    """Test helper: return first ThinkResult from parse results."""
+    return _parse_results(response)[0]
 
 # ── 4.1 LLM client abstraction ──────────────────────────────
 
@@ -54,17 +60,17 @@ def test_system_prompt_includes_tool_descriptions():
             requires_confirmation=True,
         ),
     ]
-    prompt = build_system_prompt("Test intent", tool_defs)
+    prompt = get_prompt(AgentPhase.SERIAL_THINK, intent="Test intent", tool_list="  - **http**: Make HTTP request\n  - **delete**: Delete file (require confirmation)")
     assert "Test intent" in prompt
     assert "**http**" in prompt
     assert "**delete**" in prompt
-    assert "dangerous" in prompt
+    assert "require confirmation" in prompt
     assert "Make HTTP request" in prompt
     assert "Delete file" in prompt
 
 
 def test_system_prompt_no_tools():
-    prompt = build_system_prompt("Just think", [])
+    prompt = get_prompt(AgentPhase.SERIAL_THINK, intent="Just think", tool_list="(no tools available)")
     assert "no tools available" in prompt.lower() or "(no tools" in prompt
 
 
@@ -91,13 +97,13 @@ def test_build_tool_schemas():
 
 
 def test_parse_stop_signal():
-    result = _parse_response("THOUGHT: Task finished successfully.\n<STOP>")
+    result = _parse_single("THOUGHT: Task finished successfully.\n<STOP>")
     assert result.thought == "Task finished successfully."
     assert result.tool_name is None
 
 
 def test_parse_tool_call():
-    result = _parse_response(
+    result = _parse_single(
         'THOUGHT: I need to fetch data\nTOOL: http_request\nARGS: {"url": "https://api.example.com", "method": "GET"}'
     )
     assert result.thought == "I need to fetch data"
@@ -106,19 +112,19 @@ def test_parse_tool_call():
 
 
 def test_parse_tool_without_args():
-    result = _parse_response("THOUGHT: Just checking\nTOOL: status_check\nARGS: {}")
+    result = _parse_single("THOUGHT: Just checking\nTOOL: status_check\nARGS: {}")
     assert result.tool_name == "status_check"
     assert result.tool_input == {}
 
 
 def test_parse_malformed_args():
-    result = _parse_response("THOUGHT: Doing something\nTOOL: test_tool\nARGS: not valid json")
+    result = _parse_single("THOUGHT: Doing something\nTOOL: test_tool\nARGS: not valid json")
     assert result.tool_name == "test_tool"
     assert result.tool_input == {}
 
 
 def test_parse_thought_only():
-    result = _parse_response("This is just a thought, no structured output.")
+    result = _parse_single("This is just a thought, no structured output.")
     assert result.thought == "This is just a thought, no structured output."
     assert result.tool_name is None
 
@@ -129,7 +135,7 @@ Second line of thought.
 Third line.
 TOOL: my_tool
 ARGS: {"key": "value"}"""
-    result = _parse_response(response)
+    result = _parse_single(response)
     assert "First line" in result.thought
     assert "Second line" in result.thought
     assert result.tool_name == "my_tool"
@@ -138,28 +144,28 @@ ARGS: {"key": "value"}"""
 
 def test_parse_tool_takes_priority_over_stop():
     # When both TOOL: and <STOP> appear, the tool call takes priority
-    result = _parse_response("THOUGHT: Done.\n<STOP>\nTOOL: my_tool")
+    result = _parse_single("THOUGHT: Done.\n<STOP>\nTOOL: my_tool")
     assert result.thought == "Done."
     assert result.tool_name == "my_tool"
 
     # When TOOL: appears before <STOP>, it should be honored
-    result = _parse_response("THOUGHT: Doing work.\nTOOL: work_tool\nARGS: {}\n<STOP>")
+    result = _parse_single("THOUGHT: Doing work.\nTOOL: work_tool\nARGS: {}\n<STOP>")
     assert result.tool_name == "work_tool"
 
 
 def test_parse_answer():
-    result = _parse_response("ANSWER: 我是你的 AI 助手。")
+    result = _parse_single("ANSWER: 我是你的 AI 助手。")
     assert result.tool_name is None
     assert result.direct_answer == "我是你的 AI 助手。"
 
 def test_parse_answer_with_stop():
-    result = _parse_response("ANSWER: Hello!\n<STOP>")
+    result = _parse_single("ANSWER: Hello!\n<STOP>")
     assert result.tool_name is None
     assert result.direct_answer == "Hello!"
 
 def test_parse_answer_takes_priority():
     # ANSWER: should take priority even if TOOL: appears later
-    result = _parse_response("ANSWER: Hello\nTOOL: ignored_tool")
+    result = _parse_single("ANSWER: Hello\nTOOL: ignored_tool")
     assert result.tool_name is None
     assert result.direct_answer == "Hello"
 
@@ -168,13 +174,13 @@ def test_parse_answer_takes_priority():
 
 
 def test_parse_empty_response():
-    result = _parse_response("")
+    result = _parse_single("")
     assert result.thought == ""
     assert result.tool_name is None
 
 
 def test_parse_response_with_only_tool():
-    result = _parse_response("TOOL: direct_call\nARGS: {}")
+    result = _parse_single("TOOL: direct_call\nARGS: {}")
     assert result.tool_name == "direct_call"
 
 
@@ -238,6 +244,67 @@ ARGS: {"action": "flush"}
     assert results[0].tool_input == {"action": "flush"}
 
 
+# ── 4.8 Edge cases from unified parse path ───────────────────
+
+
+def test_parse_tool_at_start_of_response():
+    """Response starts with TOOL: — no preceding newline."""
+    result = _parse_single("TOOL: browser\nARGS: {\"url\": \"https://x.com\"}")
+    assert result.tool_name == "browser"
+    assert result.tool_input == {"url": "https://x.com"}
+
+
+def test_parse_tool_no_space_after_colon():
+    """TOOL:toolname (no space) through the unified split path."""
+    result = _parse_single("THOUGHT: test\nTOOL:echo\nARGS: {\"msg\": \"hi\"}")
+    assert result.tool_name == "echo"
+    assert result.tool_input == {"msg": "hi"}
+
+
+def test_parse_multi_tool_starting_with_tool():
+    """Multi-tool response where first line is TOOL: (no THOUGHT)."""
+    response = """TOOL: step1
+ARGS: {"a": 1}
+TOOL: step2
+ARGS: {"b": 2}"""
+    results = _parse_results(response)
+    assert len(results) == 2
+    assert results[0].tool_name == "step1"
+    assert results[0].tool_input == {"a": 1}
+    assert results[1].tool_name == "step2"
+    assert results[1].tool_input == {"b": 2}
+
+
+def test_parse_greedy_regex_boundary_protected_by_split():
+    """Multiple JSON-like bodies — split prevents greedy match across tools."""
+    response = """THOUGHT: fetch data
+TOOL: http
+ARGS: {"url": "https://api.example.com", "payload": {"nested": true}}
+TOOL: log
+ARGS: {"message": "done"}"""
+    results = _parse_results(response)
+    assert len(results) == 2
+    assert results[0].tool_name == "http"
+    assert results[0].tool_input["url"] == "https://api.example.com"
+    assert results[0].tool_input["payload"] == {"nested": True}
+    assert results[1].tool_name == "log"
+    # The second args should NOT contain the first args' JSON
+    assert results[1].tool_input == {"message": "done"}
+
+
+def test_parse_single_tool_unified_path():
+    """Single tool with leading newline before TOOL: — unified path, no fallback."""
+    result = _parse_single("THOUGHT: one thing\nTOOL: fetch\nARGS: {\"url\": \"https://a\"}\ntrailing text")
+    assert result.tool_name == "fetch"
+    assert result.tool_input == {"url": "https://a"}
+
+
+def test_parse_response_no_longer_importable():
+    """_parse_response must not be importable from agent_kernel (dead code removed)."""
+    with pytest.raises(ImportError):
+        from harness.core.agent_kernel import _parse_response  # noqa: F401
+
+
 # ── MockAgentKernel ──────────────────────────────────────────
 
 
@@ -260,3 +327,47 @@ async def test_mock_kernel_returns_stop_on_exhaustion():
     assert len(results) == 1
     assert results[0].tool_name is None
     assert "no more" in results[0].thought.lower()
+
+
+# ── LLMAgentKernel _generate_stop_summary ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_llm_kernel_stop_triggers_summary():
+    """When <STOP> is detected, _generate_stop_summary produces direct_answer."""
+    client = MockLLMClient([
+        "<STOP>",
+        "I have completed the task by fetching the data and saving it.",
+    ])
+    kernel = LLMAgentKernel(client)
+    state = RunState(run_id="test")
+    tool_defs: list[ToolDefinition] = []
+
+    results = await kernel.think("fetch data and save", tool_defs, state)
+    assert len(results) == 1
+    assert results[0].tool_name is None
+    assert results[0].direct_answer == "I have completed the task by fetching the data and saving it."
+    assert len(client.calls) == 2  # main call + summary call
+
+
+@pytest.mark.asyncio
+async def test_llm_kernel_stop_summary_failure_does_not_break():
+    """When summary generation fails, direct_answer stays None but think still succeeds."""
+    class _FailingSummaryClient(MockLLMClient):
+        async def chat(self, messages, *, tools=None, temperature=0.0, max_tokens=4096):
+            self.calls.append({"messages": messages, "tools": tools})
+            if self._idx >= len(self.responses):
+                raise RuntimeError("simulated LLM failure")
+            response = self.responses[self._idx]
+            self._idx += 1
+            return response
+
+    client = _FailingSummaryClient(["<STOP>"])  # only one response; summary call raises
+    kernel = LLMAgentKernel(client)
+    state = RunState(run_id="test")
+    tool_defs: list[ToolDefinition] = []
+
+    results = await kernel.think("do something", tool_defs, state)
+    assert len(results) == 1
+    assert results[0].tool_name is None
+    assert results[0].direct_answer is None  # summary failed, no direct_answer set

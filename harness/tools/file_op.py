@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from harness.models.tools import Guardrail, SideEffect, ToolDefinition
+from harness.models.tools import Guardrail, SideEffect, SuccessIndicator, ToolDefinition
 
 _SANDBOX_BASE: Path | None = None
 
@@ -40,7 +40,9 @@ FILE_OP_DEF = ToolDefinition(
             },
             "content": {
                 "type": "string",
-                "description": "Content to write or append (required for write/append)",
+                "description": "Content to write or append, MUST be a plain string. "
+                "Do NOT use $var.field references here — resolve them first. "
+                "(required for write/append)",
             },
         },
         "required": ["operation", "path"],
@@ -49,6 +51,7 @@ FILE_OP_DEF = ToolDefinition(
         "type": "object",
         "properties": {
             "success": {"type": "boolean"},
+            "path": {"type": "string"},
             "content": {"type": "string"},
             "size": {"type": "integer"},
             "error": {"type": "string"},
@@ -61,6 +64,7 @@ FILE_OP_DEF = ToolDefinition(
         Guardrail(guardrail_type="scope", config={}),
     ],
     timeout_ms=30000,
+    success_indicator=SuccessIndicator(field="success", op="eq", value=True),
 )
 
 
@@ -72,44 +76,44 @@ async def file_op_fn(input: dict[str, Any]) -> dict[str, Any]:
     def _do_read() -> dict[str, Any]:
         target = _resolve_path(path)
         if not target.exists():
-            return {"success": False, "error": f"File not found: {path}"}
+            return {"success": False, "path": path, "error": f"File not found: {path}"}
         if not target.is_file():
-            return {"success": False, "error": f"Not a file: {path}"}
+            return {"success": False, "path": path, "error": f"Not a file: {path}"}
         text = target.read_text(encoding="utf-8")
-        return {"success": True, "content": text, "size": len(text)}
+        return {"success": True, "path": path, "content": text, "size": len(text)}
 
     def _do_write() -> dict[str, Any]:
         target = _resolve_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content or "", encoding="utf-8")
-        return {"success": True, "size": len(content or "")}
+        return {"success": True, "path": path, "size": len(content or "")}
 
     def _do_append() -> dict[str, Any]:
         target = _resolve_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a", encoding="utf-8") as f:
             f.write(content or "")
-        return {"success": True, "size": os.path.getsize(target)}
+        return {"success": True, "path": path, "size": os.path.getsize(target)}
 
     def _do_delete() -> dict[str, Any]:
         target = _resolve_path(path)
         if not target.exists():
-            return {"success": False, "error": f"File not found: {path}"}
+            return {"success": False, "path": path, "error": f"File not found: {path}"}
         if not target.is_file():
-            return {"success": False, "error": f"Not a file: {path}"}
+            return {"success": False, "path": path, "error": f"Not a file: {path}"}
         target.unlink()
-        return {"success": True}
+        return {"success": True, "path": path}
 
     def _do_list() -> dict[str, Any]:
         target = _resolve_path(path)
         if not target.exists():
-            return {"success": False, "error": f"Path not found: {path}"}
+            return {"success": False, "path": path, "error": f"Path not found: {path}"}
         if target.is_file():
-            return {"success": True, "content": path, "size": os.path.getsize(target)}
+            return {"success": True, "path": path, "content": path, "size": os.path.getsize(target)}
         entries = sorted(
             str(e.relative_to(_SANDBOX_BASE or Path.cwd())) for e in target.iterdir()
         )
-        return {"success": True, "content": "\n".join(entries), "size": len(entries)}
+        return {"success": True, "path": path, "content": "\n".join(entries), "size": len(entries)}
 
     ops = {
         "read": _do_read,
@@ -121,7 +125,7 @@ async def file_op_fn(input: dict[str, Any]) -> dict[str, Any]:
 
     impl = ops.get(operation)
     if impl is None:
-        return {"success": False, "error": f"Unknown operation: {operation}"}
+        return {"success": False, "path": path, "error": f"Unknown operation: {operation}"}
 
     result = await asyncio.to_thread(impl)
     return result

@@ -80,7 +80,7 @@ class DagPlan(BaseModel):
             if dep_result is None:
                 merged[dep_id] = None
                 continue
-            output = dep_result.get("output") if isinstance(dep_result, dict) else dep_result
+            output = dep_result.get("output") if isinstance(dep_result, dict) else (dep_result.output if hasattr(dep_result, 'output') else dep_result)
             selectors = step.upstream_selectors or {}
             if dep_id in selectors:
                 merged[dep_id] = self._resolve_path(output, selectors[dep_id])

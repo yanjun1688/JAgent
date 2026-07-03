@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from harness.models.tools import Guardrail, SideEffect, ToolDefinition
+from harness.models.tools import Guardrail, SideEffect, SuccessIndicator, ToolDefinition
 
 BROWSER_DEF = ToolDefinition(
     name="browser",
@@ -40,6 +40,8 @@ BROWSER_DEF = ToolDefinition(
         "type": "object",
         "properties": {
             "success": {"type": "boolean"},
+            "action": {"type": "string"},
+            "url": {"type": "string"},
             "result": {"type": "string"},
             "screenshot": {"type": "string"},
             "error": {"type": "string"},
@@ -49,6 +51,7 @@ BROWSER_DEF = ToolDefinition(
     side_effects=[SideEffect.EXTERNAL],
     guardrails=[Guardrail(guardrail_type="scope", config={})],
     timeout_ms=60000,
+    success_indicator=SuccessIndicator(field="success", op="eq", value=True),
 )
 
 
@@ -158,7 +161,7 @@ class BrowserManager:
 
 async def browser_fn(input: dict[str, Any]) -> dict[str, Any]:
     if not _check_playwright():
-        return {"success": False, "error": "Playwright not installed. Run: pip install playwright install"}
+        return {"success": False, "action": input.get("action", "unknown"), "error": "Playwright not installed. Run: pip install playwright install"}
 
     action = input["action"]
     timeout_ms = input.get("timeout_ms", 30000)
@@ -169,37 +172,37 @@ async def browser_fn(input: dict[str, Any]) -> dict[str, Any]:
             case "navigate":
                 url = input.get("url")
                 if not url:
-                    return {"success": False, "error": "url is required for navigate action"}
+                    return {"success": False, "action": action, "error": "url is required for navigate action"}
                 title = await bm.navigate(url, timeout_ms)
-                return {"success": True, "result": f"Navigated to {url}. Page title: {title}"}
+                return {"success": True, "action": action, "url": url, "result": f"Navigated to {url}. Page title: {title}"}
 
             case "click":
                 selector = input.get("selector")
                 if not selector:
-                    return {"success": False, "error": "selector is required for click action"}
+                    return {"success": False, "action": action, "error": "selector is required for click action"}
                 await bm.click(selector, timeout_ms)
-                return {"success": True, "result": f"Clicked element: {selector}"}
+                return {"success": True, "action": action, "result": f"Clicked element: {selector}"}
 
             case "type":
                 selector = input.get("selector")
                 value = input.get("value")
                 if not selector or value is None:
-                    return {"success": False, "error": "selector and value are required for type action"}
+                    return {"success": False, "action": action, "error": "selector and value are required for type action"}
                 await bm.type_text(selector, value, timeout_ms)
-                return {"success": True, "result": f"Typed into element: {selector}"}
+                return {"success": True, "action": action, "result": f"Typed into element: {selector}"}
 
             case "extract":
                 selector = input.get("selector")
                 if not selector:
-                    return {"success": False, "error": "selector is required for extract action"}
+                    return {"success": False, "action": action, "error": "selector is required for extract action"}
                 text = await bm.extract(selector, timeout_ms)
-                return {"success": True, "result": text}
+                return {"success": True, "action": action, "result": text}
 
             case "screenshot":
                 encoded = await bm.screenshot()
-                return {"success": True, "screenshot": f"data:image/png;base64,{encoded}"}
+                return {"success": True, "action": action, "screenshot": f"data:image/png;base64,{encoded}"}
 
             case _:
-                return {"success": False, "error": f"Unknown action: {action}"}
+                return {"success": False, "action": action, "error": f"Unknown action: {action}"}
     except Exception as exc:
-        return {"success": False, "error": f"Browser action '{action}' failed: {type(exc).__name__}: {exc}"}
+        return {"success": False, "action": action, "error": f"Browser action '{action}' failed: {type(exc).__name__}: {exc}"}

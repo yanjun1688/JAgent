@@ -52,6 +52,7 @@ class HarnessAPI:
         self.llm_client: LLMClient | None = None
         self.registry: ToolRegistry | None = None
         self.context_manager = None
+        self.mcp_manager = None
         self.monitor = None
         self.scheduler_config: SchedulerConfig | None = None
 

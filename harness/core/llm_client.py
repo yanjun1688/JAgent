@@ -91,7 +91,7 @@ class OpenAILLMClient(LLMClient):
         _logger.info("[LLM] Sending %d messages (%.0f chars) to %s",
                      len(messages), sum(len(str(m)) for m in messages), self.model)
         for i, m in enumerate(messages):
-            _logger.info("[LLM]   msg[%d] role=%s, content=%s...", i, m.get("role", "?"), str(m.get("content", ""))[:200])
+            _logger.info("[LLM]   msg[%d] role=%s\n%s", i, m.get("role", "?"), m.get("content", ""))
 
         _t0 = time.monotonic()
         async with httpx.AsyncClient(timeout=120.0) as client:
