@@ -1,40 +1,63 @@
-"""Unit tests for Agent Kernel parsing and LLM client (L4)."""
+"""Unit tests for Agent Kernel and LLM client (L4).
+
+Structured tool_calls path only — _parse_results / regex已被移除 (B-2/B-3)。
+Tests focus on:
+  - MockLLMClient returning structured ChatResponse
+  - Serial system prompt variants
+  - build_tool_schemas
+  - LLMAgentKernel stop/answer/text path via ChatResponse
+  - D-2: tool_call_id 透传 / 多轮历史协议配对 / json 解析失败可观测性
+"""
+
+from __future__ import annotations
+
+import json
+from unittest.mock import patch
 
 import pytest
 
-from harness.core.agent_kernel import MockAgentKernel, LLMAgentKernel, _parse_results
-from harness.core.fold import RunState
-from harness.core.llm_client import MockLLMClient
+from harness.core.agent_kernel import LLMAgentKernel, MockAgentKernel
+from harness.core.fold import RunState, ThoughtEntry, ToolResult, ToolResultStatus
+from harness.core.llm_client import ChatResponse, MockLLMClient, ToolCall
 from harness.core.scheduler import ThinkResult
 from harness.core.system_prompt import AgentPhase, build_tool_schemas, get_prompt
 from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
 
 
-def _parse_single(response: str) -> ThinkResult:
-    """Test helper: return first ThinkResult from parse results."""
-    return _parse_results(response)[0]
-
-# ── 4.1 LLM client abstraction ──────────────────────────────
+# ── 4.1 LLM client abstraction — returns structured ChatResponse ──
 
 
 @pytest.mark.asyncio
 async def test_mock_llm_client_returns_responses():
     client = MockLLMClient(["Hello", "World"])
-    assert await client.chat([{"role": "user", "content": "Hi"}]) == "Hello"
-    assert await client.chat([{"role": "user", "content": "Again"}]) == "World"
+    r1 = await client.chat([{"role": "user", "content": "Hi"}])
+    r2 = await client.chat([{"role": "user", "content": "Again"}])
+    assert isinstance(r1, ChatResponse)
+    assert r1.content == "Hello"
+    assert r2.content == "World"
+    assert r1.tool_calls == []
     assert len(client.calls) == 2
 
 
 @pytest.mark.asyncio
 async def test_mock_llm_client_returns_stop_on_exhaustion():
     client = MockLLMClient(["Only one"])
-    assert await client.chat([{"role": "user", "content": "A"}]) == "Only one"
-    response = await client.chat([{"role": "user", "content": "B"}])
-    assert "<STOP>" in response
+    r1 = await client.chat([{"role": "user", "content": "A"}])
+    assert r1.content == "Only one"
+    r2 = await client.chat([{"role": "user", "content": "B"}])
+    assert "<STOP>" in r2.content
 
 
-# ── 4.2 Context window — covered in LLMAgentKernel ──────────
-# (No standalone unit tests; integration tested via scheduler)
+@pytest.mark.asyncio
+async def test_mock_llm_client_accepts_chatresponse():
+    resp = ChatResponse(
+        content="thinking",
+        tool_calls=[ToolCall(id="abc", name="http", arguments={"url": "x"})],
+    )
+    client = MockLLMClient([resp])
+    r = await client.chat([{"role": "user", "content": "q"}])
+    assert r is resp
+    assert r.tool_calls[0].id == "abc"
 
 
 # ── 4.4 System Prompt ───────────────────────────────────────
@@ -60,13 +83,17 @@ def test_system_prompt_includes_tool_descriptions():
             requires_confirmation=True,
         ),
     ]
-    prompt = get_prompt(AgentPhase.SERIAL_THINK, intent="Test intent", tool_list="  - **http**: Make HTTP request\n  - **delete**: Delete file (require confirmation)")
+    prompt = get_prompt(AgentPhase.SERIAL_THINK_FN, intent="Test intent",
+                        tool_list="  - **http**: Make HTTP request\n  - **delete**: Delete file (require confirmation)")
     assert "Test intent" in prompt
     assert "**http**" in prompt
-    assert "**delete**" in prompt
-    assert "require confirmation" in prompt
-    assert "Make HTTP request" in prompt
-    assert "Delete file" in prompt
+    assert "function-calling" in prompt
+
+
+def test_system_prompt_text_variant_still_has_tool_args_directive():
+    prompt = get_prompt(AgentPhase.SERIAL_THINK_TEXT, intent="t", tool_list="(no tools)")
+    assert "TOOL:" in prompt
+    assert "ARGS:" in prompt
 
 
 def test_system_prompt_no_tools():
@@ -93,218 +120,6 @@ def test_build_tool_schemas():
     assert "url" in schemas[0]["function"]["parameters"]["properties"]
 
 
-# ── 4.5 THINK step — response parsing ────────────────────────
-
-
-def test_parse_stop_signal():
-    result = _parse_single("THOUGHT: Task finished successfully.\n<STOP>")
-    assert result.thought == "Task finished successfully."
-    assert result.tool_name is None
-
-
-def test_parse_tool_call():
-    result = _parse_single(
-        'THOUGHT: I need to fetch data\nTOOL: http_request\nARGS: {"url": "https://api.example.com", "method": "GET"}'
-    )
-    assert result.thought == "I need to fetch data"
-    assert result.tool_name == "http_request"
-    assert result.tool_input == {"url": "https://api.example.com", "method": "GET"}
-
-
-def test_parse_tool_without_args():
-    result = _parse_single("THOUGHT: Just checking\nTOOL: status_check\nARGS: {}")
-    assert result.tool_name == "status_check"
-    assert result.tool_input == {}
-
-
-def test_parse_malformed_args():
-    result = _parse_single("THOUGHT: Doing something\nTOOL: test_tool\nARGS: not valid json")
-    assert result.tool_name == "test_tool"
-    assert result.tool_input == {}
-
-
-def test_parse_thought_only():
-    result = _parse_single("This is just a thought, no structured output.")
-    assert result.thought == "This is just a thought, no structured output."
-    assert result.tool_name is None
-
-
-def test_parse_multiline_thought():
-    response = """THOUGHT: First line.
-Second line of thought.
-Third line.
-TOOL: my_tool
-ARGS: {"key": "value"}"""
-    result = _parse_single(response)
-    assert "First line" in result.thought
-    assert "Second line" in result.thought
-    assert result.tool_name == "my_tool"
-    assert result.tool_input == {"key": "value"}
-
-
-def test_parse_tool_takes_priority_over_stop():
-    # When both TOOL: and <STOP> appear, the tool call takes priority
-    result = _parse_single("THOUGHT: Done.\n<STOP>\nTOOL: my_tool")
-    assert result.thought == "Done."
-    assert result.tool_name == "my_tool"
-
-    # When TOOL: appears before <STOP>, it should be honored
-    result = _parse_single("THOUGHT: Doing work.\nTOOL: work_tool\nARGS: {}\n<STOP>")
-    assert result.tool_name == "work_tool"
-
-
-def test_parse_answer():
-    result = _parse_single("ANSWER: 我是你的 AI 助手。")
-    assert result.tool_name is None
-    assert result.direct_answer == "我是你的 AI 助手。"
-
-def test_parse_answer_with_stop():
-    result = _parse_single("ANSWER: Hello!\n<STOP>")
-    assert result.tool_name is None
-    assert result.direct_answer == "Hello!"
-
-def test_parse_answer_takes_priority():
-    # ANSWER: should take priority even if TOOL: appears later
-    result = _parse_single("ANSWER: Hello\nTOOL: ignored_tool")
-    assert result.tool_name is None
-    assert result.direct_answer == "Hello"
-
-
-# ── 4.6 Parse fault tolerance ────────────────────────────────
-
-
-def test_parse_empty_response():
-    result = _parse_single("")
-    assert result.thought == ""
-    assert result.tool_name is None
-
-
-def test_parse_response_with_only_tool():
-    result = _parse_single("TOOL: direct_call\nARGS: {}")
-    assert result.tool_name == "direct_call"
-
-
-# ── 4.7 Multi-tool call parsing ────────────────────────────────
-
-
-def test_parse_multi_tool():
-    response = """THOUGHT: Do two things
-TOOL: search
-ARGS: {"q": "hello", "nested": {"inner": "value"}}
-TOOL: echo
-ARGS: {"msg": "world"}"""
-    results = _parse_results(response)
-    assert len(results) == 2
-    assert results[0].tool_name == "search"
-    assert results[0].tool_input == {"q": "hello", "nested": {"inner": "value"}}
-    assert results[1].tool_name == "echo"
-    assert results[1].tool_input == {"msg": "world"}
-
-
-def test_parse_multi_tool_nested_json():
-    """Nested JSON objects must not be truncated by non-greedy matching."""
-    response = """THOUGHT: Multi step
-TOOL: http_request
-ARGS: {"url": "https://api.example.com", "headers": {"Authorization": "Bearer tok"}}
-TOOL: file_op
-ARGS: {"operation": "write", "path": "/tmp/x"}"""
-    results = _parse_results(response)
-    assert len(results) == 2
-    assert results[0].tool_name == "http_request"
-    assert results[0].tool_input["url"] == "https://api.example.com"
-    assert results[0].tool_input["headers"]["Authorization"] == "Bearer tok"
-    assert results[1].tool_name == "file_op"
-    assert results[1].tool_input["operation"] == "write"
-
-
-def test_parse_multi_tool_malformed_args():
-    """One tool with malformed ARGS should not break the other."""
-    response = """THOUGHT: test
-TOOL: good
-ARGS: {"ok": true}
-TOOL: bad
-ARGS: not json"""
-    results = _parse_results(response)
-    assert len(results) == 2
-    assert results[0].tool_name == "good"
-    assert results[0].tool_input == {"ok": True}
-    assert results[1].tool_name == "bad"
-    assert results[1].tool_input == {}
-
-
-def test_parse_multi_tool_stop_ignored():
-    """TOOL blocks before <STOP> should be honored."""
-    response = """THOUGHT: finishing
-TOOL: cleanup
-ARGS: {"action": "flush"}
-<STOP>"""
-    results = _parse_results(response)
-    assert len(results) == 1
-    assert results[0].tool_name == "cleanup"
-    assert results[0].tool_input == {"action": "flush"}
-
-
-# ── 4.8 Edge cases from unified parse path ───────────────────
-
-
-def test_parse_tool_at_start_of_response():
-    """Response starts with TOOL: — no preceding newline."""
-    result = _parse_single("TOOL: browser\nARGS: {\"url\": \"https://x.com\"}")
-    assert result.tool_name == "browser"
-    assert result.tool_input == {"url": "https://x.com"}
-
-
-def test_parse_tool_no_space_after_colon():
-    """TOOL:toolname (no space) through the unified split path."""
-    result = _parse_single("THOUGHT: test\nTOOL:echo\nARGS: {\"msg\": \"hi\"}")
-    assert result.tool_name == "echo"
-    assert result.tool_input == {"msg": "hi"}
-
-
-def test_parse_multi_tool_starting_with_tool():
-    """Multi-tool response where first line is TOOL: (no THOUGHT)."""
-    response = """TOOL: step1
-ARGS: {"a": 1}
-TOOL: step2
-ARGS: {"b": 2}"""
-    results = _parse_results(response)
-    assert len(results) == 2
-    assert results[0].tool_name == "step1"
-    assert results[0].tool_input == {"a": 1}
-    assert results[1].tool_name == "step2"
-    assert results[1].tool_input == {"b": 2}
-
-
-def test_parse_greedy_regex_boundary_protected_by_split():
-    """Multiple JSON-like bodies — split prevents greedy match across tools."""
-    response = """THOUGHT: fetch data
-TOOL: http
-ARGS: {"url": "https://api.example.com", "payload": {"nested": true}}
-TOOL: log
-ARGS: {"message": "done"}"""
-    results = _parse_results(response)
-    assert len(results) == 2
-    assert results[0].tool_name == "http"
-    assert results[0].tool_input["url"] == "https://api.example.com"
-    assert results[0].tool_input["payload"] == {"nested": True}
-    assert results[1].tool_name == "log"
-    # The second args should NOT contain the first args' JSON
-    assert results[1].tool_input == {"message": "done"}
-
-
-def test_parse_single_tool_unified_path():
-    """Single tool with leading newline before TOOL: — unified path, no fallback."""
-    result = _parse_single("THOUGHT: one thing\nTOOL: fetch\nARGS: {\"url\": \"https://a\"}\ntrailing text")
-    assert result.tool_name == "fetch"
-    assert result.tool_input == {"url": "https://a"}
-
-
-def test_parse_response_no_longer_importable():
-    """_parse_response must not be importable from agent_kernel (dead code removed)."""
-    with pytest.raises(ImportError):
-        from harness.core.agent_kernel import _parse_response  # noqa: F401
-
-
 # ── MockAgentKernel ──────────────────────────────────────────
 
 
@@ -329,15 +144,177 @@ async def test_mock_kernel_returns_stop_on_exhaustion():
     assert "no more" in results[0].thought.lower()
 
 
+# ── D-2.1 tool_call_id 透传 ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_llm_kernel_preserves_tool_call_id_from_provider():
+    """Mock 注: ChatResponse.tool_calls id 必须原样进入 ThinkResult.tool_call_id."""
+    resp = ChatResponse(
+        content="",
+        tool_calls=[ToolCall(id="call_abc", name="http", arguments={"url": "https://x"})],
+    )
+    kernel = LLMAgentKernel(MockLLMClient([resp]))
+    state = RunState(run_id="r1")
+    results = await kernel.think("intent", [], state)
+    assert len(results) == 1
+    assert results[0].tool_call_id == "call_abc"
+    assert results[0].tool_name == "http"
+    assert results[0].tool_input == {"url": "https://x"}
+
+
+@pytest.mark.asyncio
+async def test_openai_client_preserves_tool_call_id_on_parse_failure(caplog):
+    """OpenAILLMClient 在 json 解析失败时必须 warning + arguments=_parse_error."""
+    from harness.core.llm_client import OpenAILLMClient
+
+    fake_response = {
+        "choices": [{
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_xyz",
+                    "type": "function",
+                    "function": {"name": "http", "arguments": "not a json"},
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+
+    client = OpenAILLMClient(api_key="k", model="m", base_url="http://fake")
+
+    class _FakeResp:
+        status_code = 200
+        text = ""
+        def json(self):
+            return fake_response
+        def raise_for_status(self):
+            pass
+
+    class _FakeAsync:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **kw): return _FakeResp()
+
+    with patch("harness.core.llm_client.httpx.AsyncClient", _FakeAsync):
+        result = await client.chat([{"role": "user", "content": "hi"}])
+
+    assert result.tool_calls[0].id == "call_xyz"
+    assert result.tool_calls[0].arguments == {"_parse_error": "not a json"}
+    assert any("tool_call arguments json decode failed" in r.getMessage() for r in caplog.records)
+
+
+# ── D-2.2 多轮历史协议配对 ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_llm_kernel_history_pairing_two_rounds():
+    """构造 2 轮历史，断言 messages 中 assistant.tool_calls + role=tool 配对完整."""
+    resp = ChatResponse(content="<STOP>")
+    client = MockLLMClient([resp])
+    kernel = LLMAgentKernel(client)
+
+    state = RunState(run_id="r")
+    state.thought_history = [
+        ThoughtEntry(seq=1, thought="round 1"),
+        ThoughtEntry(seq=3, thought="round 2"),
+    ]
+    state.tool_results = [
+        ToolResult(tool_call_id="tc_1", tool_name="http", status=ToolResultStatus.COMPLETED,
+                   output="out1", event_seq=2),
+        ToolResult(tool_call_id="tc_2", tool_name="file_op", status=ToolResultStatus.COMPLETED,
+                   output="out2", event_seq=4),
+    ]
+
+    await kernel.think("intent", [], state)
+    sent_messages = client.calls[0]["messages"]
+
+    assistant_msgs_with_tool_calls = [
+        m for m in sent_messages
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    ]
+    assert len(assistant_msgs_with_tool_calls) == 2
+
+    tool_msgs = [m for m in sent_messages if m.get("role") == "tool"]
+    assert len(tool_msgs) == 2
+
+    first_assistant_tcs = {tc["id"] for tc in assistant_msgs_with_tool_calls[0]["tool_calls"]}
+    second_assistant_tcs = {tc["id"] for tc in assistant_msgs_with_tool_calls[1]["tool_calls"]}
+    first_tool_id = tool_msgs[0]["tool_call_id"]
+    second_tool_id = tool_msgs[1]["tool_call_id"]
+    assert first_tool_id in first_assistant_tcs
+    assert second_tool_id in second_assistant_tcs
+
+    idx_first_assistant = sent_messages.index(assistant_msgs_with_tool_calls[0])
+    idx_first_tool = sent_messages.index(tool_msgs[0])
+    idx_second_assistant = sent_messages.index(assistant_msgs_with_tool_calls[1])
+    assert idx_first_assistant < idx_first_tool < idx_second_assistant
+
+
+# ── D-2.3 json 解析失败可观测性 ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_parse_failure_observable_no_silent_pass():
+    """OpenAILLMClient 拿到非 JSON arguments，不抛异常，arguments 含 _parse_error."""
+    from harness.core.llm_client import OpenAILLMClient
+
+    fake_response = {
+        "choices": [{
+            "message": {
+                "content": "",
+                "tool_calls": [
+                    {"id": "b1", "type": "function",
+                     "function": {"name": "f", "arguments": "{bad"}},
+                ],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {},
+    }
+    client = OpenAILLMClient(api_key="k", model="m", base_url="http://fake")
+
+    class _FakeResp:
+        status_code = 200
+        text = ""
+        def json(self): return fake_response
+        def raise_for_status(self): pass
+
+    class _FakeAsync:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **kw): return _FakeResp()
+
+    with patch("harness.core.llm_client.httpx.AsyncClient", _FakeAsync):
+        resp = await client.chat([{"role": "user", "content": "x"}])
+
+    assert resp.tool_calls[0].arguments == {"_parse_error": "{bad"}
+    assert resp.tool_calls[0].name == "f"
+    assert resp.tool_calls[0].id == "b1"
+
+    kernel = LLMAgentKernel(MockLLMClient([
+        ChatResponse(tool_calls=[ToolCall(id="b1", name="f", arguments={"_parse_error": "{bad"})])
+    ]))
+    state = RunState(run_id="r")
+    results = await kernel.think("intent", [], state)
+    assert results[0].tool_name == "f"
+    assert results[0].tool_input == {"_parse_error": "{bad"}
+    assert results[0].tool_call_id == "b1"
+
+
 # ── LLMAgentKernel _generate_stop_summary ────────────────────
 
 
 @pytest.mark.asyncio
 async def test_llm_kernel_stop_triggers_summary():
-    """When <STOP> is detected, _generate_stop_summary produces direct_answer."""
+    """When content contains <STOP>, _generate_stop_summary produces direct_answer."""
     client = MockLLMClient([
-        "<STOP>",
-        "I have completed the task by fetching the data and saving it.",
+        ChatResponse(content="<STOP>"),
+        ChatResponse(content="I have completed the task by fetching the data and saving it."),
     ])
     kernel = LLMAgentKernel(client)
     state = RunState(run_id="test")
@@ -362,7 +339,7 @@ async def test_llm_kernel_stop_summary_failure_does_not_break():
             self._idx += 1
             return response
 
-    client = _FailingSummaryClient(["<STOP>"])  # only one response; summary call raises
+    client = _FailingSummaryClient([ChatResponse(content="<STOP>")])
     kernel = LLMAgentKernel(client)
     state = RunState(run_id="test")
     tool_defs: list[ToolDefinition] = []
@@ -370,4 +347,4 @@ async def test_llm_kernel_stop_summary_failure_does_not_break():
     results = await kernel.think("do something", tool_defs, state)
     assert len(results) == 1
     assert results[0].tool_name is None
-    assert results[0].direct_answer is None  # summary failed, no direct_answer set
+    assert results[0].direct_answer is None

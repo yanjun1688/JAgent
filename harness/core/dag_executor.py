@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from typing import Any
 from uuid import uuid4
 
-from harness.core.dag_types import StepResult, StepStatus
+from harness.core.dag_types import ExecState, StepResult
 from harness.core.dag_vars import VariableResolutionError, resolve_variables_in_input, truncate_output
 from harness.core.logger import agent_logger
 from harness.models.events import (
@@ -193,7 +192,7 @@ class DagExecutor:
                         tool_name=step_map.get(sid, DagStep(id=sid)).tool,
                     ).model_dump(),
                 )
-                all_results[sid] = StepResult(step_id=sid, status=StepStatus.EXECUTOR_ERROR, error=error)
+                all_results[sid] = StepResult(step_id=sid, exec_state=ExecState.FAILED, error=error)
                 any_failed = True
                 continue
 
@@ -207,6 +206,18 @@ class DagExecutor:
                         plan_id=plan_id, step_id=sid,
                         output_summary=raw.summary,
                         status="completed",
+                    ).model_dump(),
+                )
+            elif raw.exec_state == ExecState.IDEMPOTENT:
+                all_results[sid] = raw
+                _log.info("[step] %s idempotent (cached) — %s", sid, raw.summary)
+                await self.store.append_event(
+                    run_id,
+                    EventType.DAG_STEP_COMPLETED,
+                    DagStepCompletedPayload(
+                        plan_id=plan_id, step_id=sid,
+                        output_summary=raw.summary,
+                        status="idempotent",
                     ).model_dump(),
                 )
             elif raw.has_soft_error:
@@ -249,7 +260,7 @@ class DagExecutor:
         if any_failed:
             _log.warning("[layer %d/%d] %d/%d step(s) failed",
                          layer_idx + 1, len(layers),
-                         sum(1 for r in results if isinstance(r, StepResult) and not r.is_completed),
+                         sum(1 for r in results if isinstance(r, StepResult) and not r.is_done),
                          len(layer))
             return False
 
@@ -272,7 +283,7 @@ class DagExecutor:
         """
         step = next((s for s in plan.steps if s.id == step_id), None)
         if step is None:
-            return StepResult(step_id=step_id, status=StepStatus.FAILED,
+            return StepResult(step_id=step_id, exec_state=ExecState.FAILED,
                               error=f"Step '{step_id}' not found in plan")
 
         # --- Build upstream context from ALL completed results ---
@@ -280,8 +291,6 @@ class DagExecutor:
         for sid, result in all_results.items():
             if isinstance(result, StepResult) and result.is_done:
                 upstream[sid] = result.output
-            elif isinstance(result, dict) and result.get("status") in (StepStatus.COMPLETED.value, StepStatus.SOFT_ERROR.value):
-                upstream[sid] = result.get("output")
 
         # Legacy key mapping: older plans/tools may reference $step_id_result
         for dep_id in step.depends_on:
@@ -294,7 +303,7 @@ class DagExecutor:
             merged_input = resolve_variables_in_input(step.input, upstream)
         except VariableResolutionError as e:
             _log.error("[var] %s — step %s", e, step_id)
-            return StepResult(step_id=step_id, status=StepStatus.FAILED,
+            return StepResult(step_id=step_id, exec_state=ExecState.FAILED,
                               error=str(e))
 
         # --- Tool lookup ---
@@ -302,7 +311,7 @@ class DagExecutor:
         step_fn = self.registry.get_tool_fn(step.tool)
 
         if step_def is None or step_fn is None:
-            return StepResult(step_id=step_id, status=StepStatus.FAILED,
+            return StepResult(step_id=step_id, exec_state=ExecState.FAILED,
                               error=f"Tool '{step.tool}' not registered")
 
         prefix = "[retry]" if is_retry else "[step]"
@@ -315,30 +324,46 @@ class DagExecutor:
             )
 
         # --- Status dispatch ---
-        if result.status in (ExecutionStatus.COMPLETED, ExecutionStatus.IDEMPOTENCY_HIT):
+        if result.status == ExecutionStatus.COMPLETED:
             summary = truncate_output(result.output)
             if getattr(result, "has_semantic_error", False):
                 _log.warning("[semantic] %s %s → %s completed SOFT_ERROR error=%s (%.0fms) call_id=%s",
                              prefix, step_id, step.tool, result.error or "?",
                              getattr(result, "duration_ms", 0),
                              getattr(result, "tool_call_id", "?"))
-                return StepResult(step_id=step_id, status=StepStatus.SOFT_ERROR,
+                return StepResult(step_id=step_id, exec_state=ExecState.SOFT_ERROR,
                                   output=result.output, summary=summary, error=result.error)
             _log.info("[semantic] %s %s → %s completed SUCCESS (%.0fms) call_id=%s",
                       prefix, step_id, step.tool,
                       getattr(result, "duration_ms", 0),
                       getattr(result, "tool_call_id", "?"))
-            return StepResult(step_id=step_id, status=StepStatus.COMPLETED,
+            return StepResult(step_id=step_id, exec_state=ExecState.COMPLETED,
+                              output=result.output, summary=summary)
+
+        if result.status == ExecutionStatus.IDEMPOTENCY_HIT:
+            summary = truncate_output(result.output)
+            if getattr(result, "has_semantic_error", False):
+                _log.warning("[semantic] %s %s → %s idempotent SOFT_ERROR error=%s (%.0fms) call_id=%s",
+                             prefix, step_id, step.tool, result.error or "?",
+                             getattr(result, "duration_ms", 0),
+                             getattr(result, "tool_call_id", "?"))
+                return StepResult(step_id=step_id, exec_state=ExecState.SOFT_ERROR,
+                                  output=result.output, summary=summary, error=result.error)
+            _log.info("[semantic] %s %s → %s idempotent (cached) (%.0fms) call_id=%s",
+                      prefix, step_id, step.tool,
+                      getattr(result, "duration_ms", 0),
+                      getattr(result, "tool_call_id", "?"))
+            return StepResult(step_id=step_id, exec_state=ExecState.IDEMPOTENT,
                               output=result.output, summary=summary)
 
         if result.status == ExecutionStatus.CONFIRMATION_NEEDED:
             _log.info("%s %s → %s needs confirmation (id=%s)", prefix, step_id, step.tool, result.confirmation_id)
-            return StepResult(step_id=step_id, status=StepStatus.CONFIRMATION_NEEDED,
+            return StepResult(step_id=step_id, exec_state=ExecState.PENDING,
                               confirmation_id=result.confirmation_id)
 
         error = result.error or f"Step failed with status {result.status.value}"
         _log.warning("%s %s → %s failed: %s", prefix, step_id, step.tool, error[:200])
-        return StepResult(step_id=step_id, status=StepStatus.FAILED, error=error,
+        return StepResult(step_id=step_id, exec_state=ExecState.FAILED, error=error,
                           retryable=getattr(result, "retryable", False))
 
     @staticmethod
@@ -357,7 +382,8 @@ class DagExecutor:
         except ValueError:
             layers = []
         lines.append(f"Total layers: {len(layers)} | Current layer: {current_layer + 1}/{len(layers)}")
-        lines.append(f"Total steps: {len(plan.steps)} | Completed: {sum(1 for r in results.values() if r.is_done)}")
+        lines.append(f"Total steps: {len(plan.steps)} | "
+                     f"Executed: {sum(1 for r in results.values() if r.should_not_rerun)}")
         lines.append("")
 
         input_trunc = 200
@@ -365,26 +391,55 @@ class DagExecutor:
             r = results.get(step.id)
             status_tag = ""
             detail = ""
+            exec_tag = ""
+            rerun_tag = ""
             input_str = json.dumps(step.input, ensure_ascii=False)[:input_trunc]
 
             if r is None:
                 status_tag = "[pending]"
                 detail = f"Input: {input_str}"
-            elif r.is_completed:
-                status_tag = "[done]"
-                detail = f"Summary: {r.summary[:80]}" if r.summary else "OK"
-            elif r.has_soft_error:
-                status_tag = "[soft-error]"
-                detail = f"Summary: {r.summary[:80]} | Error: {r.error or '?'}" if r.summary else f"Error: {r.error or '?'}"
-            elif r.status == StepStatus.CONFIRMATION_NEEDED:
-                status_tag = "[confirming]"
-                detail = f"Input: {input_str} | Awaiting confirmation"
+                exec_tag = "exec=pending"
+                task_tag = ""
             else:
-                status_tag = "[failed]"
-                detail = f"Input: {input_str} | Error: {r.error or 'unknown'}"
+                task_tag = f"task={r.task_state.value}"
+                if r.is_completed:
+                    status_tag = "[done]"
+                    detail = f"Summary: {r.summary[:80]}" if r.summary else "OK"
+                    if isinstance(r.output, dict) and r.output:
+                        output_keys = list(r.output.keys())
+                        detail += f" → outputs: {output_keys}"
+                    exec_tag = f"exec={r.exec_state.value}"
+                    rerun_tag = "replan=NO" if r.should_not_rerun else "replan=MAYBE"
+                elif r.has_soft_error:
+                    status_tag = "[soft-error]"
+                    detail = f"Summary: {r.summary[:80]} | Error: {r.error or '?'}" if r.summary else f"Error: {r.error or '?'}"
+                    exec_tag = f"exec={r.exec_state.value}"
+                    rerun_tag = "replan=NO" if r.should_not_rerun else "replan=MAYBE"
+                elif r.needs_confirmation:
+                    status_tag = "[confirming]"
+                    detail = f"Input: {input_str} | Awaiting confirmation"
+                    exec_tag = "exec=pending"
+                elif r.exec_state == ExecState.IDEMPOTENT:
+                    status_tag = "[cached]"
+                    detail = f"Summary: {r.summary[:80]}" if r.summary else "OK (from cache)"
+                    if isinstance(r.output, dict) and r.output:
+                        output_keys = list(r.output.keys())
+                        detail += f" → outputs: {output_keys}"
+                    exec_tag = f"exec={r.exec_state.value}"
+                    rerun_tag = "replan=NO" if r.should_not_rerun else "replan=MAYBE"
+                else:
+                    status_tag = "[failed]"
+                    detail = f"Input: {input_str} | Error: {r.error or 'unknown'}"
+                    exec_tag = f"exec={r.exec_state.value}"
+                    rerun_tag = "replan=MAYBE"
 
             deps = f" | Depends: {','.join(step.depends_on)}" if step.depends_on else ""
-            lines.append(f"  - {step.id}({step.tool}): {status_tag}{deps}")
+            meta = f" | {exec_tag}" if exec_tag else ""
+            if rerun_tag:
+                meta += f" | {rerun_tag}"
+            if task_tag:
+                meta += f" | {task_tag}"
+            lines.append(f"  - {step.id}({step.tool}): {status_tag}{deps}{meta}")
             lines.append(f"    {detail}")
 
         return "\n".join(lines)

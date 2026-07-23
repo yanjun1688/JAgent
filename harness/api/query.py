@@ -502,7 +502,7 @@ async def _query_feedback(hapi, run_id, include, page, page_size, since, until):
         rows = await hapi.store.execute_query(sql, [EventType.FEEDBACK_INJECTED.value, page_size, offset])
         total_row = await hapi.store.execute_query_one(count_sql, [EventType.FEEDBACK_INJECTED.value])
         total = total_row["cnt"] if total_row else 0
-        feedback_events = [_row_to_event(r) for r in rows]
+        feedback_events = [e for e in (_row_to_event(r) for r in rows) if e is not None]
 
     if run_id:
         total = len(feedback_events)
@@ -605,12 +605,26 @@ async def _query_health(hapi, run_id, include, page, page_size, since, until):
 # ── Helpers ────────────────────────────────────────────────────
 
 
-def _row_to_event(row: dict) -> Event:
+def _row_to_event(row: dict) -> Event | None:
+    """Returns None for rows with a legacy/unknown event_type.
+
+    See harness.storage.event_store._row_to_event for the rationale —
+    Append-Only invariant forbids DELETE so historical rows with removed
+    enum members persist and would otherwise crash the query read path.
+    """
     from harness.models.events import Event as EventModel
+    try:
+        et = EventType(row["event_type"])
+    except ValueError:
+        _log.warning(
+            "Skipping query row with unknown event_type=%r (run=%s seq=%s) — likely legacy event",
+            row["event_type"], row.get("run_id"), row.get("seq"),
+        )
+        return None
     return EventModel(
         run_id=row["run_id"],
         seq=row["seq"],
-        event_type=EventType(row["event_type"]),
+        event_type=et,
         payload=json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"],
         idempotency_key=row.get("idempotency_key"),
         created_at=row["created_at"],

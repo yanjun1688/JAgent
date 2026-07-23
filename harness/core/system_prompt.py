@@ -21,6 +21,8 @@ class AgentPhase(Enum):
     REVISE = "revise"
     ANSWER = "answer"
     SERIAL_THINK = "serial_think"
+    SERIAL_THINK_FN = "serial_think_fn"
+    SERIAL_THINK_TEXT = "serial_think_text"
     SUMMARIZE = "summarize"
 
 
@@ -56,20 +58,20 @@ _PLAN_PROMPT = (
     "## Output JSON format\n"
     "{step_schema}\n\n"
     "## Example 1 — Independent steps:\n"
-    'User: "Search for weather in Tokyo and London"\n'
-    '{{"intent": "Search for current weather in Tokyo and London", '
-    '"steps": [{{"id": "s1", "tool": "browser_search", "input": {{"query": "Tokyo weather"}}}}, '
-    '{{"id": "s2", "tool": "browser_search", "input": {{"query": "London weather"}}}}]}}\n\n'
+    'User: "Search for A and B"\n'
+    '{{"intent": "Search for A and B", '
+    '"steps": [{{"id": "s1", "tool": "tool_A", "input": {{"query": "A"}}}}, '
+    '{{"id": "s2", "tool": "tool_B", "input": {{"query": "B"}}}}]}}\n\n'
     "## Example 2 — Dependent steps:\n"
-    'User: "Search for Tokyo weather and save to a file"\n'
-    '{{"intent": "Search for Tokyo weather and save the result", '
-    '"steps": [{{"id": "s1", "tool": "browser_search", "input": {{"query": "Tokyo weather"}}}}, '
-    '{{"id": "s2", "tool": "file_op", "input": {{"path": "tokyo.txt", "content": "$s1.result"}}, "depends_on": ["s1"]}}]}}\n\n'
+    'User: "Process X and save the result"\n'
+    '{{"intent": "Process X and save the result", '
+    '"steps": [{{"id": "s1", "tool": "tool_X", "input": {{"query": "X"}}}}, '
+    '{{"id": "s2", "tool": "tool_Y", "input": {{"path": "output.txt", "content": "$s1.result"}}, "depends_on": ["s1"]}}]}}\n\n'
     "## Example 3 — Data flow with $ references:\n"
-    'User: "Fetch a webpage and save its content to a file"\n'
-    '{{"intent": "Fetch webpage content and save to file", '
-    '"steps": [{{"id": "s1", "tool": "http_request", "input": {{"method": "GET", "url": "https://example.com"}}}}, '
-    '{{"id": "s2", "tool": "file_op", "input": {{"operation": "write", "path": "page.html", "content": "$s1.body"}}, "depends_on": ["s1"]}}]}}\n\n'
+    'User: "Fetch X and save to Z"\n'
+    '{{"intent": "Fetch X content and save to Z", '
+    '"steps": [{{"id": "s1", "tool": "tool_A", "input": {{"method": "GET", "url": "https://example.com"}}}}, '
+    '{{"id": "s2", "tool": "tool_B", "input": {{"operation": "write", "path": "result.txt", "content": "$s1.body"}}, "depends_on": ["s1"]}}]}}\n\n'
     "## Data Flow\n"
     "When a step depends on another, reference its output using $step_id.field.\n"
     "- Syntax: $s1.result, $s1.body, $s1.summary, $s1.content, etc.\n"
@@ -85,6 +87,8 @@ _REVISE_PROMPT = (
     "You are a task planner reviewing execution results.\n"
     "Some steps completed, some may have failed. Decide what to do next.\n\n"
     "## Original User Intent\n"
+    "{user_intent}\n\n"
+    "## Plan Intent\n"
     "{intent}\n\n"
     "{system_state}\n\n"
     "## Output JSON format\n"
@@ -96,12 +100,25 @@ _REVISE_PROMPT = (
     'If all steps are done, return {{"intent": "<summary>", "steps": []}}.\n'
     'If the task cannot be completed, return {{"intent": "<summary>", '
     '"steps": [], "failed": true, "reason": "explanation"}}.\n\n'
+    "### step_tasks — assess EVERY executed step\n"
+    "For each step that already ran, judge whether its BUSINESS GOAL was met:\n"
+    '  "achieved"     — step ran and its result clearly satisfies the goal\n'
+    '  "partial"      — step ran but result is incomplete or low quality\n'
+    '  "not_achieved" — step ran but result is wrong / useless / missing data\n'
+    '  "waived"       — step was skipped or its result is irrelevant now\n'
+    '  "unknown"      — you cannot determine (use sparingly, prefer a real judgment)\n'
+    "Include step_tasks as a dict of step_id → assessment. Example:\n"
+    '  "step_tasks": {{"s1": "achieved", "s2": "not_achieved", "s3": "partial"}}\n\n'
     "## Data Flow\n"
     "Use $step_id.field to reference a previous step's output "
     "(e.g., $s1.result, $s1.body, $s1.summary). "
     "Never hardcode values that should come from upstream.\n\n"
     "## Available Tools\n"
     "{tool_descriptions}\n"
+    "## System Monitoring Feedback\n"
+    "If feedback below suggests an alternative tool or approach (e.g. 'Use http_request "
+    "instead of browser'), you MUST create steps using the suggested alternative "
+    "before declaring failure. Ignoring actionable feedback is not permitted.\n"
     "{feedback_section}"
 )
 
@@ -115,6 +132,57 @@ _ANSWER_PROMPT = (
 
 _SERIAL_THINK_PROMPT = (
     "You are an autonomous agent executing a task.\n\n"
+    "## Your Task\n"
+    "{intent}\n\n"
+    "## Available Tools\n"
+    "{tool_list}\n\n"
+    "## Instructions\n"
+    "1. Think step by step about what to do next.\n"
+    "2. Choose ONE action from the three options below:\n"
+    "   (A) Call a tool — if you need external information or want to perform an action.\n"
+    "   (B) ANSWER directly — if the question is conversational or answerable from your own knowledge.\n"
+    "   (C) Output <STOP> — if the task is complete or cannot be completed.\n"
+    "3. Output your response in one of these three formats:\n\n"
+    "**Option A — Call a tool:**\n"
+    "THOUGHT: <your reasoning>\n"
+    "TOOL: <tool_name>\n"
+    "ARGS: <JSON arguments>\n\n"
+    "**Option B — Answer directly:**\n"
+    "ANSWER: <your direct response to the user>\n\n"
+    "**Option C — Stop:**\n"
+    "THOUGHT: <summary of what was accomplished>\n"
+    "<STOP>\n\n"
+    "## Rules\n"
+    "- Use tools to interact with the world. Do not simulate results.\n"
+    "- Do not repeat failed tool calls without adjusting your approach.\n"
+    "- If you encounter an error you cannot recover from, output <STOP> with a failure reason.\n"
+    "- For simple conversational queries, use **Option B** — answer directly without calling a tool.\n"
+)
+
+_SERIAL_THINK_FN_PROMPT = (
+    "You are an autonomous agent executing a task using function-calling.\n\n"
+    "## Your Task\n"
+    "{intent}\n\n"
+    "## Available Tools\n"
+    "{tool_list}\n\n"
+    "The tools above are also provided via the OpenAI function-calling API.\n"
+    "Call them by emitting structured tool_calls — do NOT write TOOL:/ARGS: text.\n"
+    "If you want to call a tool, just issue the tool_call via the API.\n\n"
+    "## Instructions\n"
+    "1. Think step by step about what to do next — record your reasoning in the message `content`.\n"
+    "2. Choose ONE action:\n"
+    "   (A) Call one or more tools — issue tool_calls via the API.\n"
+    "   (B) ANSWER directly — write `ANSWER: <your direct response to the user>` in `content`.\n"
+    "   (C) Stop — write `THOUGHT: <summary>` then output `<STOP>` in `content`.\n\n"
+    "## Rules\n"
+    "- Use tools to interact with the world. Do not simulate results.\n"
+    "- Do not repeat failed tool calls without adjusting your approach.\n"
+    "- If you encounter an error you cannot recover from, output <STOP> with a failure reason.\n"
+    "- For simple conversational queries, use **Option B** — answer directly without calling a tool.\n"
+)
+
+_SERIAL_THINK_TEXT_PROMPT = (
+    "You are an autonomous agent executing a task using plain text output.\n\n"
     "## Your Task\n"
     "{intent}\n\n"
     "## Available Tools\n"
@@ -159,6 +227,8 @@ _PHASE_PROMPTS: dict[AgentPhase, str] = {
     AgentPhase.REVISE: _REVISE_PROMPT,
     AgentPhase.ANSWER: _ANSWER_PROMPT,
     AgentPhase.SERIAL_THINK: _SERIAL_THINK_PROMPT,
+    AgentPhase.SERIAL_THINK_FN: _SERIAL_THINK_FN_PROMPT,
+    AgentPhase.SERIAL_THINK_TEXT: _SERIAL_THINK_TEXT_PROMPT,
     AgentPhase.SUMMARIZE: _SUMMARIZE_PROMPT,
 }
 

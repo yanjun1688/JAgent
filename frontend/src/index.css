@@ -1,0 +1,162 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+
+  主题变量 (Theme Tokens)
+  ~~~~~~~~~~~~~~~~~~~~~~~~
+
+  采用 CSS 变量驱动 Tailwind 语义颜色，由 .light 类切换白天/黑夜。
+  - var(--bg-primary) 等以空格分隔 RGB 数值，便于配合 Tailwind 的
+    <alpha-value> 透明度插值（如 bg-background-secondary/80）。
+  --surface-* 用作半透明玻璃表层背景；--border-* 为软边框；
+  --code-bg 为代码块底色。
+
+*/
+
+@layer base {
+  :root {
+    /* 背景 */
+    --bg-primary: 10 10 15;
+    --bg-secondary: 18 18 26;
+    --bg-tertiary: 26 26 46;
+
+    /* 文本 */
+    --text-primary: 248 250 252;
+    --text-secondary: 148 163 184;
+    --text-tertiary: 100 116 139;
+    --text-muted: 71 85 105;
+
+    /* 玻璃表层 (overlay) */
+    --surface-0: rgba(255, 255, 255, 0.02);
+    --surface-1: rgba(255, 255, 255, 0.05);
+    --surface-2: rgba(255, 255, 255, 0.08);
+    --surface-3: rgba(255, 255, 255, 0.10);
+
+    /* 软边框 */
+    --border-soft: rgba(255, 255, 255, 0.1);
+    --border-softer: rgba(255, 255, 255, 0.05);
+
+    /* 代码块 */
+    --code-bg: rgba(0, 0, 0, 0.3);
+    --code-text: 203 213 225;
+
+    /* 阴影 */
+    --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  }
+
+  .light {
+    /* 背景 */
+    --bg-primary: 244 245 247;
+    --bg-secondary: 255 255 255;
+    --bg-tertiary: 238 240 243;
+
+    /* 文本 */
+    --text-primary: 15 23 42;
+    --text-secondary: 71 85 105;
+    --text-tertiary: 100 116 139;
+    --text-muted: 148 163 184;
+
+    /* 玻璃表层 (浅色用深色低饱和叠加) */
+    --surface-0: rgba(15, 23, 42, 0.02);
+    --surface-1: rgba(15, 23, 42, 0.04);
+    --surface-2: rgba(15, 23, 42, 0.07);
+    --surface-3: rgba(15, 23, 42, 0.10);
+
+    /* 软边框 */
+    --border-soft: rgba(15, 23, 42, 0.1);
+    --border-softer: rgba(15, 23, 42, 0.05);
+
+    /* 代码块 */
+    --code-bg: rgba(15, 23, 42, 0.05);
+    --code-text: 51 65 85;
+
+    /* 阴影 */
+    --glass-shadow: 0 8px 32px rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: rgb(var(--bg-primary));
+    color: rgb(var(--text-primary));
+    margin: 0;
+    @apply font-sans antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgb(var(--text-secondary) / 0.2);
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--text-secondary) / 0.35);
+  }
+}
+
+@layer components {
+  .glass-base {
+    background-color: var(--surface-1);
+    backdrop-filter: blur(16px) saturate(150%);
+    border: 1px solid var(--border-soft);
+  }
+
+  .glass-elevated {
+    background-color: var(--surface-2);
+    backdrop-filter: blur(24px) saturate(200%);
+    border: 1px solid var(--border-soft);
+    box-shadow: var(--glass-shadow);
+  }
+
+  .glass-frosted {
+    background-color: rgb(var(--bg-primary) / 0.7);
+    backdrop-filter: blur(40px) saturate(150%);
+  }
+
+  .gradient-nebula {
+    background: linear-gradient(135deg, #6366f1 0%, #a855f7 50%, #ec4899 100%);
+  }
+
+  .gradient-aurora {
+    background:
+      radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.15) 0%, transparent 50%),
+      radial-gradient(at 100% 0%, rgba(168, 85, 247, 0.15) 0%, transparent 50%),
+      radial-gradient(at 100% 100%, rgba(236, 72, 153, 0.1) 0%, transparent 50%),
+      radial-gradient(at 0% 100%, rgba(16, 185, 129, 0.1) 0%, transparent 50%);
+    background-size: 200% 200%;
+  }
+}
+
+@layer utilities {
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+
+    .particle-system {
+      display: none;
+    }
+
+    .gradient-aurora {
+      animation: none !important;
+    }
+  }
+}

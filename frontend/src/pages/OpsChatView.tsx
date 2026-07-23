@@ -1,27 +1,28 @@
 import React, { useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import ChatDrawer from '../components/ChatDrawer'
+import ConversationView from '../components/ConversationView'
 import OpsRealTimePanel from '../components/OpsRealTimePanel'
 import { useRunWebSocket } from '../hooks/useRunWebSocket'
+import { restoreCurrentConversationId } from '../api/conversation-client'
 
 export default function OpsChatView() {
   const [searchParams] = useSearchParams()
   const [activeRunId, setActiveRunId] = useState<string | null>(searchParams.get('runId') || null)
 
-  const handleRunChange = useCallback((runId: string | null) => {
+  const handleActiveRunChange = useCallback((runId: string | null) => {
     setActiveRunId(runId)
   }, [])
 
   return (
     <div style={{ display: 'flex', gap: 12, height: 'calc(100vh - 60px)' }}>
-      <div style={{ width: 420, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
-        <ChatDrawer
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        <ConversationView
           style={{ flex: 1 }}
-          initialRunId={activeRunId || undefined}
-          onRunChange={handleRunChange}
+          initialConversationId={restoreCurrentConversationId() || undefined}
+          onActiveRunChange={handleActiveRunChange}
         />
       </div>
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div style={{ width: 420, flexShrink: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <OpsRealTimeView activeRunId={activeRunId} />
       </div>
     </div>

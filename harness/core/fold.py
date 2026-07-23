@@ -10,6 +10,9 @@ from harness.models.events import (
     ConfirmationRequestedPayload,
     ContextCheckpointedPayload,
     ContextCompressedPayload,
+    ConversationStartedPayload,
+    ConversationMessagePayload,
+    ConversationEndedPayload,
     EpisodeSummary,
     Event,
     EventType,
@@ -91,6 +94,7 @@ class RunState:
     plan_history: list[dict] = field(default_factory=list)
     latest_plan: dict | None = None
     plan_boundary_seqs: list[int] = field(default_factory=list)
+    conversation_id: str | None = None
 
 
 def fold_events(events: list[Event]) -> RunState:
@@ -116,6 +120,7 @@ def fold_events(events: list[Event]) -> RunState:
                 state.intent = p.intent
                 state.context_snapshot = p.context_snapshot
                 state.status = RunStatus.RUNNING
+                state.conversation_id = p.conversation_id
 
             case EventType.AGENT_THOUGHT:
                 p = AgentThoughtPayload(**event.payload)
@@ -240,6 +245,11 @@ def fold_events(events: list[Event]) -> RunState:
                 if p.result_summary:
                     state.summary = p.result_summary
 
+            case EventType.RUN_COMMAND:
+                # Control-plane command events are consumed by Scheduler and do
+                # not themselves mutate folded run state.
+                pass
+
             case EventType.FEEDBACK_INJECTED:
                 p = FeedbackInjectedPayload(**event.payload)
                 if p.injected_at_seq is None:
@@ -314,5 +324,8 @@ def fold_events(events: list[Event]) -> RunState:
                 if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
                     state.latest_plan["status"] = "failed"
                     state.latest_plan["final_error"] = p.final_error
+
+            case EventType.CONVERSATION_STARTED | EventType.CONVERSATION_MESSAGE | EventType.CONVERSATION_ENDED:
+                pass
 
     return state

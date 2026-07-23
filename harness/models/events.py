@@ -22,6 +22,7 @@ class EventType(str, Enum):
     RUN_RESUMED = "RunResumed"
     RUN_COMPLETED = "RunCompleted"
     RUN_FAILED = "RunFailed"
+    RUN_COMMAND = "RunCommand"
     FEEDBACK_INJECTED = "FeedbackInjected"
     PLAN_CREATED = "PlanCreated"
     DAG_STEP_STARTED = "DagStepStarted"
@@ -30,6 +31,9 @@ class EventType(str, Enum):
     PLAN_REVISED = "PlanRevised"
     PLAN_COMPLETED = "PlanCompleted"
     PLAN_FAILED = "PlanFailed"
+    CONVERSATION_STARTED = "ConversationStarted"
+    CONVERSATION_MESSAGE = "ConversationMessage"
+    CONVERSATION_ENDED = "ConversationEnded"
 
 
 class ToolResultType(str, Enum):
@@ -43,6 +47,25 @@ class ToolResultType(str, Enum):
 class RunStartedPayload(BaseModel):
     intent: str
     context_snapshot: dict[str, Any] = Field(default_factory=dict)
+    conversation_id: str | None = None
+
+
+class ConversationStartedPayload(BaseModel):
+    conversation_id: str
+    title: str
+    user_id: str = "default"
+
+
+class ConversationMessagePayload(BaseModel):
+    conversation_id: str
+    run_id: str
+    role: str
+    content: str
+
+
+class ConversationEndedPayload(BaseModel):
+    conversation_id: str
+    summary: str = ""
 
 
 class AgentThoughtPayload(BaseModel):
@@ -144,6 +167,13 @@ class RunFailedPayload(BaseModel):
     final_error: str
     event_count: int
     result_summary: str | None = None
+
+
+class RunCommandPayload(BaseModel):
+    command: Literal["hard_abort", "soft_abort", "pause", "resume", "skip_tool"]
+    reason: str = ""
+    affected_tool: str | None = None
+    issued_by: str = "monitor"
 
 
 class FeedbackCategory(str, Enum):
@@ -252,6 +282,7 @@ PAYLOAD_MODEL_MAP: dict[EventType, type[BaseModel]] = {
     EventType.RUN_RESUMED: RunResumedPayload,
     EventType.RUN_COMPLETED: RunCompletedPayload,
     EventType.RUN_FAILED: RunFailedPayload,
+    EventType.RUN_COMMAND: RunCommandPayload,
     EventType.FEEDBACK_INJECTED: FeedbackInjectedPayload,
     EventType.PLAN_CREATED: PlanCreatedPayload,
     EventType.DAG_STEP_STARTED: DagStepStartedPayload,
@@ -260,6 +291,9 @@ PAYLOAD_MODEL_MAP: dict[EventType, type[BaseModel]] = {
     EventType.PLAN_REVISED: PlanRevisedPayload,
     EventType.PLAN_COMPLETED: PlanCompletedPayload,
     EventType.PLAN_FAILED: PlanFailedPayload,
+    EventType.CONVERSATION_STARTED: ConversationStartedPayload,
+    EventType.CONVERSATION_MESSAGE: ConversationMessagePayload,
+    EventType.CONVERSATION_ENDED: ConversationEndedPayload,
 }
 
 

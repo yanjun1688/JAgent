@@ -18,7 +18,7 @@ from harness.tools.semantic import SemanticEvaluator
 from harness.tools.executor import ExecutionStatus
 from harness.storage.event_store import EventStore
 from harness.core.fold import fold_events, ToolResultStatus
-from harness.core.dag_types import StepResult, StepStatus
+from harness.core.dag_types import ExecState, StepResult
 
 
 # ── SuccessIndicator model tests ──────────────────────────────────
@@ -488,21 +488,21 @@ class TestExecutorSemanticEvaluation:
 
 class TestStepResultProperties:
     def test_is_done_covers_completed(self):
-        sr = StepResult(step_id="s1", status=StepStatus.COMPLETED)
+        sr = StepResult(step_id="s1", exec_state=ExecState.COMPLETED)
         assert sr.is_completed is True
         assert sr.is_done is True
         assert sr.is_failed is False
         assert sr.has_soft_error is False
 
     def test_is_done_covers_soft_error(self):
-        sr = StepResult(step_id="s1", status=StepStatus.SOFT_ERROR, error="e")
+        sr = StepResult(step_id="s1", exec_state=ExecState.SOFT_ERROR, error="e")
         assert sr.is_completed is False
         assert sr.is_done is True
         assert sr.is_failed is False
         assert sr.has_soft_error is True
 
     def test_soft_error_not_failed(self):
-        sr = StepResult(step_id="s1", status=StepStatus.SOFT_ERROR)
+        sr = StepResult(step_id="s1", exec_state=ExecState.SOFT_ERROR)
         assert sr.is_failed is False
         assert sr.needs_confirmation is False
 
@@ -633,7 +633,7 @@ class TestDagExecutorSoftError:
         all_results = await dag.execute(run_id="run-dag-se", plan=plan)
         assert len(all_results) == 1
         sr = all_results["s1"]
-        assert sr.status == StepStatus.SOFT_ERROR
+        assert sr.exec_state == ExecState.SOFT_ERROR
         assert sr.has_soft_error is True
         assert sr.is_done is True
 
@@ -658,7 +658,7 @@ class TestDagExecutorSoftError:
 
         all_results = await dag.execute(run_id="run-dag-ok", plan=plan)
         sr = all_results["s1"]
-        assert sr.status == StepStatus.COMPLETED
+        assert sr.exec_state == ExecState.COMPLETED
         assert sr.has_soft_error is False
         assert sr.is_done is True
 

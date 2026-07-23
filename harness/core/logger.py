@@ -12,6 +12,7 @@ Three namespaces with independently configurable levels:
                                 anomaly detection, feedback injection
 
 Utilities:
+  setup_logging() — configure file + console handlers (call once at startup)
   log_duration()  — context manager that logs ENTER/EXIT with wall-clock ms
   fmtkv()         — format key=value pairs for structured log lines
 """
@@ -21,7 +22,52 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
+
+_logging_configured = False
+
+
+def setup_logging(
+    log_file: str | Path = "data/logs/harness.log",
+    level: int = logging.DEBUG,
+    console: bool = True,
+) -> None:
+    """Configure harness loggers with file + optional console handlers.
+
+    Idempotent — repeated calls are no-ops.  Call once at startup before
+    any agent/guard/monitor loggers are used, or call with a custom path
+    before the first import of harness submodules.
+    """
+    global _logging_configured
+    if _logging_configured:
+        return
+
+    root = logging.getLogger("harness")
+    root.setLevel(level)
+    root.propagate = False  # don't duplicate to root logger
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)-7s] %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # ── file handler ──────────────────────────────────────
+    log_path = Path(log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = logging.FileHandler(str(log_path), encoding="utf-8")
+    fh.setLevel(level)
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
+
+    # ── console handler ───────────────────────────────────
+    if console:
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.WARNING)  # console: WARNING+ only, file gets everything
+        ch.setFormatter(fmt)
+        root.addHandler(ch)
+
+    _logging_configured = True
 
 
 def guard_logger(name: str) -> logging.Logger:

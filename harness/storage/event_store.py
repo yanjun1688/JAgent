@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS events (
     payload         TEXT    NOT NULL,
     idempotency_key TEXT,
     created_at      REAL    NOT NULL,
+    conversation_id TEXT,
     PRIMARY KEY (run_id, seq)
 );
 
@@ -44,6 +45,16 @@ CREATE TRIGGER IF NOT EXISTS trg_prevent_delete_events
 BEGIN
     SELECT RAISE(ABORT, 'Append-Only: DELETE is forbidden on events table');
 END;
+
+CREATE TABLE IF NOT EXISTS conversations (
+    conversation_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL DEFAULT 'default',
+    title TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    message_count INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -75,6 +86,52 @@ class EventStore:
         self._post_append: list[Callable[[Event], Awaitable[None]]] = []
         self._seq_locks: dict[str, asyncio.Lock] = {}
         self._append_count: int = 0
+        # run_id -> conversation_id cache, populated from RunStarted payloads.
+        # Used by append_event to fill conversation_id column for subsequent
+        # events on the same run whose payload lacks this field.
+        self._run_to_conv: dict[str, str] = {}
+
+    async def _migrate_add_conversation_id_column(self) -> None:
+        """Add conversation_id column to events table for legacy persistent DBs.
+
+        DDL only — does not modify existing rows (Append-Only invariant preserved).
+        The conversation_id index is created here (rather than in _SCHEMA_SQL)
+        so that legacy DBs, whose CREATE TABLE IF NOT EXISTS is a no-op and
+        whose table lacks the column, can ALTER TABLE before the index references it.
+        For fresh DBs the column is already in the CREATE TABLE; this still runs
+        to ensure the index exists.
+        """
+        cursor = await self.conn.execute("PRAGMA table_info(events)")
+        rows = await cursor.fetchall()
+        cols = {r[1] for r in rows}
+        if "conversation_id" not in cols:
+            _log_write.info("Migrating events table: adding conversation_id column")
+            await self.conn.execute("ALTER TABLE events ADD COLUMN conversation_id TEXT")
+            await self.conn.commit()
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_conversation ON events(conversation_id)"
+        )
+        await self.conn.commit()
+
+    async def _prepopulate_run_to_conv_cache(self) -> None:
+        """On startup, rebuild _run_to_conv from existing RunStarted payloads.
+
+        Required for persistent DBs so that subsequent events on already-existing
+        runs continue to receive the conversation_id column.
+        """
+        cursor = await self.conn.execute(
+            "SELECT run_id, payload FROM events WHERE event_type = ?",
+            (EventType.RUN_STARTED.value,),
+        )
+        rows = await cursor.fetchall()
+        for r in rows:
+            try:
+                p = json.loads(r["payload"])
+            except (json.JSONDecodeError, KeyError):
+                continue
+            cid = p.get("conversation_id")
+            if cid:
+                self._run_to_conv[r["run_id"]] = cid
 
     async def __aenter__(self) -> EventStore:
         await self.initialize()
@@ -94,6 +151,10 @@ class EventStore:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(_SCHEMA_SQL)
         await self._conn.commit()
+        # Migration: existing persistent DBs predate `conversation_id` column.
+        # DDL is permitted (Append-Only trigger only forbids UPDATE/DELETE on rows).
+        await self._migrate_add_conversation_id_column()
+        await self._prepopulate_run_to_conv_cache()
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -134,10 +195,20 @@ class EventStore:
         created_at = time.time()
         payload_json = json.dumps(payload, ensure_ascii=False)
 
+        # Auto-resolve conversation_id: prefer payload's own field (covers
+        # RunStarted, ConversationStarted/Message/Ended); otherwise fall back
+        # to the run-level cache so subsequent run events keep the column filled.
+        conversation_id = payload.get("conversation_id")
+        if conversation_id is None:
+            conversation_id = self._run_to_conv.get(run_id)
+        if conversation_id is not None and run_id not in self._run_to_conv:
+            # Cache new mapping for future events on this run.
+            self._run_to_conv[run_id] = conversation_id
+
         sql = (
-            "INSERT INTO events (run_id, seq, event_type, payload, idempotency_key, created_at) "
+            "INSERT INTO events (run_id, seq, event_type, payload, idempotency_key, created_at, conversation_id) "
             "SELECT ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE run_id = ?), "
-            "?, ?, ?, ?"
+            "?, ?, ?, ?, ?"
         )
 
         lock = self._seq_locks.setdefault(run_id, asyncio.Lock())
@@ -146,7 +217,8 @@ class EventStore:
                 try:
                     await self.conn.execute(
                         sql,
-                        (run_id, run_id, event_type.value, payload_json, idempotency_key, created_at),
+                        (run_id, run_id, event_type.value, payload_json,
+                         idempotency_key, created_at, conversation_id),
                     )
                     await self.conn.commit()
                     break
@@ -204,7 +276,7 @@ class EventStore:
         rows = await cursor.fetchall()
         _ms = (time.monotonic() - _start) * 1000
         _log_query.debug("get_events(run=%s): %d rows, %dms", run_id, len(rows), _ms)
-        return [_row_to_event(dict(r)) for r in rows]
+        return [e for e in (_row_to_event(dict(r)) for r in rows) if e is not None]
 
     async def get_event_range(
         self,
@@ -228,7 +300,7 @@ class EventStore:
         _ms = (time.monotonic() - _t0) * 1000
         _log_query.debug("get_event_range(run=%s, from=%s): %d rows, %dms",
                          run_id, from_seq, len(rows), _ms)
-        return [_row_to_event(dict(r)) for r in rows]
+        return [e for e in (_row_to_event(dict(r)) for r in rows) if e is not None]
 
     async def get_latest_seq(self, run_id: str) -> int:
         """Return the highest seq for a run, or 0 if no events exist."""
@@ -287,6 +359,7 @@ class EventStore:
                    MAX(created_at) AS updated_at,
                    COUNT(*) AS event_count
             FROM events
+            WHERE conversation_id IS NULL OR run_id != conversation_id
             GROUP BY run_id
             ORDER BY MAX(created_at) DESC
             LIMIT ? OFFSET ?
@@ -303,7 +376,11 @@ class EventStore:
     async def total_run_count(self) -> int:
         _t0 = time.monotonic()
         cursor = await self.conn.execute(
-            "SELECT COUNT(DISTINCT run_id) AS cnt FROM events"
+            """
+            SELECT COUNT(DISTINCT run_id) AS cnt
+            FROM events
+            WHERE conversation_id IS NULL OR run_id != conversation_id
+            """
         )
         row = await cursor.fetchone()
         _ms = (time.monotonic() - _t0) * 1000
@@ -322,7 +399,7 @@ class EventStore:
         )
         rows = await cursor.fetchall()
         _ms = (time.monotonic() - _t0) * 1000
-        result = [_row_to_event(dict(r)) for r in rows]
+        result = [e for e in (_row_to_event(dict(r)) for r in rows) if e is not None]
         _log_query.debug("get_events_for_runs(%d runs): %d rows, %dms",
                          len(run_ids), len(result), _ms)
         return result
@@ -337,6 +414,8 @@ class EventStore:
         _ms = (time.monotonic() - _t0) * 1000
         for row in rows:
             event = _row_to_event(dict(row))
+            if event is None:
+                continue
             payload = json.loads(row["payload"])
             if payload.get("confirmation_id") == confirmation_id:
                 _log_query.debug("find_confirmation(run=%s, id=%s): hit, %dms",
@@ -365,6 +444,148 @@ class EventStore:
         rows = await self.execute_query(sql, params)
         return rows[0] if rows else None
 
+    # ── Conversation queries ──────────────────────────────────
+
+    async def upsert_conversation(
+        self,
+        conversation_id: str,
+        title: str,
+        user_id: str = "default",
+    ) -> None:
+        now = time.time()
+        await self.conn.execute(
+            """INSERT INTO conversations (conversation_id, user_id, title, status, created_at, updated_at, message_count)
+               VALUES (?, ?, ?, 'active', ?, ?, 0)
+               ON CONFLICT(conversation_id) DO UPDATE SET
+               title = excluded.title, updated_at = excluded.updated_at""",
+            (conversation_id, user_id, title, now, now),
+        )
+        await self.conn.commit()
+
+    async def list_conversations(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        user_id: str | None = None,
+    ) -> list[dict]:
+        if user_id:
+            cursor = await self.conn.execute(
+                """SELECT * FROM conversations WHERE status = 'active' AND user_id = ?
+                   ORDER BY updated_at DESC LIMIT ? OFFSET ?""",
+                (user_id, limit, offset),
+            )
+        else:
+            cursor = await self.conn.execute(
+                """SELECT * FROM conversations WHERE status = 'active'
+                   ORDER BY updated_at DESC LIMIT ? OFFSET ?""",
+                (limit, offset),
+            )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def total_conversation_count(self, user_id: str | None = None) -> int:
+        if user_id:
+            cursor = await self.conn.execute(
+                "SELECT COUNT(*) AS cnt FROM conversations WHERE status = 'active' AND user_id = ?",
+                (user_id,),
+            )
+        else:
+            cursor = await self.conn.execute(
+                "SELECT COUNT(*) AS cnt FROM conversations WHERE status = 'active'",
+            )
+        row = await cursor.fetchone()
+        return row["cnt"] if row else 0
+
+    async def get_conversation(self, conversation_id: str) -> dict | None:
+        cursor = await self.conn.execute(
+            "SELECT * FROM conversations WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def delete_conversation(self, conversation_id: str) -> None:
+        now = time.time()
+        await self.conn.execute(
+            "UPDATE conversations SET status = 'archived', updated_at = ? WHERE conversation_id = ?",
+            (now, conversation_id),
+        )
+        await self.conn.commit()
+
+    async def update_conversation(
+        self,
+        conversation_id: str,
+        title: str | None = None,
+        status: str | None = None,
+    ) -> bool:
+        now = time.time()
+        updates = ["updated_at = ?"]
+        params: list = [now]
+        if title is not None:
+            updates.append("title = ?")
+            params.append(title)
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        params.append(conversation_id)
+        sql = f"UPDATE conversations SET {', '.join(updates)} WHERE conversation_id = ?"
+        cursor = await self.conn.execute(sql, params)
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def increment_message_count(self, conversation_id: str) -> None:
+        now = time.time()
+        await self.conn.execute(
+            "UPDATE conversations SET message_count = message_count + 1, updated_at = ? WHERE conversation_id = ?",
+            (now, conversation_id),
+        )
+        await self.conn.commit()
+
+    async def get_events_for_conversation(self, conversation_id: str) -> list[Event]:
+        """Return all events associated with a conversation, as a coherent timeline.
+
+        An event belongs to the conversation when EITHER:
+          - its `conversation_id` column equals this conversation (new data
+            written after the P0-04 migration: RunStarted carries the field
+            in payload, subsequent run events inherit it via the run-level
+            cache, conversation-level events carry it directly), OR
+          - its `run_id` equals the conversation_id (legacy conversation-level
+            events written before the column existed, where the column is NULL).
+
+        Both arms use DISTINCT to avoid double-counting rows that satisfy
+        both conditions (conversation-level events where run_id == conversation_id
+        and the column is also filled).
+
+        Ordering is by created_at then seq to give a real-world interleaving
+        of events across multiple runs in the same conversation.
+        """
+        _t0 = time.monotonic()
+        cursor = await self.conn.execute(
+            """
+            SELECT run_id, seq, event_type, payload, idempotency_key, created_at
+            FROM events
+            WHERE conversation_id = ? OR run_id = ?
+            ORDER BY created_at ASC, seq ASC
+            """,
+            (conversation_id, conversation_id),
+        )
+        rows = await cursor.fetchall()
+        _ms = (time.monotonic() - _t0) * 1000
+        result = [e for e in (_row_to_event(dict(r)) for r in rows) if e is not None]
+        _log_query.debug("get_events_for_conversation(conv=%s): %d rows, %dms",
+                         conversation_id, len(result), _ms)
+        return result
+
+    def evict_run_to_conv(self, run_id: str) -> None:
+        """Drop a run's cached conversation_id mapping.
+
+        Safe to call after the run has reached a terminal state — at that
+        point no new events will be appended for this run_id, so the cache
+        entry is no longer needed for column auto-fill. Bounded growth is
+        achieved by Scheduler terminal hooks calling this method.
+        """
+        self._run_to_conv.pop(run_id, None)
+
 
 # ── Helpers ────────────────────────────────────────────────────
 
@@ -376,11 +597,28 @@ def _validate_payload(event_type: EventType, payload: dict[str, Any]) -> None:
     model_cls.model_validate(payload)
 
 
-def _row_to_event(row: dict[str, Any]) -> Event:
+def _row_to_event(row: dict[str, Any]) -> Event | None:
+    """Materialize a DB row into an Event.
+
+    Returns None for rows whose `event_type` no longer exists in the
+    EventType enum (e.g. legacy `QualityCheckCompleted` from V0.8 removed
+    in f63e474). Append-Only invariant forbids DELETE so we tolerate these
+    historical rows on read paths instead of crashing the whole query.
+    """
+    raw = row["event_type"]
+    try:
+        et = EventType(raw)
+    except ValueError:
+        _log_query.warning(
+            "Skipping row with unknown event_type=%r (run=%s seq=%s) — "
+            "likely a legacy event from a removed enum member",
+            raw, row.get("run_id"), row.get("seq"),
+        )
+        return None
     return Event(
         run_id=row["run_id"],
         seq=row["seq"],
-        event_type=EventType(row["event_type"]),
+        event_type=et,
         payload=json.loads(row["payload"]),
         idempotency_key=row["idempotency_key"],
         created_at=row["created_at"],

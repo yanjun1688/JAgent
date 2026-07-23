@@ -62,6 +62,12 @@ class AgentLoopScheduler(BaseScheduler):
                 await self._fail(run_id, "Run cancelled by user")
                 return fold_events(await self.store.get_events(run_id))
 
+            command_state = await self._handle_pending_commands(run_id)
+            if command_state is not None:
+                if command_state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
+                    return command_state
+                continue
+
             _sched_iter.info("[iter %d/%d] Starting iteration", _iteration, self.config.max_iterations)
 
             events = await self.store.get_events(run_id)

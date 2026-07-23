@@ -6,13 +6,12 @@ import asyncio
 from typing import Any, Callable
 from uuid import uuid4
 from harness.core.dag_executor import DagExecutor, PlanSuspended
-from harness.core.dag_types import StepResult, StepStatus
+from harness.core.dag_types import ExecState, StepResult, TaskState
 from harness.core.fold import fold_events, RunState, RunStatus
 from harness.core.logger import fmtkv
 from harness.core.logger import agent_logger, guard_logger
 from harness.core.planner import Planner
 from harness.core.scheduler.base import BaseScheduler, SchedulerConfig
-from harness.core.scheduler.fallback_kernel import _FallbackKernel
 from harness.core.scheduler.loop import AgentLoopScheduler
 from harness.core.system_prompt import AgentPhase, get_prompt
 from harness.models.events import (
@@ -96,7 +95,7 @@ class PlanningExecutorScheduler(BaseScheduler):
         _sched_ctrl.info("[classify] phase=%s len=%d intent_truncated=%s",
                          AgentPhase.CLASSIFY.value, len(prompt), truncated[:80])
         try:
-            response = await self.planner.llm.chat(
+            chat_resp = await self.planner.llm.chat(
                 [{"role": "system", "content": prompt}],
                 temperature=0.0,
                 max_tokens=4,
@@ -104,7 +103,7 @@ class PlanningExecutorScheduler(BaseScheduler):
         except Exception as exc:
             _sched_think.warning("[classify] LLM call failed: %s — assuming needs_tools=True", exc)
             return True
-        result = response.strip().lower()
+        result = chat_resp.content.strip().lower()
         needs = result != "no"
         _sched_ctrl.info("[classify] intent=%s needs_tools=%s raw=%s", truncated[:80], needs, result[:20])
         return needs
@@ -148,7 +147,7 @@ class PlanningExecutorScheduler(BaseScheduler):
                 if state.status in (RunStatus.FAILED, RunStatus.COMPLETED):
                     return True, failed_step_ids, consecutive_failures
                 retry_raw = await self.dag_executor.retry_step(run_id, plan, confirm_sid, results)
-                if retry_raw.is_completed:
+                if retry_raw.is_completed or retry_raw.exec_state == ExecState.IDEMPOTENT:
                     results[confirm_sid] = retry_raw
                     _sched_act.info("[%s] Step %s completed after confirmation", tag, confirm_sid)
                     await self.store.append_event(
@@ -185,7 +184,9 @@ class PlanningExecutorScheduler(BaseScheduler):
         loop_iteration = 0
 
         _sched_ctrl.info("[lifecycle] Plan-Execute-Revise loop START for run=%s intent=%s", run_id, intent[:120])
-        while state.status == RunStatus.RUNNING:
+        while True:
+            if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
+                return state
             loop_iteration += 1
             if loop_iteration > self.config.max_iterations:
                 _sched_breaker.error("[breaker] Exceeded max iterations (%d)", self.config.max_iterations)
@@ -194,6 +195,16 @@ class PlanningExecutorScheduler(BaseScheduler):
             if self._is_cancelled(run_id):
                 await self._fail(run_id, "Run cancelled by user")
                 return await self._refresh_state(run_id)
+
+            command_state = await self._handle_pending_commands(run_id)
+            if command_state is not None:
+                state = command_state
+                if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
+                    return state
+                if state.status == RunStatus.PAUSED:
+                    await self._handle_pause(run_id)
+                    state = await self._refresh_state(run_id)
+                continue
 
             if state.status == RunStatus.PAUSED:
                 _sched_ctrl.info("[ctrl] Plan loop detected PAUSED for run=%s, pause_reason=%s, pending_confirmations=%d",
@@ -275,7 +286,7 @@ class PlanningExecutorScheduler(BaseScheduler):
                              len([r for r in results.values() if isinstance(r, StepResult) and r.is_completed]))
             completed_ids = {
                 sid for sid, r in results.items()
-                if isinstance(r, StepResult) and r.is_completed
+                if isinstance(r, StepResult) and r.should_not_rerun
                 and sid not in {s.id for s in plan.steps}
             }
             layers = plan.topological_sort(completed_step_ids=completed_ids)
@@ -293,6 +304,7 @@ class PlanningExecutorScheduler(BaseScheduler):
                 ).model_dump(),
             )
 
+            all_layers_ok = True
             for layer_idx, layer in enumerate(layers):
                 if self._is_cancelled(run_id):
                     await self._fail(run_id, "Run cancelled by user")
@@ -317,7 +329,7 @@ class PlanningExecutorScheduler(BaseScheduler):
                         return await self._refresh_state(run_id), consecutive_failures
                     layer_failures = [
                         sid for sid in layer
-                        if sid in results and not results[sid].is_completed
+                        if sid in results and not results[sid].is_done
                     ]
                     if not layer_failures:
                         continue
@@ -338,15 +350,35 @@ class PlanningExecutorScheduler(BaseScheduler):
                         layer_idx=layer_idx, has_feedback=fb is not None,
                     ))
                     revised = await self.planner.revise(plan, results, sys_state, feedback=fb, intent_fallback=s.intent)
+                    if revised is not None and revised.step_tasks:
+                        for sid, ts_str in revised.step_tasks.items():
+                            if sid in results:
+                                try:
+                                    results[sid].task_state = TaskState(ts_str)
+                                except ValueError:
+                                    pass
+                        _sched_think.info("[revise] Merged %d step_tasks from LLM assessment", len(revised.step_tasks))
                     if revised is None:
                         consecutive_failures += 1
                         _sched_think.error("[revise] Revise failed after layer failure, failures=%d/%d", consecutive_failures, self.config.max_consecutive_failures)
-                        failed = [(sid, r.error or "unknown") for sid, r in results.items() if sid in {s.id for s in plan.steps} and not r.is_completed]
+                        failed = [(sid, r.error or "unknown") for sid, r in results.items() if sid in {s.id for s in plan.steps} and not r.is_done]
                         error_msg = "; ".join(f"{sid}: {err}" for sid, err in failed) if failed else "unknown error"
                         await self._fail(run_id, f"Steps failed: {error_msg}")
                         return await self._refresh_state(run_id), consecutive_failures
 
                     if not revised.steps:
+                        if revised.failed:
+                            _sched_think.error("[revise] LLM declares task cannot be completed: %s", revised.intent)
+                            await self.store.append_event(
+                                run_id, EventType.PLAN_REVISED,
+                                PlanRevisedPayload(
+                                    plan_id=plan_id, revision_reason="step_failure_revised",
+                                    intent=revised.intent,
+                                    remaining_steps_summary=f"task failed: {revised.intent}",
+                                ).model_dump(),
+                            )
+                            await self._fail(run_id, f"Task cannot be completed: {revised.intent}")
+                            return await self._refresh_state(run_id), consecutive_failures
                         _sched_think.info("[revise] Task complete after revision")
                         await self.store.append_event(
                             run_id, EventType.PLAN_REVISED,
@@ -372,10 +404,11 @@ class PlanningExecutorScheduler(BaseScheduler):
                     )
                     plan = revised
                     self_heal_count += 1
+                    all_layers_ok = False
                     break
 
-            else:
-                total_ok = sum(1 for sid in (s.id for s in plan.steps) if isinstance(results.get(sid), StepResult) and results[sid].is_completed)
+            if all_layers_ok:
+                total_ok = sum(1 for sid in (s.id for s in plan.steps) if isinstance(results.get(sid), StepResult) and results[sid].is_done)
                 soft_error_sids = [
                     sid for sid in (s.id for s in plan.steps)
                     if isinstance(results.get(sid), StepResult) and results[sid].has_soft_error
@@ -404,7 +437,11 @@ class PlanningExecutorScheduler(BaseScheduler):
                             _sched_ctrl.info("[self-heal] Soft-error revise returned %d steps → re-executing", len(revised.steps))
                             plan = revised
                             self_heal_count += 1
-                            break
+                            continue
+                        if revised.failed:
+                            _sched_think.error("[revise] LLM declares task cannot be completed after soft error: %s", revised.intent)
+                            await self._fail(run_id, f"Task cannot be completed: {revised.intent}")
+                            return await self._refresh_state(run_id), consecutive_failures
                         _sched_ctrl.info("[revise] Soft-error revise returned empty steps — task complete")
                 _sched_iter.info("[plan] PlanCompleted %s: %d/%d steps",
                                  plan_id, total_ok, len(plan.steps))
@@ -455,7 +492,8 @@ class PlanningExecutorScheduler(BaseScheduler):
             return plan
 
         _sched_ctrl.warning("[fallback] Planner failed — falling back to serial AgentLoopScheduler")
-        fallback_kernel = _FallbackKernel(self.planner.llm)
+        from harness.core.agent_kernel import LLMAgentKernel
+        fallback_kernel = LLMAgentKernel(self.planner.llm)
         serial = AgentLoopScheduler(
             self.store, self.executor, fallback_kernel,
             self.tool_defs, self.tool_fns, self.config,

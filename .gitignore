@@ -31,6 +31,12 @@ harness/tools/r*.txt
 data/
 frontend/.vite/
 
+# Playwright MCP cache
+.playwright-mcp/
+
+# Frontend build
+frontend/dist/
+
 # OS
 *.DS_Store
 Thumbs.db

@@ -89,7 +89,30 @@ async def mcp_call_fn(input: dict[str, Any]) -> dict[str, Any]:
     _logger.info("mcp_call %s/%s args=%s", server_name, tool_name, str(arguments))
 
     try:
+        available_tools = manager.get_tool_names(server_name)
+        if available_tools and tool_name not in available_tools:
+            prefixed = f"{server_name}/{tool_name}"
+            if "/" not in tool_name and prefixed in available_tools:
+                _logger.info("mcp_call corrected tool_name '%s' -> '%s'", tool_name, prefixed)
+                tool_name = prefixed
+            else:
+                _logger.warning("mcp_call unknown tool '%s' on server '%s', available: %s",
+                                tool_name, server_name, ", ".join(available_tools[:10]))
+                return {
+                    "success": False,
+                    "error": f"MCP tool '{tool_name}' not found on server '{server_name}'. "
+                             f"Available: {', '.join(available_tools[:20])}",
+                }
+
         result = await session.call_tool(tool_name, arguments)
+
+        if getattr(result, "isError", None) is True:
+            error_text = ""
+            if hasattr(result, "content"):
+                for item in result.content:
+                    error_text += str(getattr(item, "text", item))
+            _logger.warning("mcp_call %s/%s -> MCP error: %s", server_name, tool_name, error_text[:200])
+            return {"success": False, "error": f"MCP tool '{tool_name}' error: {error_text}"}
 
         content_parts = []
         if hasattr(result, "content"):

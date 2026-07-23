@@ -31,6 +31,8 @@ from harness.api.schemas import (
 from harness.core.fold import RunStatus, fold_events
 from harness.models.events import (
     ConfirmationReceivedPayload,
+    ConversationMessagePayload,
+    ConversationStartedPayload,
     EventType,
     FeedbackCategory,
     FeedbackInjectedPayload,
@@ -39,6 +41,20 @@ from harness.models.events import (
     RunPausedPayload,
     RunResumedPayload,
     RunStartedPayload,
+)
+from harness.models.conversation import (
+    Conversation,
+    ConversationDetail,
+    ConversationListResponse,
+    ConversationMessageItem,
+    CreateConversationRequest,
+    CreateConversationResponse,
+    DeleteConversationResponse,
+    SendMessageRequest,
+    SendMessageResponse,
+    UpdateConversationRequest,
+    UpdateConversationResponse,
+    _build_conversation_context,
 )
 
 router = APIRouter(tags=["runs"])
@@ -90,12 +106,42 @@ async def create_run(body: CreateRunRequest, api: HarnessAPI = Depends(get_hapi)
     run_id = str(uuid.uuid4())[:8]
     _log.info("Creating run — intent: %.120s", body.intent)
     _t0 = time.monotonic()
+
+    # Build conversation context if conversation_id is provided
+    intent = body.intent
+    if body.conversation_id:
+        conv = await api.store.get_conversation(body.conversation_id)
+        if conv:
+            ctx = await _build_conversation_context(api.store, body.conversation_id)
+            if ctx:
+                intent = f"Previous conversation:\n{ctx}\n\nCurrent request: {body.intent}"
+                _log.info("Conversation context injected into intent for conversation=%s", body.conversation_id)
+
     await api.store.append_event(
         run_id,
         EventType.RUN_STARTED,
-        RunStartedPayload(intent=body.intent).model_dump(),
+        RunStartedPayload(
+            intent=intent,
+            conversation_id=body.conversation_id,
+        ).model_dump(),
     )
-    await api.start_run(run_id, body.intent)
+
+    await api.start_run(run_id, intent)
+
+    # Write ConversationMessage for user message
+    if body.conversation_id:
+        now = time.time()
+        await api.store.append_event(
+            body.conversation_id,
+            EventType.CONVERSATION_MESSAGE,
+            ConversationMessagePayload(
+                conversation_id=body.conversation_id,
+                run_id=run_id,
+                role="user",
+                content=body.intent,
+            ).model_dump(),
+        )
+        await api.store.increment_message_count(body.conversation_id)
     _ms = (time.monotonic() - _t0) * 1000
     _log.info("Run %s started in %dms", run_id, _ms)
     return {"run_id": run_id}
@@ -120,6 +166,7 @@ async def get_run(run_id: str, api: HarnessAPI = Depends(get_hapi)):
         "last_error": state.last_error,
         "summary": state.summary,
         "pause_reason": state.pause_reason,
+        "conversation_id": state.conversation_id,
         "pending_confirmations": [
             PendingConfirmationItem(
                 confirmation_id=c.confirmation_id,
@@ -320,3 +367,162 @@ async def delete_run(run_id: str, api: HarnessAPI = Depends(get_hapi)):
 
     api.cleanup_run_resources(run_id)
     return {"success": True}
+
+
+# ── Conversation endpoints ─────────────────────────────────────
+
+
+@router.post("/api/v1/conversations", status_code=201, response_model=CreateConversationResponse)
+async def create_conversation(
+    body: CreateConversationRequest | None = None,
+    api: HarnessAPI = Depends(get_hapi),
+):
+    """Create a new conversation and write ConversationStarted event."""
+    conv_id = f"conv_{uuid.uuid4().hex[:12]}"
+    title = (body.title if body and body.title else None) or "New conversation"
+    now = time.time()
+
+    await api.store.upsert_conversation(conv_id, title)
+    await api.store.append_event(
+        conv_id,
+        EventType.CONVERSATION_STARTED,
+        ConversationStartedPayload(
+            conversation_id=conv_id,
+            title=title,
+        ).model_dump(),
+    )
+    return {"conversation_id": conv_id, "title": title, "created_at": now}
+
+
+@router.get("/api/v1/conversations", response_model=ConversationListResponse)
+async def list_conversations(
+    limit: int = 50,
+    offset: int = 0,
+    api: HarnessAPI = Depends(get_hapi),
+):
+    """List all active conversations, ordered by most recent."""
+    rows = await api.store.list_conversations(limit=limit, offset=offset)
+    total = await api.store.total_conversation_count()
+    conversations = [
+        Conversation(
+            conversation_id=r["conversation_id"],
+            user_id=r["user_id"],
+            title=r["title"],
+            status=r["status"],
+            created_at=r["created_at"],
+            updated_at=r["updated_at"],
+            message_count=r["message_count"],
+        )
+        for r in rows
+    ]
+    return {"conversations": conversations, "total": total}
+
+
+@router.get("/api/v1/conversations/{conversation_id}", response_model=ConversationDetail)
+async def get_conversation(
+    conversation_id: str,
+    api: HarnessAPI = Depends(get_hapi),
+):
+    """Get conversation details with message list."""
+    conv = await api.store.get_conversation(conversation_id)
+    if not conv:
+        return JSONResponse(status_code=404, content={"error": "Conversation not found"})
+
+    events = await api.store.get_events_for_conversation(conversation_id)
+    messages: list[ConversationMessageItem] = []
+    for e in events:
+        if e.event_type == EventType.CONVERSATION_MESSAGE:
+            p = e.payload
+            messages.append(ConversationMessageItem(
+                seq=e.seq,
+                run_id=p.get("run_id", ""),
+                role=p.get("role", ""),
+                content=p.get("content", ""),
+                created_at=e.created_at,
+                status="completed",
+            ))
+
+    conv_response = Conversation(
+        conversation_id=conv["conversation_id"],
+        user_id=conv.get("user_id", "default"),
+        title=conv["title"],
+        status=conv["status"],
+        created_at=conv["created_at"],
+        updated_at=conv["updated_at"],
+        message_count=conv["message_count"],
+    )
+    return {"conversation": conv_response, "messages": messages}
+
+
+@router.post("/api/v1/conversations/{conversation_id}/messages", response_model=SendMessageResponse)
+async def send_message(
+    conversation_id: str,
+    body: SendMessageRequest,
+    api: HarnessAPI = Depends(get_hapi),
+):
+    """Send a message in a conversation, creating a new Run with context."""
+    conv = await api.store.get_conversation(conversation_id)
+    if not conv:
+        return JSONResponse(status_code=404, content={"error": "Conversation not found"})
+
+    run_id = str(uuid.uuid4())[:8]
+    now = time.time()
+
+    ctx = await _build_conversation_context(api.store, conversation_id)
+    intent = body.message
+    if ctx:
+        intent = f"Previous conversation:\n{ctx}\n\nCurrent request: {body.message}"
+
+    await api.store.append_event(
+        run_id,
+        EventType.RUN_STARTED,
+        RunStartedPayload(intent=intent, conversation_id=conversation_id).model_dump(),
+    )
+
+    await api.start_run(run_id, intent)
+
+    await api.store.append_event(
+        conversation_id,
+        EventType.CONVERSATION_MESSAGE,
+        ConversationMessagePayload(
+            conversation_id=conversation_id,
+            run_id=run_id,
+            role="user",
+            content=body.message,
+        ).model_dump(),
+    )
+    await api.store.increment_message_count(conversation_id)
+
+    seq = await api.store.get_latest_seq(conversation_id)
+    return {"run_id": run_id, "conversation_id": conversation_id, "seq": seq}
+
+
+@router.delete("/api/v1/conversations/{conversation_id}", response_model=DeleteConversationResponse)
+async def delete_conversation(
+    conversation_id: str,
+    api: HarnessAPI = Depends(get_hapi),
+):
+    """Soft-delete a conversation (marks as archived)."""
+    conv = await api.store.get_conversation(conversation_id)
+    if not conv:
+        return JSONResponse(status_code=404, content={"error": "Conversation not found"})
+    await api.store.delete_conversation(conversation_id)
+    return {"success": True}
+
+
+@router.patch("/api/v1/conversations/{conversation_id}", response_model=UpdateConversationResponse)
+async def update_conversation(
+    conversation_id: str,
+    body: UpdateConversationRequest,
+    api: HarnessAPI = Depends(get_hapi),
+):
+    """Update conversation title or status."""
+    conv = await api.store.get_conversation(conversation_id)
+    if not conv:
+        return JSONResponse(status_code=404, content={"error": "Conversation not found"})
+    ok = await api.store.update_conversation(
+        conversation_id,
+        title=body.title,
+        status=body.status,
+    )
+    return {"success": ok}

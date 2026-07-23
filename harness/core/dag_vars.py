@@ -141,6 +141,8 @@ def resolve_variables_in_input(step_input: dict, upstream: dict[str, Any]) -> di
                 if rv is not _REF_NOT_FOUND:
                     resolved[key] = rv
                     continue
+                _log.warning("[var] '%s' not found in upstream outputs, keeping raw placeholder", value)
+                resolved[key] = value
             resolved[key] = substitute_vars(value, upstream)
         elif isinstance(value, dict):
             resolved[key] = resolve_variables_in_input(value, upstream)
