@@ -15,6 +15,16 @@ def set_sandbox_root(path: str | Path) -> None:
     _SANDBOX_BASE = Path(path).resolve()
 
 
+def reset_sandbox_root() -> None:
+    """Reset the sandbox root to its default (cwd-based resolution).
+
+    Primarily used by tests so a sandbox root set by one test does not leak
+    into others. Mirrors the initial ``_SANDBOX_BASE = None`` state.
+    """
+    global _SANDBOX_BASE
+    _SANDBOX_BASE = None
+
+
 def _resolve_path(relative_path: str) -> Path:
     base = _SANDBOX_BASE or Path.cwd()
     target = (base / relative_path).resolve()

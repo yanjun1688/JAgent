@@ -241,7 +241,7 @@ V0.6.2 引入对话级概念：多个 Run 可归属于同一 `conversation_id`�
 
 > **缺口 ID**: `S1` · **优先级**: **P1** · **状态**: ✅ **已完成** (V0.7.1) · **来源**: `Reviews/planner_protocol_gaps_review_20260722.md` 缺口 B/E
 > **设计文档**: ADR-007 / PRD_S1 · **测试**: TestPlan_S1
-> **最后更新**: 2026-07-23
+> **最后更新**: 2026-08-04（含 v2.1 受信边界修正，见 7.6）
 
 #### 7.1 问题背景（已解决）
 
@@ -260,7 +260,8 @@ V0.7 将 **"工具完成状态"与"任务完成语义"混为一谈**：
 |------|------|------|----|
 | **执行态** | `ExecState` (8值) | 工具的纯执行结果，系统强制 | `pending,running,completed,soft_error,failed,skipped,idempotent,cancelled` |
 | **任务态** | `TaskState` (5值) | LLM 判定的任务达成度，非受信 | `unknown,achieved,partial,not_achieved,waived` |
-| **决策属性** | `should_not_rerun` | 由 `exec_state` 推导的纯函数，决定是否跳过重排 | `COMPLETED/SOFT_ERROR/IDEMPOTENT/SKIPPED/CANCELLED` → True |
+| **决策属性** | `should_not_rerun` | 由 `exec_state` 推导的纯函数，决定是否跳过重排（v2.1 起**不含 SOFT_ERROR**） | `COMPLETED/IDEMPOTENT/SKIPPED/CANCELLED` → True；`SOFT_ERROR/PENDING/RUNNING/FAILED` → False |
+| **收尾判定** | `is_done` | 由 `exec_state` 推导，含 SOFT_ERROR（v2.1 起与 `should_not_rerun` 解耦） | `COMPLETED/SOFT_ERROR/IDEMPOTENT/SKIPPED/CANCELLED` → True |
 
 #### 7.3 核心改动（全部完成）
 
@@ -281,6 +282,29 @@ V0.7 将 **"工具完成状态"与"任务完成语义"混为一谈**：
 #### 7.5 验收状态
 
 **700 项测试全通过**（含 43 项新增 S1 测试），零退化。Step 3 旧代码清理（删除 `StepStatus`、`status` 字段、`get()` backward-compat shim）已一并完成。
+
+#### 7.6 v2.1 受信边界修正（Bug S1.1，2026-08-04）
+
+> **问题**：v2.0 实现中 `should_not_rerun` 在纯 `ExecState` 判定之外**额外读取了 `task_state`**：
+> `... and self.task_state != NOT_ACHIEVED`。这使系统强制（约束 4）依赖 LLM 配合——LLM 忘记标
+> `not_achieved` 时 SOFT_ERROR 步骤永不重跑（自愈静默失效）；LLM 对 COMPLETED 标 `not_achieved` 时
+> 会原地重跑（副作用重复执行）。**调度决策权落入非受信组件。**
+
+**修正内容**：
+
+| 改动 | 位置 | 说明 |
+|------|------|------|
+| `should_not_rerun` 删除 `task_state` 读入，且**不含 SOFT_ERROR** | `harness/core/dag_types.py` | 纯 `ExecState` 状态机；SOFT_ERROR 可重跑 |
+| `is_done` 与 `should_not_rerun` 解耦，**含 SOFT_ERROR** | `harness/core/dag_types.py` | 管"层失败判定 / 上游上下文注入 / 完成计数" |
+| `task_state` 降级为纯注解 | 全局 | 只在 `build_dag_status_text` 展示给 LLM，不进入任何受信判定 |
+| 两处 step_tasks 合并逻辑提取公共函数 | `harness/core/scheduler/plan.py` | 纯观测，不再影响调度 |
+| SOFT_ERROR 结果**不入幂等缓存** | `harness/tools/executor.py` | 同输入重跑必须真实再执行工具 |
+| revise prompt 增加 RERUN RULES | `harness/core/system_prompt.py` | COMPLETED 重做须新 id；task_state 标注为 advisory |
+
+**边界语义（v2.1）**：
+- 系统定边界（permission）：SOFT_ERROR/FAILED 可被 revise 保留重跑；COMPLETED/IDEMPOTENT/SKIPPED/CANCELLED 不可原地重跑。
+- Agent 在边界内决策：revised plan 保留/移除哪些步骤、用什么输入。
+- **强制权归系统，决策权归 Agent**：系统不信任 LLM 的重跑意愿，只提供"允许重跑"的边界；LLM 在边界内自由选择。
 
 ---
 

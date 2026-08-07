@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from harness.core.fold import RunStatus, fold_events
-from harness.models.events import Event, EventType, EpisodeSummary
+from harness.models.events import Event, EventType, Episode
 
 
 def _event(
@@ -577,7 +577,7 @@ class TestFoldContextCompressedPruning:
     """V0.7: ContextCompressed prunes thought_history and tool_results via original_event_refs."""
 
     def test_compress_prunes_thoughts_and_results(self):
-        summary = EpisodeSummary(
+        summary = Episode(
             episode_range=(2, 5),
             original_tokens=1000,
             compressed_tokens=200,
@@ -586,6 +586,7 @@ class TestFoldContextCompressedPruning:
             key_findings=[],
             errors_encountered=[],
             original_event_refs=[2, 3],
+            title="Compressed Episode",
         )
         events = [
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
@@ -604,7 +605,7 @@ class TestFoldContextCompressedPruning:
         assert state.summary is not None
 
     def test_compress_no_prune_when_no_original_event_refs(self):
-        summary = EpisodeSummary(
+        summary = Episode(
             episode_range=(2, 3),
             original_tokens=500,
             compressed_tokens=100,
@@ -613,6 +614,7 @@ class TestFoldContextCompressedPruning:
             key_findings=[],
             errors_encountered=[],
             original_event_refs=[],
+            title="Compressed Episode",
         )
         events = [
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),

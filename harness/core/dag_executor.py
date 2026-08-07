@@ -198,7 +198,8 @@ class DagExecutor:
 
             if raw.is_completed:
                 all_results[sid] = raw
-                _log.info("[step] %s completed — %s", sid, raw.summary)
+                _log.info("[step] %s completed — %.200s%s", sid, raw.summary,
+                          "..." if len(raw.summary) > 200 else "")
                 await self.store.append_event(
                     run_id,
                     EventType.DAG_STEP_COMPLETED,
@@ -394,6 +395,7 @@ class DagExecutor:
             exec_tag = ""
             rerun_tag = ""
             input_str = json.dumps(step.input, ensure_ascii=False)[:input_trunc]
+            task_desc = (step.description or "").strip()[:80]
 
             if r is None:
                 status_tag = "[pending]"
@@ -431,7 +433,7 @@ class DagExecutor:
                     status_tag = "[failed]"
                     detail = f"Input: {input_str} | Error: {r.error or 'unknown'}"
                     exec_tag = f"exec={r.exec_state.value}"
-                    rerun_tag = "replan=MAYBE"
+                    rerun_tag = "replan=NO" if r.should_not_rerun else "replan=MAYBE"
 
             deps = f" | Depends: {','.join(step.depends_on)}" if step.depends_on else ""
             meta = f" | {exec_tag}" if exec_tag else ""
@@ -440,6 +442,8 @@ class DagExecutor:
             if task_tag:
                 meta += f" | {task_tag}"
             lines.append(f"  - {step.id}({step.tool}): {status_tag}{deps}{meta}")
+            if task_desc:
+                lines.append(f"    Task: {task_desc}")
             lines.append(f"    {detail}")
 
         return "\n".join(lines)

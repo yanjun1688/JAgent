@@ -388,6 +388,20 @@ class EventStore:
         _log_query.debug("total_run_count: %d, %dms", result, _ms)
         return result
 
+    async def list_all_run_ids(self) -> list[str]:
+        _t0 = time.monotonic()
+        cursor = await self.conn.execute(
+            """
+            SELECT DISTINCT run_id FROM events
+            WHERE conversation_id IS NULL OR run_id != conversation_id
+            """
+        )
+        rows = await cursor.fetchall()
+        _ms = (time.monotonic() - _t0) * 1000
+        result = [r["run_id"] for r in rows]
+        _log_query.debug("list_all_run_ids: %d rows, %dms", len(result), _ms)
+        return result
+
     async def get_events_for_runs(self, run_ids: list[str]) -> list[Event]:
         if not run_ids:
             return []

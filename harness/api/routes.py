@@ -90,6 +90,7 @@ async def list_runs(limit: int = 50, offset: int = 0, api: HarnessAPI = Depends(
             "event_count": len(events),
             "created_at": r["created_at"],
             "updated_at": r["updated_at"],
+            "orphaned": state.orphaned,
         })
     return {"runs": summaries, "total": total}
 
@@ -167,6 +168,7 @@ async def get_run(run_id: str, api: HarnessAPI = Depends(get_hapi)):
         "summary": state.summary,
         "pause_reason": state.pause_reason,
         "conversation_id": state.conversation_id,
+        "orphaned": state.orphaned,
         "pending_confirmations": [
             PendingConfirmationItem(
                 confirmation_id=c.confirmation_id,

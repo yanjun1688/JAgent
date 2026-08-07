@@ -19,9 +19,9 @@ from typing import TYPE_CHECKING, Callable
 
 from fastapi import WebSocket
 
-from harness.core.scheduler import PlanningExecutorScheduler, SchedulerConfig
 from harness.core.fold import fold_events
 from harness.core.logger import guard_logger
+from harness.core.scheduler import PlanningExecutorScheduler, SchedulerConfig
 
 _log = guard_logger("api.deps")
 
@@ -58,6 +58,7 @@ class HarnessAPI:
         self.context_manager = None
         self.mcp_manager = None
         self.monitor = None
+        self.tracer = None
         self.scheduler_config: SchedulerConfig | None = None
 
     def wire_broadcast(self) -> None:
@@ -86,6 +87,7 @@ class HarnessAPI:
             tool_defs=self.tool_defs, tool_fns=self.tool_fns,
             config=self.scheduler_config,
             context_manager=self.context_manager, monitor=self.monitor,
+            tracer=self.tracer,
             run_end_cb=lambda rid: self.cleanup_run_resources(rid),
         )
         self.register_scheduler(run_id, scheduler)
@@ -136,8 +138,8 @@ class HarnessAPI:
             elif state.last_error:
                 content = f"Error: {state.last_error}"
 
+
             from harness.models.events import ConversationMessagePayload, EventType
-            import time
             await self.store.append_event(
                 state.conversation_id,
                 EventType.CONVERSATION_MESSAGE,

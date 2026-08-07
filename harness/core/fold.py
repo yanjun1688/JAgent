@@ -10,16 +10,19 @@ from harness.models.events import (
     ConfirmationRequestedPayload,
     ContextCheckpointedPayload,
     ContextCompressedPayload,
+    ContextPrunedPayload,
     ConversationStartedPayload,
     ConversationMessagePayload,
     ConversationEndedPayload,
-    EpisodeSummary,
+    Episode,
+    EpisodeArchivedPayload,
     Event,
     EventType,
     FeedbackInjectedPayload,
     GuardrailTriggeredPayload,
     RunCompletedPayload,
     RunFailedPayload,
+    RunOrphanedPayload,
     RunPausedPayload,
     RunResumedPayload,
     RunStartedPayload,
@@ -85,7 +88,7 @@ class RunState:
     tool_calls: list[ToolCalledPayload] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)
     last_error: str | None = None
-    summary: EpisodeSummary | str | None = None
+    summary: Episode | str | None = None
     keep_recent_count: int = 0
     pause_reason: str | None = None
     pending_confirmations: list[ConfirmationRequestedPayload] = field(default_factory=list)
@@ -95,6 +98,8 @@ class RunState:
     latest_plan: dict | None = None
     plan_boundary_seqs: list[int] = field(default_factory=list)
     conversation_id: str | None = None
+    orphaned: bool = False
+    episodes: list[Episode] = field(default_factory=list)
 
 
 def fold_events(events: list[Event]) -> RunState:
@@ -199,10 +204,11 @@ def fold_events(events: list[Event]) -> RunState:
                 ]
 
             case EventType.CONTEXT_COMPRESSED:
+                # Legacy read-only: old runs used ContextCompressed with Episode/str summary.
                 p = ContextCompressedPayload(**event.payload)
                 state.summary = p.summary_ref
                 state.keep_recent_count = p.keep_recent_count
-                if isinstance(state.summary, EpisodeSummary) and state.summary.original_event_refs:
+                if isinstance(state.summary, Episode) and state.summary.original_event_refs:
                     compressed_seqs = set(state.summary.original_event_refs)
                     keep = max(p.keep_recent_count, 0)
                     recent_thought_seqs = {t.seq for t in state.thought_history[-keep:]} if keep > 0 else set()
@@ -327,5 +333,37 @@ def fold_events(events: list[Event]) -> RunState:
 
             case EventType.CONVERSATION_STARTED | EventType.CONVERSATION_MESSAGE | EventType.CONVERSATION_ENDED:
                 pass
+
+            case EventType.RUN_ORPHANED:
+                RunOrphanedPayload(**event.payload)
+                state.orphaned = True
+
+            case EventType.EPISODE_ARCHIVED:
+                p = EpisodeArchivedPayload(**event.payload)
+                state.summary = p.episode
+                state.episodes.append(p.episode)
+                state.keep_recent_count = p.keep_recent_count
+                archived_set = set(p.archived_event_refs)
+                keep = max(p.keep_recent_count, 0)
+                recent_thought_seqs = {t.seq for t in state.thought_history[-keep:]} if keep > 0 else set()
+                recent_result_seqs = {tr.event_seq for tr in state.tool_results[-keep:]} if keep > 0 else set()
+                state.thought_history = [
+                    t for t in state.thought_history
+                    if t.seq not in archived_set or t.seq in recent_thought_seqs
+                ]
+                state.tool_results = [
+                    tr for tr in state.tool_results
+                    if tr.event_seq not in archived_set or tr.event_seq in recent_result_seqs
+                ]
+
+            case EventType.CONTEXT_PRUNED:
+                p = ContextPrunedPayload(**event.payload)
+                pruned_set = set(p.pruned_event_refs)
+                state.thought_history = [
+                    t for t in state.thought_history if t.seq not in pruned_set
+                ]
+                state.tool_results = [
+                    tr for tr in state.tool_results if tr.event_seq not in pruned_set
+                ]
 
     return state

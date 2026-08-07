@@ -26,6 +26,7 @@ from harness.api.deps import HarnessAPI, configure_hapi, get_hapi
 from harness.api.query import router as query_router
 from harness.api.routes import router as routes_router
 from harness.api.ws import router as ws_router
+from harness.core.lifecycle import mark_orphans
 from harness.models.mcp_config import MCPConfig
 from harness.tools.http_request import close_client as close_http_client
 from harness.tools.mcp_call import set_manager as set_mcp_manager
@@ -48,6 +49,11 @@ async def lifespan(app: FastAPI):
         yield
         return
     await api.store.initialize()
+
+    try:
+        await mark_orphans(api.store)
+    except Exception as exc:
+        _logger.exception("Failed to mark orphan runs: %s", exc)
 
     # ── MCP servers ───────────────────────────────────────────
     mcp_config = MCPConfig.from_env()
@@ -75,7 +81,6 @@ async def lifespan(app: FastAPI):
     if mcp_tool_lines:
         from harness.tools.mcp_call import MCP_CALL_DEF
         MCP_CALL_DEF.description += "\n\nAvailable MCP servers and tools:\n" + "\n".join(mcp_tool_lines)
-        _logger.info("MCP discovery: %d tools available via mcp_call", len(mcp_tool_lines))
         _logger.info("MCP discovery: %d tools available via mcp_call", len(mcp_tool_lines))
 
     try:

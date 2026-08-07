@@ -348,6 +348,43 @@ class TestPlannerGenerateAnswerFeedback:
         assert "Use the fast tool" in content
 
 
+class TestPlannerGenerateAnswerOutcome:
+    """Tests that generate_answer() injects the authoritative run-outcome record."""
+
+    async def test_generate_answer_includes_revision_outcome(self):
+        """The answer LLM must see the revision decision as authoritative ground
+        truth, so it cannot claim the revision added steps when it returned empty."""
+        llm = _MockLLM()
+        planner = Planner(llm_client=llm, registry=None, store=None)
+        state = RunState(
+            run_id="r1",
+            intent="test",
+            latest_plan={
+                "plan_id": "plan_r1",
+                "revision_reason": "soft_error_revised",
+                "remaining_steps_summary": "task complete",
+                "status": "completed",
+            },
+        )
+        await planner.generate_answer("test intent", state, feedback=None)
+        assert llm.last_messages is not None
+        user_msg = next(m for m in llm.last_messages if m["role"] == "user")
+        content = user_msg["content"]
+        assert "[Run outcome" in content
+        assert "soft_error_revised" in content
+        assert "task complete" in content
+
+    async def test_generate_answer_omits_outcome_without_plan(self):
+        """No outcome block when there is no plan record (e.g. chat-only path)."""
+        llm = _MockLLM()
+        planner = Planner(llm_client=llm, registry=None, store=None)
+        state = RunState(run_id="r1", intent="hi")
+        await planner.generate_answer("hi", state, feedback=None)
+        assert llm.last_messages is not None
+        user_msg = next(m for m in llm.last_messages if m["role"] == "user")
+        assert "[Run outcome" not in user_msg["content"]
+
+
 class _Feedback:
     """Minimal FeedbackInjectedPayload stand-in."""
     def __init__(self, seq, feedback_text):

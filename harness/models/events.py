@@ -34,6 +34,9 @@ class EventType(str, Enum):
     CONVERSATION_STARTED = "ConversationStarted"
     CONVERSATION_MESSAGE = "ConversationMessage"
     CONVERSATION_ENDED = "ConversationEnded"
+    RUN_ORPHANED = "RunOrphaned"
+    EPISODE_ARCHIVED = "EpisodeArchived"
+    CONTEXT_PRUNED = "ContextPruned"
 
 
 class ToolResultType(str, Enum):
@@ -126,7 +129,12 @@ class ConfirmationReceivedPayload(BaseModel):
     operator_id: str
 
 
-class EpisodeSummary(BaseModel):
+class Episode(BaseModel):
+    """Structured episode memory unit.
+
+    Replaces the old EpisodeSummary in v3.0 Phase 1.  All episode-shaped
+    data is now an Episode.
+    """
     episode_range: tuple[int, int]
     original_tokens: int
     compressed_tokens: int
@@ -137,11 +145,19 @@ class EpisodeSummary(BaseModel):
     current_plan: str | None = None
     original_event_refs: list[int]
 
+    # v3.0 Phase 1 extensions
+    title: str
+    summary: str = ""
+    importance_score: float = 0.0
+    embedding: list[float] | None = None
+    parent_episode_id: str | None = None
+    format: str = "structured"
+
 
 class ContextCompressedPayload(BaseModel):
     original_tokens: int
     compressed_tokens: int
-    summary_ref: EpisodeSummary | str
+    summary_ref: Episode | str
     keep_recent_count: int = 0
 
 
@@ -264,6 +280,26 @@ class PlanFailedPayload(BaseModel):
     final_error: str
 
 
+class RunOrphanedPayload(BaseModel):
+    reason: str = "server_restart"
+    detected_at: float = 0.0
+
+
+class EpisodeArchivedPayload(BaseModel):
+    original_tokens: int
+    compressed_tokens: int
+    episode: Episode
+    keep_recent_count: int
+    archived_event_refs: list[int]
+
+
+class ContextPrunedPayload(BaseModel):
+    pruned_event_refs: list[int]
+    pruned_token_count: int
+    pruned_seq_count: int
+    reason: str = "lazy_clear"
+
+
 # ── Payload model registry ─────────────────────────────────────
 
 PAYLOAD_MODEL_MAP: dict[EventType, type[BaseModel]] = {
@@ -294,6 +330,9 @@ PAYLOAD_MODEL_MAP: dict[EventType, type[BaseModel]] = {
     EventType.CONVERSATION_STARTED: ConversationStartedPayload,
     EventType.CONVERSATION_MESSAGE: ConversationMessagePayload,
     EventType.CONVERSATION_ENDED: ConversationEndedPayload,
+    EventType.RUN_ORPHANED: RunOrphanedPayload,
+    EventType.EPISODE_ARCHIVED: EpisodeArchivedPayload,
+    EventType.CONTEXT_PRUNED: ContextPrunedPayload,
 }
 
 

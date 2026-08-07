@@ -16,7 +16,7 @@ from harness.core.dag_types import (
 
 @pytest.mark.parametrize("exec_state,expected", [
     (ExecState.COMPLETED, True),       # tc-srr-01
-    (ExecState.SOFT_ERROR, True),      # tc-srr-02
+    (ExecState.SOFT_ERROR, False),     # tc-srr-02 (v2.1: re-runnable)
     (ExecState.IDEMPOTENT, True),      # tc-srr-03
     (ExecState.SKIPPED, True),         # tc-srr-04
     (ExecState.CANCELLED, True),       # tc-srr-05
@@ -76,7 +76,7 @@ def test_step_result_properties_soft_error():
     assert sr.is_done is True
     assert sr.is_failed is False
     assert sr.has_soft_error is True
-    assert sr.should_not_rerun is True
+    assert sr.should_not_rerun is False  # v2.1: SOFT_ERROR is re-runnable
 
 
 def test_step_result_properties_failed():

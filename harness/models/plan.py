@@ -28,13 +28,20 @@ class DagPlan(BaseModel):
         return {s.id: s for s in self.steps}
 
     def topological_sort(
-        self, completed_step_ids: set[str] | None = None,
+        self,
+        completed_step_ids: set[str] | None = None,
+        external_deps: set[str] | None = None,
     ) -> list[list[str]]:
         steps = self._step_map()
         in_degree: dict[str, int] = {}
         adjacency: dict[str, list[str]] = {}
+        completed = set(completed_step_ids or ())
+        # Steps from prior execution whose output is already available (incl.
+        # SOFT_ERROR) but that are not scheduled as steps in this plan. They
+        # are valid dependency targets and need no scheduling edge.
+        external = set(external_deps or ())
 
-        all_valid = set(steps.keys()) | (completed_step_ids or set())
+        all_valid = set(steps.keys()) | completed | external
 
         for s in self.steps:
             in_degree[s.id] = 0
@@ -44,24 +51,33 @@ class DagPlan(BaseModel):
             for dep in s.depends_on:
                 if dep not in all_valid:
                     raise ValueError(f"Step '{s.id}': depends on unknown step '{dep}'")
-                if dep not in steps:
+                # External deps are by definition not in `steps`, so the
+                # `dep not in steps` branch already skips their edge. A dep
+                # that IS an in-plan step stays scheduled even if it also
+                # appears in external (e.g. a soft-error step being re-run).
+                if dep not in steps or dep in completed:
                     continue
                 adjacency.setdefault(dep, []).append(s.id)
                 in_degree[s.id] = in_degree.get(s.id, 0) + 1
 
         layers: list[list[str]] = []
-        queue = deque([sid for sid, deg in in_degree.items() if deg == 0])
+        queue = deque([
+            sid for sid, deg in in_degree.items()
+            if deg == 0 and sid not in completed
+        ])
 
-        visited = 0
+        visited = len(completed & set(steps.keys()))
         while queue:
             layer = []
             for _ in range(len(queue)):
                 sid = queue.popleft()
+                if sid in completed:
+                    continue
                 layer.append(sid)
                 visited += 1
                 for neighbor in adjacency.get(sid, []):
                     in_degree[neighbor] -= 1
-                    if in_degree[neighbor] == 0:
+                    if in_degree[neighbor] == 0 and neighbor not in completed:
                         queue.append(neighbor)
             layers.append(layer)
 
@@ -82,7 +98,12 @@ class DagPlan(BaseModel):
             if dep_result is None:
                 merged[dep_id] = None
                 continue
-            output = dep_result.get("output") if isinstance(dep_result, dict) else (dep_result.output if hasattr(dep_result, 'output') else dep_result)
+            if isinstance(dep_result, dict):
+                output = dep_result.get("output")
+            elif hasattr(dep_result, "output"):
+                output = dep_result.output
+            else:
+                output = dep_result
             selectors = step.upstream_selectors or {}
             if dep_id in selectors:
                 merged[dep_id] = self._resolve_path(output, selectors[dep_id])

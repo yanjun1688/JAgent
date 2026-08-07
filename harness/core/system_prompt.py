@@ -100,8 +100,11 @@ _REVISE_PROMPT = (
     'If all steps are done, return {{"intent": "<summary>", "steps": []}}.\n'
     'If the task cannot be completed, return {{"intent": "<summary>", '
     '"steps": [], "failed": true, "reason": "explanation"}}.\n\n'
-    "### step_tasks — assess EVERY executed step\n"
-    "For each step that already ran, judge whether its BUSINESS GOAL was met:\n"
+    "### step_tasks — assess every COMPLETED step (advisory only)\n"
+    "For each COMPLETED step, judge whether its BUSINESS GOAL was met, for your "
+    "own reference. NOTE: task_state is informational ONLY — it does NOT change "
+    "whether a step re-runs. The system decides re-runnability from exec_state "
+    "alone (shown in the status text).\n"
     '  "achieved"     — step ran and its result clearly satisfies the goal\n'
     '  "partial"      — step ran but result is incomplete or low quality\n'
     '  "not_achieved" — step ran but result is wrong / useless / missing data\n'
@@ -109,6 +112,14 @@ _REVISE_PROMPT = (
     '  "unknown"      — you cannot determine (use sparingly, prefer a real judgment)\n'
     "Include step_tasks as a dict of step_id → assessment. Example:\n"
     '  "step_tasks": {{"s1": "achieved", "s2": "not_achieved", "s3": "partial"}}\n\n'
+    "## RERUN RULES (system-enforced, not negotiable)\n"
+    "- To RETRY a step whose exec_state is soft_error or failed: keep the step "
+    "in the revised plan (you MAY reuse its id). The system will re-run it.\n"
+    "- To REDO a step that is already completed / idempotent / skipped / "
+    "cancelled: you MUST give the step a NEW id. Reusing a completed step's id "
+    "is silently skipped — the redo will NOT happen.\n"
+    "- exec_state values are SYSTEM-GENERATED and READ-ONLY; you must not "
+    "modify them.\n\n"
     "## Data Flow\n"
     "Use $step_id.field to reference a previous step's output "
     "(e.g., $s1.result, $s1.body, $s1.summary). "
@@ -128,6 +139,20 @@ _ANSWER_PROMPT = (
     "Do not call any tools. Just respond as a knowledgeable assistant.\n"
     "Provide a complete answer with all the information gathered. "
     "If the user asks for a comparison or recommendation, include that explicitly.\n"
+    "## Grounding rules (mandatory)\n"
+    "The '[Tool execution results]' section in your context is the AUTHORITATIVE, "
+    "exhaustive record of every tool call that actually ran in this task.\n"
+    "- Every claim you make about tool execution MUST be traceable to that record. "
+    "Never describe, summarize, or imply a tool call that is not listed there.\n"
+    "- If the record shows a step errored or failed (status soft_error/failed) and "
+    "no later step retried it successfully, state that outcome honestly. Do NOT "
+    "invent a successful retry, and do NOT claim a file was created/read/written "
+    "unless the record shows it.\n"
+    "- If a requested deliverable was not achieved, say so explicitly instead of "
+    "fabricating completion.\n"
+    "- The '[Run outcome]' section is also authoritative. Never contradict it: if "
+    "it says the revision returned empty steps, do NOT claim the revision added or "
+    "required any steps.\n"
 )
 
 _SERIAL_THINK_PROMPT = (
@@ -213,6 +238,8 @@ _SERIAL_THINK_TEXT_PROMPT = (
 _SUMMARIZE_PROMPT = (
     "You are a context compression system. Summarize the following agent activity log. "
     "Output your response as a JSON object with these exact fields:\n"
+    '- "title": string — a concise one-line title for this episode (e.g., "User authentication module implementation")\n'
+    '- "summary": string — a 3-5 sentence narrative summary of what happened\n'
     '- "key_decisions": list of strings — the key decisions the agent made\n'
     '- "tools_used": list of strings — which tools were called\n'
     '- "key_findings": list of strings — important information discovered\n'
@@ -240,9 +267,9 @@ def get_prompt(phase: AgentPhase, **kwargs) -> str:
         result = template.format(**kwargs)
     else:
         result = template
-    _log.info("[prompt] phase=%-14s len=%d chars%s",
-              phase.value, len(result),
-              " (formatted)" if kwargs else "")
+    _log.debug("[prompt] phase=%-14s len=%d chars%s",
+               phase.value, len(result),
+               " (formatted)" if kwargs else "")
     return result
 
 
