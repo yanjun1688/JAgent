@@ -17,6 +17,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from harness.core.logger import agent_logger
+from harness.monitoring.langfuse_tracer import _get_current_trace_ctx, _get_current_tracer
 
 _logger = agent_logger("llm")
 
@@ -123,7 +124,9 @@ class OpenAILLMClient(LLMClient):
         _logger.info("[LLM] Sending %d messages (%.0f chars) to %s",
                      len(messages), sum(len(str(m)) for m in messages), self.model)
         for i, m in enumerate(messages):
-            _logger.info("[LLM]   msg[%d] role=%s\n%s", i, m.get("role", "?"), m.get("content", ""))
+            content = m.get("content", "")
+            preview = content[:200].replace("\n", " ") + ("..." if len(content) > 200 else "")
+            _logger.info("[LLM]   msg[%d] role=%s (%d chars) %s", i, m.get("role", "?"), len(content), preview)
 
         _t0 = time.monotonic()
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -173,6 +176,26 @@ class OpenAILLMClient(LLMClient):
         else:
             _logger.info("[LLM] → text (%d chars) [reason=%s]: %s",
                          len(content), finish_reason, content)
+
+        # ── Langfuse tracing (non-trusted observability layer) ──
+        # The active TraceContext is propagated via contextvars by the
+        # Scheduler; when absent (or tracing disabled) this is a no-op.
+        tracer = _get_current_tracer()
+        ctx = _get_current_trace_ctx()
+        if tracer is not None and ctx is not None and tracer.enabled:
+            try:
+                tracer.trace_llm_generation(
+                    ctx=ctx,
+                    model=self.model,
+                    messages=messages,
+                    response_content=content,
+                    tool_calls=[tc.name for tc in tool_calls],
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    duration_ms=_ms,
+                )
+            except Exception:
+                _logger.debug("[LLM] Langfuse generation trace failed (ignored)", exc_info=True)
 
         return ChatResponse(
             content=content,

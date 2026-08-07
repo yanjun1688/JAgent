@@ -411,7 +411,13 @@ class TestExecutorSemanticEvaluation:
         assert result.has_semantic_error is False
 
     @pytest.mark.asyncio
-    async def test_idempotency_cache_propagates_semantic_error(self, init_store):
+    async def test_soft_error_result_is_not_idempotency_cached(self, init_store):
+        """v2.1 (Bug S1.1): SOFT_ERROR results must NOT be idempotency-cached.
+
+        Only deterministic (SUCCESS) results are cached. If a soft-error result
+        were cached, a same-input retry would hit the cache and never actually
+        re-run the tool — silently defeating self-heal (AGENTS.md constraint 4).
+        """
         store = init_store
         from harness.tools.executor import ToolExecutor
         from harness.tools.http_request import HTTP_REQUEST_DEF
@@ -444,10 +450,10 @@ class TestExecutorSemanticEvaluation:
             run_id=run_id, tool_name="http_request", input=input_data,
             tool_def=HTTP_REQUEST_DEF, tool_fn=fake_http,
         )
-        assert result2.status == ExecutionStatus.IDEMPOTENCY_HIT
-        assert result2.has_semantic_error is True, "idempotency hit must propagate semantic error"
-        assert result2.error is not None
-        assert call_count == 1, "second call should hit cache, not invoke tool_fn"
+        assert result2.status == ExecutionStatus.COMPLETED
+        assert result2.has_semantic_error is True
+        assert result2.cached is False, "SOFT_ERROR must not be served from the cache"
+        assert call_count == 2, "same-input retry must re-execute the tool (self-heal)"
 
     @pytest.mark.asyncio
     async def test_tool_without_indicator_still_works(self, init_store):

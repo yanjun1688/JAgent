@@ -143,9 +143,6 @@ class RateLimitGuardrail:
         pass
 
     _call_history: dict[str, list[float]] = {}
-    # Known Issue: class-level dict, keys accumulate over all runs in production.
-    # reset() is test-only. Needs instance-level storage or periodic sweep.
-    # See TODO_v2.1.md §Known Technical Debt.
 
     @staticmethod
     def _make_key(scope: str, tool_name: str, config: dict) -> str:
@@ -164,6 +161,9 @@ class RateLimitGuardrail:
         key = cls._make_key(scope, tool_def.name, config)
         history = cls._call_history.setdefault(key, [])
         history[:] = [t for t in history if now - t < window]
+        if not history:
+            del cls._call_history[key]
+            history = cls._call_history.setdefault(key, [])
 
         if len(history) >= max_calls:
             return GuardrailResult(

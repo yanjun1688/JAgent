@@ -31,6 +31,7 @@ class RunSummary(BaseModel):
     event_count: int = 0
     created_at: float = 0
     updated_at: float = 0
+    orphaned: bool = False
 
 
 class PendingConfirmationItem(BaseModel):
@@ -52,6 +53,7 @@ class RunDetailResponse(BaseModel):
     pause_reason: str | None = None
     pending_confirmations: list[PendingConfirmationItem] = []
     conversation_id: str | None = None
+    orphaned: bool = False
 
 
 class EventResponse(BaseModel):

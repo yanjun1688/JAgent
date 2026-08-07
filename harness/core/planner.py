@@ -12,7 +12,7 @@ from harness.core.fold import RunState
 from harness.core.llm_client import LLMClient
 from harness.core.logger import agent_logger, fmtkv
 from harness.core.system_prompt import AgentPhase, get_prompt
-from harness.models.events import EpisodeSummary
+from harness.models.events import Episode
 from harness.core.dag_types import StepResult, TaskState
 from harness.models.plan import DagPlan, DagStep
 from harness.storage.event_store import EventStore
@@ -103,9 +103,20 @@ class PlanGuardrail:
         self.registry = registry
         self.store = store
 
-    def validate(self, plan: DagPlan, completed_step_ids: set[str] | None = None) -> list[str]:
+    def validate(
+        self,
+        plan: DagPlan,
+        completed_step_ids: set[str] | None = None,
+        available_step_ids: set[str] | None = None,
+    ) -> list[str]:
         errors = []
         completed = completed_step_ids or set()
+        # Steps whose recorded output is available for $var.field references
+        # even though they are not scheduled in this plan (e.g. prior
+        # SOFT_ERROR steps). Such dependencies are valid — the upstream builder
+        # resolves them via is_done, and the DAG topology treats them as
+        # external (no scheduling edge).
+        available = available_step_ids or set()
 
         if not plan.steps:
             return []
@@ -130,14 +141,16 @@ class PlanGuardrail:
                 continue
 
             for dep in step.depends_on:
-                if dep not in step_ids and dep not in completed:
+                if dep not in step_ids and dep not in completed and dep not in available:
                     errors.append(f"Step '{step.id}': depends on unknown step '{dep}'")
 
         if errors:
             return errors
 
         try:
-            plan.topological_sort(completed_step_ids=completed)
+            plan.topological_sort(
+                completed_step_ids=completed, external_deps=available,
+            )
         except ValueError as e:
             errors.append(str(e))
 
@@ -224,10 +237,11 @@ class Planner:
             if last_error:
                 messages.append({"role": "user", "content": _retry_prompt(last_error)})
 
-            _log.info("[plan] Attempt %d/%d for intent: %s", attempt, self.max_plan_retries + 1, intent)
+            _log.info("[plan] Attempt %d/%d for intent: %.80s", attempt, self.max_plan_retries + 1, intent)
             chat_resp = await self.llm.chat(messages, temperature=0.0)
             response = chat_resp.content
-            _log.info("[plan] LLM response (%d chars): %s", len(response), response)
+            _log.info("[plan] LLM response (%d chars): %.200s%s",
+                      len(response), response, "..." if len(response) > 200 else "")
 
             self.last_raw_response = response
             plan, last_error = self._parse_plan(response)
@@ -274,9 +288,18 @@ class Planner:
                         feedback_len=len(feedback) if feedback else 0),
                   system_state)
         total_attempts = self.max_plan_retries + 1
+        # Steps that must NOT be re-run (tool already executed with a settled
+        # outcome). SOFT_ERROR steps are excluded — they may be re-run.
         executed_step_ids = {
             sid for sid, r in results.items()
             if isinstance(r, StepResult) and r.should_not_rerun
+        }
+        # Steps whose recorded output is available for $var.field references in
+        # a revised plan — includes SOFT_ERROR (is_done), whose error text is
+        # exactly what a summary step needs to report.
+        available_step_ids = {
+            sid for sid, r in results.items()
+            if isinstance(r, StepResult) and r.is_done
         }
 
         last_error = ""
@@ -298,7 +321,11 @@ class Planner:
                 _log.info("[revise] Attempt %d — task complete (empty steps)", attempt)
                 return DagPlan(intent=revised.intent, steps=[])
 
-            errors = self.guardrail.validate(revised, completed_step_ids=executed_step_ids)
+            errors = self.guardrail.validate(
+                revised,
+                completed_step_ids=executed_step_ids,
+                available_step_ids=available_step_ids,
+            )
             if errors:
                 last_error = "; ".join(errors)
                 _log.warning("[revise] Guardrail failed on attempt %d: %s", attempt, last_error)
@@ -324,12 +351,36 @@ class Planner:
         parts = []
         n_tool_results = len(state.tool_results)
 
+        if state.latest_plan:
+            lp = state.latest_plan
+            reason = lp.get("revision_reason")
+            remaining = lp.get("remaining_steps_summary")
+            pstatus = lp.get("status")
+            if reason or remaining or pstatus:
+                parts.append("[Run outcome — AUTHORITATIVE, from the event store. "
+                             "The revision result below is exactly what the system decided; "
+                             "do not describe the revision differently.]")
+                if reason:
+                    parts.append(f"Last revision reason: {reason}")
+                if remaining:
+                    parts.append(f"Last revision result: {remaining}")
+                if pstatus:
+                    parts.append(f"Plan final status: {pstatus}")
+                parts.append("")
+
         if state.tool_results:
             tool_inputs = {
                 tc.tool_call_id: tc.input
                 for tc in state.tool_calls
             }
-            parts.append("[Tool execution results]")
+            parts.append("[Tool execution results — AUTHORITATIVE, exhaustive record "
+                         "of every tool call that actually ran in this task. "
+                         "Do NOT add or imply any execution not listed here.]")
+            parts.append("[Execution digest]")
+            for i, tr in enumerate(state.tool_results):
+                status_label = tr.status.value if hasattr(tr.status, 'value') else str(tr.status)
+                parts.append(f"Step {i + 1}: {tr.tool_name} → {status_label}")
+            parts.append("[Detailed results]")
             for i, tr in enumerate(state.tool_results):
                 status_label = tr.status.value if hasattr(tr.status, 'value') else str(tr.status)
                 parts.append(f"## Step {i + 1}: {tr.tool_name} (status: {status_label})")
@@ -351,8 +402,12 @@ class Planner:
                 parts.append("")
 
         if state.summary:
-            if isinstance(state.summary, EpisodeSummary):
+            if isinstance(state.summary, Episode):
                 summary_parts = []
+                if state.summary.title:
+                    summary_parts.append(f"Title: {state.summary.title}")
+                if state.summary.summary:
+                    summary_parts.append(f"Summary: {state.summary.summary}")
                 if state.summary.key_decisions:
                     summary_parts.append(f"Key decisions: {', '.join(state.summary.key_decisions)}")
                 if state.summary.key_findings:
@@ -378,10 +433,11 @@ class Planner:
         total_chars = sum(len(m["content"]) for m in messages)
         _log.info("[answer] Sending %d messages (%d tool_results, %d chars) to LLM",
                   len(messages), n_tool_results, total_chars)
-        _log.info("[answer] === USER MESSAGE BEGIN ===\n%s\n=== USER MESSAGE END ===", user_content)
 
         chat_resp = await self.llm.chat(messages, temperature=0.7, max_tokens=16384)
-        _log.info("[answer] LLM response: %d chars: %s", len(chat_resp.content), chat_resp.content)
+        _log.info("[answer] LLM response: %d chars: %.200s%s",
+                  len(chat_resp.content), chat_resp.content,
+                  "..." if len(chat_resp.content) > 200 else "")
         return chat_resp.content.strip()
 
     @staticmethod

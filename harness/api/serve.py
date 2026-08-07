@@ -19,19 +19,20 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from harness.api.app import app  # noqa: F401
 from harness.api.deps import HarnessAPI, configure_hapi
-from harness.core.logger import guard_logger
 from harness.core.context_manager import ContextManager
 from harness.core.llm_client import MockLLMClient, OpenAILLMClient
-from harness.core.scheduler import SchedulerConfig, ThinkResult
+from harness.core.logger import guard_logger
+from harness.core.scheduler import SchedulerConfig
 from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
+from harness.monitoring import LangfuseTracer
 from harness.monitoring.run_monitor import RunMonitor
 from harness.storage.event_store import EventStore
 from harness.tools.browser_tool import BROWSER_DEF, browser_fn
@@ -40,7 +41,6 @@ from harness.tools.file_op import FILE_OP_DEF, file_op_fn, set_sandbox_root
 from harness.tools.http_request import HTTP_REQUEST_DEF, http_request_fn
 from harness.tools.mcp_call import MCP_CALL_DEF, mcp_call_fn
 from harness.tools.registry import ToolRegistry
-from logging.handlers import RotatingFileHandler
 
 _logger = guard_logger("serve")
 
@@ -102,7 +102,7 @@ logging.basicConfig(level=logging.INFO, handlers=[_handler, _file_handler], forc
 
 env_path = Path(__file__).parent.parent.parent / ".env"
 if env_path.exists():
-    for line in env_path.read_text().splitlines():
+    for line in env_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
@@ -185,11 +185,18 @@ api.llm_client = client
 
 # ── 3. 装配 ContextManager ─────────────────────────────────
 
-cm = ContextManager(store, llm_client=client if USE_REAL_LLM else None, token_limit=128000, checkpoint_interval=10)
+cm = ContextManager(store, llm_client=client if USE_REAL_LLM else None, token_limit=3000, checkpoint_interval=10)
 api.context_manager = cm
 
 
-# ── 4. 注册广播 + 写入 DI ──────────────────────────────────
+# ── 4. 初始化 LangfuseTracer ─────────────────────────────────
+
+tracer = LangfuseTracer()
+api.tracer = tracer
+_logger.info("Langfuse tracing: %s", "ENABLED" if tracer.enabled else "DISABLED")
+
+
+# ── 5. 注册广播 + 写入 DI ─────────────────────────────────────
 
 api.wire_broadcast()
 configure_hapi(api)

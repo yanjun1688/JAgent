@@ -3,10 +3,18 @@ from harness.core.context_manager import ContextManager
 from harness.core.dag_executor import DagExecutor
 from harness.core.dag_types import ExecState, StepResult, TaskState
 from harness.core.fold import RunState, RunStatus, ThoughtEntry, ToolResult, ToolResultStatus, fold_events
+from harness.core.lifecycle import mark_orphans
 from harness.core.llm_client import ChatResponse, LLMClient, MockLLMClient, OpenAILLMClient
 from harness.core.logger import setup_logging
 from harness.core.planner import PlanGuardrail, Planner
 from harness.core.scheduler import AgentKernel, AgentLoopScheduler, PlanningExecutorScheduler, SchedulerConfig, ThinkResult
+from harness.core.token_counter import (
+    HeuristicTokenCounter,
+    ProviderTokenCounter,
+    TiktokenTokenCounter,
+    TokenCounter,
+    create_token_counter,
+)
 from harness.models.plan import DagPlan, DagStep
 from harness.models.events import (
     PAYLOAD_MODEL_MAP,
@@ -15,7 +23,9 @@ from harness.models.events import (
     ConfirmationRequestedPayload,
     ContextCheckpointedPayload,
     ContextCompressedPayload,
-    EpisodeSummary,
+    Episode,
+    EpisodeArchivedPayload,
+    ContextPrunedPayload,
     Event,
     EventType,
     FeedbackCategory,
@@ -24,6 +34,7 @@ from harness.models.events import (
     GuardrailTriggeredPayload,
     RunCompletedPayload,
     RunFailedPayload,
+    RunOrphanedPayload,
     RunPausedPayload,
     RunResumedPayload,
     RunStartedPayload,
@@ -87,7 +98,9 @@ __all__ = [
     "ConfirmationReceivedPayload",
     "ContextCompressedPayload",
     "ContextCheckpointedPayload",
-    "EpisodeSummary",
+    "Episode",
+    "EpisodeArchivedPayload",
+    "ContextPrunedPayload",
     "FeedbackCategory",
     "FeedbackInjectedPayload",
     "FeedbackSource",
@@ -95,6 +108,7 @@ __all__ = [
     "RunResumedPayload",
     "RunCompletedPayload",
     "RunFailedPayload",
+    "RunOrphanedPayload",
     # Tool models
     "ToolDefinition",
     "SideEffect",
@@ -167,4 +181,15 @@ __all__ = [
     "TaskState",
     "DagPlan",
     "DagStep",
+    # V0.9
+    "mark_orphans",
+    # V3.0 Phase 1
+    "TokenCounter",
+    "TiktokenTokenCounter",
+    "HeuristicTokenCounter",
+    "ProviderTokenCounter",
+    "create_token_counter",
+    "Episode",
+    "EpisodeArchivedPayload",
+    "ContextPrunedPayload",
 ]

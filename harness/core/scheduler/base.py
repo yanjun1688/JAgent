@@ -3,26 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
 from harness.core.context_manager import ContextManager
 from harness.core.fold import RunState, RunStatus, fold_events
-from harness.core.logger import fmtkv
-from harness.core.logger import agent_logger, guard_logger
+from harness.core.logger import agent_logger, fmtkv, guard_logger
 from harness.models.events import (
-    AgentThoughtPayload,
-    DagStepCompletedPayload,
-    DagStepFailedPayload,
-    EpisodeSummary,
     EventType,
     FeedbackCategory,
     FeedbackSource,
-    PlanCompletedPayload,
-    PlanCreatedPayload,
-    PlanRevisedPayload,
     RunCommandPayload,
     RunCompletedPayload,
     RunFailedPayload,
@@ -31,10 +22,16 @@ from harness.models.events import (
     RunStartedPayload,
 )
 from harness.models.tools import ToolDefinition
+from harness.monitoring.langfuse_tracer import (
+    _get_current_trace_ctx,
+    reset_trace_context,
+    set_trace_context,
+)
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ExecutionStatus, ToolExecutor
 
 if TYPE_CHECKING:
+    from harness.monitoring.langfuse_tracer import LangfuseTracer, TraceContext
     from harness.monitoring.run_monitor import RunMonitor
 
 _agent_log = agent_logger("scheduler")
@@ -96,6 +93,7 @@ class BaseScheduler(ABC):
         config: SchedulerConfig | None = None,
         context_manager: ContextManager | None = None,
         monitor: RunMonitor | None = None,
+        tracer: LangfuseTracer | None = None,
         run_end_cb: Callable[[str], None] | None = None,
     ):
         self.store = store
@@ -105,6 +103,7 @@ class BaseScheduler(ABC):
         self.config = config or SchedulerConfig()
         self.context_manager = context_manager
         self.monitor = monitor
+        self.tracer = tracer
         self._run_end_cb = run_end_cb or (lambda rid: None)
         self._pause_events: dict[str, asyncio.Event] = {}
         self._confirm_events: dict[str, asyncio.Event] = {}
@@ -119,16 +118,100 @@ class BaseScheduler(ABC):
     @abstractmethod
     async def _run_loop(self, run_id: str, intent: str) -> RunState: ...
 
+    # ── Langfuse run-level trace helpers ────────────────────────────
+    # scheduler_mode is overridden by subclasses ("serial" / "planning").
+
+    scheduler_mode: str = "serial"
+
+    def _begin_run_trace(self, run_id: str, intent: str) -> TraceContext | None:
+        """Create the Run-level trace and activate it in the current context.
+
+        The active context is propagated via contextvars so deep calls (LLM
+        client, Tool executor) can read it. When tracing is disabled this is a
+        no-op returning None.
+        """
+        if self.tracer is None or not self.tracer.enabled:
+            return None
+        ctx = self.tracer.start_run(run_id, intent, self.scheduler_mode)
+        self._trace_tokens = set_trace_context(self.tracer, ctx)
+        return ctx
+
+    async def _end_run_trace(self, run_id: str) -> None:
+        """End the Run-level trace, writing final status, then flush async."""
+        ctx = getattr(self, "_trace_ctx", None)
+        if ctx is None:
+            return
+        try:
+            state = await self._refresh_state(run_id)
+            self.tracer.end_run(
+                ctx,
+                state.status.value,
+                output=str(state.summary or ""),
+                error=state.last_error,
+            )
+        finally:
+            self._trace_ctx = None
+            tokens = getattr(self, "_trace_tokens", None)
+            if tokens is not None:
+                reset_trace_context(tokens)
+                self._trace_tokens = None
+        await self.tracer.flush_async()
+
+    def _begin_iteration_trace(self, iteration: int) -> TraceContext | None:
+        """Create an iteration span under the run trace and activate it."""
+        if self.tracer is None or not self.tracer.enabled:
+            return None
+        trace_ctx = getattr(self, "_trace_ctx", None)
+        if trace_ctx is None:
+            return None
+        iter_ctx = self.tracer.start_iteration(trace_ctx, iteration)
+        if iter_ctx is not None:
+            self._iter_tokens = set_trace_context(self.tracer, iter_ctx)
+        return iter_ctx
+
+    def _end_iteration_trace(self, iter_ctx: TraceContext | None) -> None:
+        """End the iteration span and restore the run-level context."""
+        if iter_ctx is not None:
+            self.tracer.end_iteration(iter_ctx)
+        tokens = getattr(self, "_iter_tokens", None)
+        if tokens is not None:
+            reset_trace_context(tokens)
+            self._iter_tokens = None
+
+    def _trace_event(
+        self, name: str, level: str = "DEFAULT", metadata: dict | None = None,
+    ) -> None:
+        """Record an observation event under the current trace context (no-op when disabled)."""
+        if self.tracer is None or not self.tracer.enabled:
+            return
+        ctx = _get_current_trace_ctx()
+        if ctx is not None:
+            self.tracer.trace_event(ctx, name, level=level, metadata=metadata)
+
     async def run(self, run_id: str, intent: str) -> RunState:
         if run_id in self._running_tasks:
             raise RuntimeError(f"Run '{run_id}' is already running")
         cancel_flag = asyncio.Event()
         self._cancel_flags[run_id] = cancel_flag
+        self._trace_ctx = self._begin_run_trace(run_id, intent)
         task = asyncio.create_task(self._run_loop(run_id, intent))
         self._running_tasks[run_id] = task
         try:
             result = await task
             return result
+        except Exception as exc:
+            # L3 trusted-component barrier: any exception that escapes the
+            # subclass _run_loop (LLM timeouts, unexpected runtime errors,
+            # etc.) is converted into a structured RunFailed event so the
+            # Event Store always reflects the true run terminal state and
+            # the failure never becomes a silent "Task exception was never
+            # retrieved" (AGENTS.md §6.1, §3.5).
+            _sched_breaker.exception("[breaker] UNHANDLED exception in run=%s: %r", run_id, exc)
+            try:
+                await self._fail(run_id, f"Unhandled scheduler error: {exc!r}")
+            except Exception as fail_exc:
+                _sched_breaker.exception("[breaker] RunFailed write also failed for run=%s: %r", run_id, fail_exc)
+            return await self._refresh_state(run_id)
         finally:
             self._running_tasks.pop(run_id, None)
             self._cancel_flags.pop(run_id, None)
@@ -143,6 +226,10 @@ class BaseScheduler(ABC):
             # mapping doesn't grow unbounded across runs (P0-04 follow-up).
             self.store.evict_run_to_conv(run_id)
             self._run_end_cb(run_id)
+            try:
+                await self._end_run_trace(run_id)
+            except Exception as trace_exc:
+                _sched_breaker.exception("[breaker] Langfuse trace end failed for run=%s: %r", run_id, trace_exc)
 
     async def _handle_pause(self, run_id: str) -> None:
         exists = run_id in self._pause_events

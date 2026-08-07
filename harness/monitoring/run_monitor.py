@@ -119,7 +119,7 @@ class RunMonitor:
                 self._repeat_fail_count[rid] = 0
             self._last_fail_sig[rid] = new_sig
 
-            _log_anomaly.debug("Failure event %s %s %s %s", fmtkv(
+            _log_anomaly.debug("Failure event %s", fmtkv(
                 run_id=rid, seq=event.seq, ep_key=ep_key, tool=tool, error_type=error_type,
                 consecutive=count, per_tool=per_tool[tool], per_error=err_map[error_type],
             ))
@@ -164,7 +164,7 @@ class RunMonitor:
                 err_map = self._failure_error_map.setdefault(rid, {}).setdefault(tool_name, {})
                 err_map[error_type] = err_map.get(error_type, 0) + 1
 
-                _log_anomaly.debug("SOFT_ERROR %s %s", fmtkv(
+                _log_anomaly.debug("SOFT_ERROR %s", fmtkv(
                     run_id=rid, seq=event.seq, ep_key=ep_key, tool=tool_name,
                     error_type=error_type, consecutive=count,
                 ))
@@ -283,7 +283,7 @@ class RunMonitor:
         # In-memory dedup: one feedback per (endpoint, error_type) per run
         dedup_key = (ep_key, error_type)
         if dedup_key in self._fed_ep_keys.get(rid, set()):
-            _log_anomaly.info("Dedup hit — skipping injection %s %s", fmtkv(
+            _log_anomaly.info("Dedup hit — skipping injection %s", fmtkv(
                 run_id=rid, ep_key=ep_key, error_type=error_type, category=category.value,
             ))
             return

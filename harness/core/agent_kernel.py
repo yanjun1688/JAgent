@@ -15,7 +15,7 @@ from harness.core.llm_client import ChatResponse, LLMClient
 from harness.core.logger import agent_logger
 from harness.core.scheduler import AgentKernel, ThinkResult
 from harness.core.system_prompt import AgentPhase, build_tool_schemas, get_prompt
-from harness.models.events import EpisodeSummary
+from harness.models.events import Episode
 from harness.models.tools import ToolDefinition
 
 _logger = agent_logger("kernel")
@@ -193,8 +193,12 @@ class LLMAgentKernel(AgentKernel):
             messages.append({"role": "system", "content": f"## Monitoring Feedback\n{feedback}"})
 
         if state.summary:
-            if isinstance(state.summary, EpisodeSummary):
+            if isinstance(state.summary, Episode):
                 parts = []
+                if state.summary.title:
+                    parts.append(f"Title: {state.summary.title}")
+                if state.summary.summary:
+                    parts.append(f"Summary: {state.summary.summary}")
                 if state.summary.key_decisions:
                     parts.append(f"Key decisions: {', '.join(state.summary.key_decisions)}")
                 if state.summary.tools_used:
@@ -212,10 +216,8 @@ class LLMAgentKernel(AgentKernel):
 
         messages.extend(self._build_history_messages(state))
 
-        _logger.info("[think] === %s MESSAGES (%d msgs) ===", phase.value, len(messages))
-        for _i, _m in enumerate(messages):
-            _logger.info("[think]   msg[%d] role=%s\n%s", _i, _m["role"], _m.get("content", ""))
-        _logger.info("[think] === END MESSAGES ===")
+        _logger.info("[think] %s: %d messages, %d chars total",
+                     phase.value, len(messages), sum(len(m.get("content", "")) for m in messages))
 
         resp = await self.client.chat(messages, tools=schemas) if schemas else await self.client.chat(messages)
         return await self._consume_response(resp, messages)

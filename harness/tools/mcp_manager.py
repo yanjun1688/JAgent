@@ -36,12 +36,12 @@ class _MCPSession:
             try:
                 await self._session_cm.__aexit__(None, None, None)
             except BaseException:
-                _logger.warning("ClientSession cleanup failed for '%s'", self.name)
+                _logger.debug("ClientSession cleanup failed for '%s'", self.name)
         if self._transport_cm is not None:
             try:
                 await self._transport_cm.__aexit__(None, None, None)
             except BaseException:
-                _logger.warning("Transport cleanup failed for '%s'", self.name)
+                _logger.debug("Transport cleanup failed for '%s'", self.name)
 
 
 class MCPServerManager:
@@ -107,7 +107,7 @@ class MCPServerManager:
 
             mcp_sess.tool_names = [t.name for t in tools_result.tools]
 
-            _logger.info(
+            _logger.debug(
                 "Connected MCP server '%s': %d tools",
                 cfg.name, len(tools_info),
             )
@@ -129,7 +129,7 @@ class MCPServerManager:
         entry = self._sessions.pop(name, None)
         if isinstance(entry, _MCPSession):
             await entry.close()
-        _logger.info("Disconnected MCP server '%s'", name)
+        _logger.debug("Disconnected MCP server '%s'", name)
         return {"name": name, "success": True}
 
     def get_session(self, name: str) -> ClientSession | None:
