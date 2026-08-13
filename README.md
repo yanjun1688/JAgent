@@ -23,53 +23,64 @@
 
 ## 架构概览
 
+> 图中箭头 = **调用方向**。所有流程由受信的 **Scheduler 中枢**发起；**Planner（LLM）只是被调用的"出主意"者**——Scheduler 需要时让它出计划、修订、答复，它没有任何执行权，也不会反向驱动流程。
+
 ```
-┌──────────────────────────────────────────────────────────┐
-│  Interface Layer                                          │
-│     REST API / WebSocket / Analysis API / Unified Query   │
-│     Middleware: X-Tenant-Id → TenantContext (contextvar)  │
-├──────────────────────────────────────────────────────────┤
-│  ScopedEventStore        ← 受信                            │
-│     自动 WHERE tenant_id=? · workspace/run/conversation    │
-├──────────────────────────────────────────────────────────┤
-│  Scheduler (PlanningExecutorScheduler)  ← 受信            │
-│     classify 预检 → 契约解析 → Plan→Execute→Revise 循环     │
-│     DAG 并行执行 · 自动事件写入 · 挂起/恢复 · 熔断          │
-│     退化修订守卫 · Planner 失败降级 AgentLoopScheduler      │
-│     Q-07 总预算 watchdog · S10 取消/回收                    │
-├──────────────────────────────────────────────────────────┤
-│  Planner (LLM)             ← 非受信                        │
-│     生成/修订 JSON DAG Plan · 自检声明 declared_operations  │
-├──────────────────────────────────────────────────────────┤
-│  DagExecutor               ← 受信                          │
-│     depends_on 拓扑排序 · asyncio.gather 同层并行           │
-│     上游结果摘要化 · 信号量并发控制                        │
-├──────────────────────────────────────────────────────────┤
-│  Monitoring & Feedback     ← 受信                          │
-│     RunMonitor: on_append 实时监听 · 反馈注入              │
-│     LangfuseTracer · Token 预警 · 循环检测                  │
-├──────────────────────────────────────────────────────────┤
-│  Context Manager           ← 受信                          │
-│     自动压缩 + Checkpoint + 断点续传（token_limit=3000）    │
-├──────────────────────────────────────────────────────────┤
-│  Agent Kernel (LLM)        ← 非受信                        │
-│     think → 选择工具 → 推理决策（串行降级路径）              │
-├────────────────┬─────────────────────────────────────────┤
-│  Execution Tools           ← 非受信                       │
-│  FileOpTool · HttpRequestTool · BrowserTool · McpCallTool │
-├────────────────┴─────────────────────────────────────────┤
-│  Tool Layer Infrastructure   ← 受信                        │
-│    幂等键 · Guardrails(Scope/Whitelist/等) · 确认流程       │
-│    ExecutionBackend 注入 · 输出 Schema 校验               │
-├──────────────────────────────────────────────────────────┤
-│  ExecutionBackend          ← 受信                          │
-│     directory / docker(sandbox) / ssh-sftp（载体透明）      │
-├──────────────────────────────────────────────────────────┤
-│  Event Store (append-only) ← 受信                          │
-│     run_id + seq → 不可变事件流 · tenant/workspace 列       │
-│     seq 原子性 · 幂等键唯一约束 · 回调 · 终态守卫           │
-└──────────────────────────────────────────────────────────┘
+              ┌──────────────────────────────────────────┐
+              │  Interface Layer                         │
+              │  REST · WebSocket · Analysis · Query     │
+              │  X-Tenant-Id → TenantContext (contextvar) │
+              └────────────────────┬─────────────────────┘
+                                  │  POST /api/v1/runs
+                                  ▼
+     ┌─────────────────────────────────────────────────────┐
+     │   PlanningExecutorScheduler        （受信 · 中枢）    │
+     │   所有流程的唯一发起者：                               │
+     │   ① classify 保守预检（LLM 说"不用工具"也挡不住）      │
+     │   ② 契约解析 ContractExtractor                       │
+     │   ③ 调 Planner 出计划 → 执行 → 修订（循环）            │
+     │   ④ 完成门判定（只信 DeliveryContract + StepResult）  │
+     │   ⑤ 事件写入 · 挂起/恢复 · 熔断 · Q-07 预算 · 降级      │
+     └──┬────────┬─────────┬──────────┬────────────────────┘
+        │ 调用   │ 调用     │ 调用      │ 调用
+        ▼        ▼          ▼          ▼
+  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌──────────┐
+  │ Planner │ │DagExec  │ │RunMonit │ │ContextMgr│
+  │(非受信)  │ │(受信)   │ │(受信)   │ │(受信)    │
+  │ LLM 生成│ │DAG 拓扑 │ │事件监听 │ │自动压缩  │
+  │ 修订计划│ │并行执行 │ │反馈注入 │ │断点续传  │
+  │ declared│ │depends_ │ │Langfuse │ │(token_   │
+  │_ops 声明│ │on 排序  │ │追踪     │ │limit=3k) │
+  └─────────┘ └────┬────┘ └─────────┘ └──────────┘
+                   │ 按步骤调用
+                   ▼
+     ┌─────────────────────────────────────────────┐
+     │  Tool Layer Infrastructure      （受信）      │
+     │  幂等键自动计算 · Guardrails · 确认流程       │
+     │  输出 Schema 校验 · backend 注入             │
+     └──────────────────┬──────────────────────────┘
+                        ▼
+     ┌─────────────────────────────────────────────┐
+     │  ExecutionBackend              （受信）      │
+     │  directory / docker(sandbox) / ssh-sftp     │
+     │  唯一副作用出口，载体对工具层透明              │
+     └──────────────────┬──────────────────────────┘
+                        ▼
+     ┌─────────────────────────────────────────────┐
+     │  Event Store (append-only)      （受信）      │
+     │  run_id + seq 不可变事件流 · 自动广播到 WS     │
+     │  tenant_id / workspace_id / is_audit 列       │
+     └─────────────────────────────────────────────┘
 ```
+
+**受信 vs 非受信**（按组件，不是按层级）：
+
+| 受信（系统强制权） | 非受信（Agent 决策权） |
+|------|------|
+| PlanningExecutorScheduler · DagExecutor | Planner (LLM) |
+| Tool Layer 基础设施 · ExecutionBackend | Agent Kernel (LLM) |
+| Event Store · ScopedEventStore | Execution Tools 实现 |
+| RunMonitor · ContextManager | |
 
 ## 设计原则
 
