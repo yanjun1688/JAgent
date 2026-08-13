@@ -220,6 +220,7 @@ export default function RunDetail() {
         <div>
           <h1 style={{ margin: 0 }}>Run {run.run_id}</h1>
           <p style={{ color: '#666', margin: '4px 0' }}>{run.intent}</p>
+          {run.workspace_id ? <p style={{ color: '#8b8b9a', margin: '4px 0', fontSize: 12 }}>Workspace: {run.workspace_id}</p> : null}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           {run.status === 'running' && (

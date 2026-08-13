@@ -18,8 +18,9 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from harness.api.analysis_routes import router as analysis_router
 from harness.api.deps import HarnessAPI, configure_hapi, get_hapi
@@ -27,7 +28,9 @@ from harness.api.query import router as query_router
 from harness.api.routes import router as routes_router
 from harness.api.ws import router as ws_router
 from harness.core.lifecycle import mark_orphans
+from harness.core.tenant import reset_current_tenant, set_current_tenant
 from harness.models.mcp_config import MCPConfig
+from harness.models.workspace import ExecutionTarget, ExecutionTargetType, Workspace, WorkspaceScope
 from harness.tools.http_request import close_client as close_http_client
 from harness.tools.mcp_call import set_manager as set_mcp_manager
 from harness.tools.mcp_manager import MCPServerManager
@@ -48,10 +51,31 @@ async def lifespan(app: FastAPI):
     except RuntimeError:
         yield
         return
-    await api.store.initialize()
+    await api.raw_store.initialize()
+    await api.raw_store.ensure_tenant("default", "Default tenant")
+    if await api.raw_store.get_workspace("default") is None:
+        import time
+        from pathlib import Path
+
+        root = Path("data/workspaces/default/work").resolve()
+        await api.raw_store.create_workspace(
+            Workspace(
+                workspace_id="default",
+                tenant_id="default",
+                name="default",
+                scope=WorkspaceScope(
+                    target=ExecutionTarget(
+                        type=ExecutionTargetType.DIRECTORY,
+                        filesystem_root=str(root),
+                    )
+                ),
+                created_at=time.time(),
+                updated_at=time.time(),
+            )
+        )
 
     try:
-        await mark_orphans(api.store)
+        await mark_orphans(api.raw_store)
     except Exception as exc:
         _logger.exception("Failed to mark orphan runs: %s", exc)
 
@@ -74,12 +98,13 @@ async def lifespan(app: FastAPI):
             continue
         sn = r["name"]
         for t in r.get("tools", []):
-            schema = (t.get("inputSchema") or {})
+            schema = t.get("inputSchema") or {}
             params = ", ".join(schema.get("properties", {}).keys()) if schema.get("properties") else ""
             mcp_tool_lines.append(f"  - {sn}/{t['name']}({params}): {t.get('description', '')}")
 
     if mcp_tool_lines:
         from harness.tools.mcp_call import MCP_CALL_DEF
+
         MCP_CALL_DEF.description += "\n\nAvailable MCP servers and tools:\n" + "\n".join(mcp_tool_lines)
         _logger.info("MCP discovery: %d tools available via mcp_call", len(mcp_tool_lines))
 
@@ -94,7 +119,7 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             _logger.warning("MCP shutdown interrupted")
         try:
-            await api.store.close()
+            await api.raw_store.close()
         except asyncio.CancelledError:
             _logger.warning("Store close interrupted during shutdown")
         try:
@@ -118,6 +143,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def tenant_context_middleware(request: Request, call_next):
+    try:
+        token = set_current_tenant(request.headers.get("X-Tenant-Id") or "default")
+    except ValueError:
+        return JSONResponse(status_code=400, content={"detail": "invalid tenant id"})
+    try:
+        return await call_next(request)
+    finally:
+        reset_current_tenant(token)
+
 
 app.include_router(routes_router)
 app.include_router(ws_router)

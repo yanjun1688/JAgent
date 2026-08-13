@@ -1,4 +1,8 @@
 """Demo script: shows the complete Harness data flow with all logging."""
+
+# Imports follow the local source-path bootstrap below.
+# ruff: noqa: E402
+
 import asyncio
 import json
 import logging
@@ -13,13 +17,13 @@ logging.basicConfig(
 
 sys.path.insert(0, ".")
 
-from harness.core.scheduler import SchedulerConfig, ThinkResult
-from harness.storage.event_store import EventStore
-from harness.tools.executor import ToolExecutor
 from harness.core.agent_kernel import MockAgentKernel
 from harness.core.context_manager import ContextManager
+from harness.core.scheduler import SchedulerConfig, ThinkResult
+from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
 from harness.monitoring.run_monitor import RunMonitor
-from harness.models.tools import ToolDefinition, SideEffect, RetryPolicy
+from harness.storage.event_store import EventStore
+from harness.tools.executor import ToolExecutor
 
 
 async def main():
@@ -33,7 +37,8 @@ async def main():
     cm = ContextManager(store, token_limit=100, compression_threshold_ratio=0.5, checkpoint_interval=5)
 
     echo_def = ToolDefinition(
-        name="echo", description="Echo back what you send",
+        name="echo",
+        description="Echo back what you send",
         input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
         output_schema={"type": "object"},
         idempotency_key_fields=["msg"],
@@ -44,6 +49,7 @@ async def main():
 
     async def echo_fn(input: dict) -> dict:
         import time
+
         return {"echo": input, "ts": time.time()}
 
     responses = [
@@ -53,12 +59,17 @@ async def main():
     ]
 
     from harness.core.scheduler import AgentLoopScheduler
+
     kernel = MockAgentKernel(responses)
     scheduler = AgentLoopScheduler(
-        store=store, executor=executor, kernel=kernel,
-        tool_defs=[echo_def], tool_fns={"echo": echo_fn},
+        store=store,
+        executor=executor,
+        kernel=kernel,
+        tool_defs=[echo_def],
+        tool_fns={"echo": echo_fn},
         config=SchedulerConfig(max_iterations=10),
-        context_manager=cm, monitor=monitor,
+        context_manager=cm,
+        monitor=monitor,
     )
 
     print("\n" + "=" * 60)
@@ -82,7 +93,10 @@ async def main():
     print("=" * 60)
     events = await store.get_events("demo-run")
     for e in events:
-        print(f"  seq={e.seq:2d}  type={e.event_type.value:<25s}  payload={json.dumps(e.payload, ensure_ascii=False)[:60]}")
+        print(
+            f"  seq={e.seq:2d}  type={e.event_type.value:<25s}  "
+            f"payload={json.dumps(e.payload, ensure_ascii=False)[:60]}"
+        )
 
     await store.close()
 

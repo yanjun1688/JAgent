@@ -36,6 +36,7 @@ class TiktokenTokenCounter(TokenCounter):
 
     def __init__(self, model: str = "cl100k_base"):
         import tiktoken
+
         self.encoding = tiktoken.get_encoding(model)
 
     async def count(self, text: str) -> int:
@@ -98,6 +99,7 @@ class ProviderTokenCounter(TokenCounter):
 
     async def _call_api(self, text: str) -> int:
         import httpx
+
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

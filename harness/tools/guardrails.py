@@ -9,7 +9,8 @@ Includes:
 """
 
 import asyncio
-import os
+import inspect
+import shlex
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -17,7 +18,9 @@ from typing import Any
 import jsonschema
 
 from harness.core.logger import guard_logger
-from harness.models.tools import DependencyConstraint, ToolDefinition
+from harness.execution.base import ExecutionBackend
+from harness.models.tools import DependencyConstraint, SideEffect, ToolDefinition
+from harness.models.workspace import WorkspaceScope
 
 _log_guard = guard_logger("executor.guardrails")
 
@@ -56,70 +59,136 @@ class SchemaGuardrail:
 class ScopeGuardrail:
     """Check operation targets against allowed scopes.
 
-    Config (in Guardrail.config):
-        allowed_directories: list[str]  — path prefixes for file operations
-        allowed_domains: list[str]      — domain whitelist for HTTP/browser
-        allowed_commands: list[str]     — command whitelist (future, run_code)
+    ADR-010 D-04: contract-driven — the tool declares its scope targets via
+    ``ToolDefinition.scope_targets`` (kind: path/domain/command + input_field).
+    Whitelist config keys default per kind:
+        path → allowed_directories, domain → allowed_domains, command → allowed_commands.
+    Empty whitelist means "no restriction" (legacy behaviour preserved).
     """
 
     GUARDRAIL_ID = "scope"
+
+    _DEFAULT_CONFIG_KEYS = {
+        "path": "allowed_directories",
+        "domain": "allowed_domains",
+        "command": "allowed_commands",
+    }
 
     def __init__(self, **kwargs):
         pass
 
     @staticmethod
+    def _url_domain(url: str) -> str:
+        from urllib.parse import urlparse
+
+        return urlparse(url).hostname or ""
+
+    @staticmethod
+    def _path_within(path: str, directories: list[str]) -> bool:
+        """Return True when ``path`` falls inside at least one allowed directory."""
+        from os.path import commonpath
+        from posixpath import commonpath as posix_commonpath
+
+        normalized = path.replace("\\", "/")
+        for directory in directories:
+            directory = directory.replace("\\", "/")
+            try:
+                if normalized.startswith("/") or directory.startswith("/"):
+                    if posix_commonpath([normalized, directory]) == directory:
+                        return True
+                elif commonpath([normalized, directory]) == directory:
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    @staticmethod
     def check(tool_def: ToolDefinition, input: dict, config: dict[str, Any]) -> GuardrailResult:
-        allowed_dirs = config.get("allowed_directories", [])
-        allowed_domains = config.get("allowed_domains", [])
-        allowed_commands = config.get("allowed_commands", [])
-
-        if tool_def.name == "file_op":
-            path = (input.get("path") or "").replace("\\", "/")
-            dirs = list(allowed_dirs) if allowed_dirs else []
-            source = "allowed directories"
-            if not dirs:
-                # 无显式配置时，回退到 file_op 的沙箱根目录。
-                # 后期可扩展为服务器安全目录白名单、用户 home 目录等来源。
-                from harness.tools.file_op import _SANDBOX_BASE
-                sb = _SANDBOX_BASE
-                if sb is not None:
-                    dirs = [str(sb.resolve()).replace("\\", "/")]
-                    source = "sandbox root"
-            if dirs:
-                resolved = path
-                if not os.path.isabs(path):
-                    resolved = os.path.join(dirs[0], path).replace("\\", "/")
-                    resolved = os.path.abspath(resolved).replace("\\", "/")
-                if not any(resolved.startswith(d) for d in dirs):
+        """Sync check — path targets use local path rules (no backend resolve)."""
+        for target in tool_def.scope_targets:
+            key = target.config_key or ScopeGuardrail._DEFAULT_CONFIG_KEYS[target.kind]
+            allowed = list(config.get(key, []))
+            raw = input.get(target.input_field)
+            if target.kind == "path":
+                if raw is None or not allowed:
+                    continue
+                if not ScopeGuardrail._path_within(str(raw), allowed):
                     return GuardrailResult(
-                        passed=False,
-                        guardrail_id=ScopeGuardrail.GUARDRAIL_ID,
-                        reason=f"Path '{path}' is outside {source}: {dirs}",
+                        False,
+                        ScopeGuardrail.GUARDRAIL_ID,
+                        f"Path '{raw}' is outside allowed directories: {allowed}",
                     )
-
-        if tool_def.name in ("http_request", "browser"):
-            url = input.get("url") or input.get("arguments", {}).get("url", "")
-            if allowed_domains:
-                from urllib.parse import urlparse
-                parsed = urlparse(url)
-                domain = parsed.hostname or ""
-                if not any(domain == d or domain.endswith("." + d) for d in allowed_domains):
+            elif target.kind == "domain":
+                if not allowed:
+                    continue
+                domain = ScopeGuardrail._url_domain(str(raw or ""))
+                if not any(domain == d or domain.endswith("." + d) for d in allowed):
                     return GuardrailResult(
-                        passed=False,
-                        guardrail_id=ScopeGuardrail.GUARDRAIL_ID,
-                        reason=f"Domain '{domain}' is not in allowed list: {allowed_domains}",
+                        False,
+                        ScopeGuardrail.GUARDRAIL_ID,
+                        f"Domain '{domain}' is not in allowed list: {allowed}",
                     )
-
-        if tool_def.name == "run_code":
-            command = input.get("command", "")
-            if allowed_commands and not any(cmd in command for cmd in allowed_commands):
-                return GuardrailResult(
-                    passed=False,
-                    guardrail_id=ScopeGuardrail.GUARDRAIL_ID,
-                    reason=f"Command not in allowed list: {allowed_commands}",
-                )
-
+            elif target.kind == "command":
+                if not allowed:
+                    continue
+                command = str(raw or "")
+                try:
+                    argv = shlex.split(command, posix=False)
+                except ValueError:
+                    argv = []
+                shell_tokens = (";", "&&", "||", "|", ">", "<", "`", "$", "(", ")")
+                has_shell_operator = any(token in command for token in shell_tokens)
+                executable = argv[0].strip("\"'") if argv else ""
+                if not executable or has_shell_operator or executable not in set(allowed):
+                    return GuardrailResult(
+                        False,
+                        ScopeGuardrail.GUARDRAIL_ID,
+                        f"Command not in allowed list: {allowed}",
+                    )
         return GuardrailResult(passed=True, guardrail_id=ScopeGuardrail.GUARDRAIL_ID, reason="")
+
+    @classmethod
+    async def check_async(
+        cls,
+        tool_def: ToolDefinition,
+        input: dict,
+        config: dict[str, Any],
+        *,
+        backend: ExecutionBackend | None = None,
+    ) -> GuardrailResult:
+        """Async check — path targets with a backend are resolved by the trusted backend."""
+        if backend is not None:
+            for target in tool_def.scope_targets:
+                if target.kind != "path":
+                    continue
+                raw = input.get(target.input_field)
+                if raw is None:
+                    continue
+                try:
+                    await backend.resolve(str(raw))
+                except PermissionError as exc:
+                    return GuardrailResult(False, ScopeGuardrail.GUARDRAIL_ID, str(exc))
+        return cls.check(tool_def, input, config)
+
+
+class ToolWhitelistGuardrail:
+    GUARDRAIL_ID = "tool_whitelist"
+
+    @staticmethod
+    def check(
+        tool_def: ToolDefinition,
+        input: dict,
+        config: dict[str, Any],
+        *,
+        workspace_scope: WorkspaceScope | None = None,
+        **_kwargs: Any,
+    ) -> GuardrailResult:
+        allowed = workspace_scope.allowed_tools if workspace_scope else None
+        if allowed is not None and tool_def.name not in allowed:
+            return GuardrailResult(
+                False, ToolWhitelistGuardrail.GUARDRAIL_ID, f"Tool '{tool_def.name}' not allowed in this workspace"
+            )
+        return GuardrailResult(True, ToolWhitelistGuardrail.GUARDRAIL_ID, "")
 
 
 # ── 7.2 RateLimitGuardrail ────────────────────────────────────────
@@ -184,10 +253,12 @@ class RateLimitGuardrail:
 
 
 class DestructiveOpGuardrail:
-    """Detect destructive operations and trigger confirmation flow.
+    """Detect destructive operations and trigger the confirmation flow.
 
-    Config:
-        destructive_operations: list[str]  — input operations to treat as destructive (default ["delete"])
+    ADR-010 D-04: contract-driven — a matching ``OperationContract`` whose
+    ``side_effects`` contains DELETE, or that declares ``requires_confirmation``,
+    triggers confirmation.  ``config.destructive_operations`` remains an override
+    list of operation names (legacy file_op write behaviour preserved).
     """
 
     GUARDRAIL_ID = "destructive_op"
@@ -197,31 +268,23 @@ class DestructiveOpGuardrail:
 
     @staticmethod
     def check(tool_def: ToolDefinition, input: dict, config: dict[str, Any]) -> GuardrailResult:
-        destructive_ops = config.get("destructive_operations", ["delete"])
+        destructive_ops = list(config.get("destructive_operations", ["delete"]))
 
-        if tool_def.name == "file_op" and input.get("operation") in destructive_ops:
+        op = tool_def.resolve_operation(input)
+        if op is not None and (SideEffect.DELETE in op.side_effects or op.requires_confirmation):
             return GuardrailResult(
                 passed=True,
                 guardrail_id=DestructiveOpGuardrail.GUARDRAIL_ID,
-                reason=f"Destructive operation '{input['operation']}' requires confirmation",
+                reason="Destructive operation requires confirmation",
                 triggers_confirmation=True,
             )
 
-        if tool_def.name == "run_code":
+        value = input.get(tool_def.operation_key)
+        if value in destructive_ops:
             return GuardrailResult(
                 passed=True,
                 guardrail_id=DestructiveOpGuardrail.GUARDRAIL_ID,
-                reason="Code execution requires confirmation",
-                triggers_confirmation=True,
-            )
-
-        if tool_def.name == "file_op" and input.get("operation") == "write":
-            if "write" not in destructive_ops:
-                return GuardrailResult(passed=True, guardrail_id=DestructiveOpGuardrail.GUARDRAIL_ID, reason="")
-            return GuardrailResult(
-                passed=True,
-                guardrail_id=DestructiveOpGuardrail.GUARDRAIL_ID,
-                reason="Write operation requires confirmation",
+                reason=f"Destructive operation '{value}' requires confirmation",
                 triggers_confirmation=True,
             )
 
@@ -314,7 +377,15 @@ class GuardrailRunner:
     def register(self, guardrail_type: str, guardrail_cls: type):
         self._registry[guardrail_type] = guardrail_cls
 
-    async def run(self, tool_def: ToolDefinition, input: dict, *, run_id: str | None = None) -> list[GuardrailResult]:
+    async def run(
+        self,
+        tool_def: ToolDefinition,
+        input: dict,
+        *,
+        run_id: str | None = None,
+        workspace_scope: WorkspaceScope | None = None,
+        backend: ExecutionBackend | None = None,
+    ) -> list[GuardrailResult]:
         results: list[GuardrailResult] = []
         _t0 = time.monotonic()
 
@@ -324,18 +395,26 @@ class GuardrailRunner:
         _log_guard.debug("  schema → %s (%dms)", "pass" if schema_result.passed else "FAIL", _ms1)
         results.append(schema_result)
         if not schema_result.passed:
-            _log_guard.warning("Blocked by schema guardrail: %s (%.1fms)", schema_result.reason,
-                               (time.monotonic() - _t0) * 1000)
+            _log_guard.warning(
+                "Blocked by schema guardrail: %s (%.1fms)", schema_result.reason, (time.monotonic() - _t0) * 1000
+            )
+            return results
+
+        whitelist = ToolWhitelistGuardrail.check(tool_def, input, {}, workspace_scope=workspace_scope)
+        if not whitelist.passed:
+            results.append(whitelist)
             return results
 
         # Auto-check depends_on — always runs if declared, regardless of guardrails list
         dep_result = await self._auto_check_depends_on(tool_def, input, run_id=run_id)
         if dep_result is not None:
             _ms_dep = (time.monotonic() - _t0) * 1000
-            _log_guard.info("  depends_on → %s%s (%dms)",
-                            "pass" if dep_result.passed else "FAIL",
-                            f" — {dep_result.reason}" if not dep_result.passed else "",
-                            _ms_dep)
+            _log_guard.info(
+                "  depends_on → %s%s (%dms)",
+                "pass" if dep_result.passed else "FAIL",
+                f" — {dep_result.reason}" if not dep_result.passed else "",
+                _ms_dep,
+            )
             results.append(dep_result)
             if not dep_result.passed:
                 return results
@@ -357,8 +436,17 @@ class GuardrailRunner:
                 instance = guardrail_cls(store=self._store) if self._store else guardrail_cls()
 
                 _t_gr = time.monotonic()
-                if asyncio.iscoroutinefunction(instance.check):
-                    result = await instance.check(tool_def, input, gr.config, run_id=run_id)
+                if gr.guardrail_type == "scope" and backend is not None:
+                    result = await ScopeGuardrail.check_async(tool_def, input, gr.config, backend=backend)
+                elif asyncio.iscoroutinefunction(instance.check):
+                    # Pass run_id only to guardrails that declare it (currently
+                    # DependencyGuardrail). Signature introspection replaces the
+                    # previous brittle except-TypeError string-matching fallback.
+                    sig = inspect.signature(instance.check)
+                    kwargs: dict[str, Any] = {}
+                    if "run_id" in sig.parameters:
+                        kwargs["run_id"] = run_id
+                    result = await instance.check(tool_def, input, gr.config, **kwargs)
                 else:
                     result = instance.check(tool_def, input, gr.config)
                 _ms_gr = (time.monotonic() - _t_gr) * 1000
@@ -368,9 +456,9 @@ class GuardrailRunner:
                     detail = f" — {result.reason}"
                 elif result.triggers_confirmation:
                     detail = " (triggers confirmation)"
-                _log_guard.info("  %s → %s%s (%dms)",
-                                gr.guardrail_type, "pass" if result.passed else "FAIL",
-                                detail, _ms_gr)
+                _log_guard.info(
+                    "  %s → %s%s (%dms)", gr.guardrail_type, "pass" if result.passed else "FAIL", detail, _ms_gr
+                )
                 results.append(result)
                 if not result.passed:
                     return results

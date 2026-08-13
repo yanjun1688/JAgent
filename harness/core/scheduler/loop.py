@@ -44,11 +44,25 @@ class AgentLoopScheduler(BaseScheduler):
         monitor=None,
         tracer=None,
         run_end_cb: Callable[[str], None] | None = None,
+        workspace=None,
+        backend=None,
     ):
-        super().__init__(store, executor, tool_defs, tool_fns, config, context_manager, monitor, tracer, run_end_cb)
+        super().__init__(
+            store,
+            executor,
+            tool_defs,
+            tool_fns,
+            config,
+            context_manager,
+            monitor,
+            tracer,
+            run_end_cb,
+            workspace=workspace,
+            backend=backend,
+        )
         self.kernel = kernel
 
-    async def _run_loop(self, run_id: str, intent: str) -> RunState:
+    async def _run_loop(self, run_id: str, intent: str, conversation_context: str = "") -> RunState:
         await self._ensure_run_started(run_id, intent)
 
         consecutive_failures = 0
@@ -57,8 +71,9 @@ class AgentLoopScheduler(BaseScheduler):
         for _iteration in range(1, self.config.max_iterations + 1):
             _iter_elapsed = (time.monotonic() - _last_iter_time) * 1000
             if _iteration > 1:
-                _sched_iter.info("[iter %d] ← iteration %d completed in %dms",
-                                 _iteration - 1, _iteration - 1, _iter_elapsed)
+                _sched_iter.info(
+                    "[iter %d] ← iteration %d completed in %dms", _iteration - 1, _iteration - 1, _iter_elapsed
+                )
             _last_iter_time = time.monotonic()
 
             if self._is_cancelled(run_id):
@@ -90,7 +105,11 @@ class AgentLoopScheduler(BaseScheduler):
         return fold_events(await self.store.get_events(run_id))
 
     async def _run_iteration_body(
-        self, run_id: str, intent: str, _iteration: int, consecutive_failures: int,
+        self,
+        run_id: str,
+        intent: str,
+        _iteration: int,
+        consecutive_failures: int,
     ) -> RunState | int:
         """Run a single iteration (think → act → observe).
 
@@ -99,9 +118,14 @@ class AgentLoopScheduler(BaseScheduler):
         """
         events = await self.store.get_events(run_id)
         state = fold_events(events)
-        _sched_iter.info("[observe] Read %d events → seq=%d, thoughts=%d, results=%d, feedbacks=%d",
-                         len(events), state.seq, len(state.thought_history),
-                         len(state.tool_results), len(state.feedbacks))
+        _sched_iter.info(
+            "[observe] Read %d events → seq=%d, thoughts=%d, results=%d, feedbacks=%d",
+            len(events),
+            state.seq,
+            len(state.thought_history),
+            len(state.tool_results),
+            len(state.feedbacks),
+        )
 
         if self.context_manager:
             await self.context_manager.maybe_compress(run_id, _iteration, state)
@@ -112,13 +136,16 @@ class AgentLoopScheduler(BaseScheduler):
             return state
 
         if state.status == RunStatus.PAUSED:
-            _sched_ctrl.info("[ctrl] Loop detected PAUSED for run=%s, pause_reason=%s, pending_confirmations=%d",
-                             run_id, state.pause_reason, len(state.pending_confirmations))
+            _sched_ctrl.info(
+                "[ctrl] Loop detected PAUSED for run=%s, pause_reason=%s, pending_confirmations=%d",
+                run_id,
+                state.pause_reason,
+                len(state.pending_confirmations),
+            )
             await self._handle_pause(run_id)
             events = await self.store.get_events(run_id)
             state = fold_events(events)
-            _sched_ctrl.info("[ctrl] Loop after _handle_pause for run=%s, folded status=%s",
-                             run_id, state.status.value)
+            _sched_ctrl.info("[ctrl] Loop after _handle_pause for run=%s, folded status=%s", run_id, state.status.value)
             if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
                 return state
 
@@ -151,7 +178,7 @@ class AgentLoopScheduler(BaseScheduler):
 
         for i, think_result in enumerate(think_results):
             if think_result.direct_answer:
-                _sched_think.info("[answer] Agent answered directly: \"%s\"", think_result.direct_answer)
+                _sched_think.info('[answer] Agent answered directly: "%s"', think_result.direct_answer)
                 await self.store.append_event(
                     run_id,
                     EventType.RUN_COMPLETED,
@@ -171,7 +198,10 @@ class AgentLoopScheduler(BaseScheduler):
                 return fold_events(await self.store.get_events(run_id))
 
             terminated, consecutive_failures = await self._run_tool_call(
-                run_id, think_result, _iteration, consecutive_failures,
+                run_id,
+                think_result,
+                _iteration,
+                consecutive_failures,
             )
             if terminated:
                 return fold_events(await self.store.get_events(run_id))

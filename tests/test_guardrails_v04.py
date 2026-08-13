@@ -12,7 +12,7 @@ from harness import (
     ToolDefinition,
     ToolExecutor,
 )
-from harness.models.tools import DependencyConstraint
+from harness.models.tools import DependencyConstraint, OperationContract, ToolScopeTarget
 from harness.tools.guardrails import (
     DependencyGuardrail,
     DestructiveOpGuardrail,
@@ -37,43 +37,48 @@ def _make_tool(name="test", input_schema=None, guardrails=None, idempotency_key_
     )
 
 
+_PATH_TARGET = ToolScopeTarget(kind="path", input_field="path")
+_DOMAIN_TARGET = ToolScopeTarget(kind="domain", input_field="url")
+_COMMAND_TARGET = ToolScopeTarget(kind="command", input_field="command")
+
+
 # ── 7.1 ScopeGuardrail ────────────────────────────────────────────
 
 
 class TestScopeGuardrail:
     def test_blocks_outside_directory(self):
-        td = _make_tool(name="file_op")
+        td = _make_tool(name="file_op", scope_targets=[_PATH_TARGET])
         config = {"allowed_directories": ["/home/user/sandbox"]}
         result = ScopeGuardrail.check(td, {"operation": "read", "path": "/etc/passwd"}, config)
         assert not result.passed
         assert result.reason.startswith("Path")
 
     def test_allows_inside_directory(self):
-        td = _make_tool(name="file_op")
+        td = _make_tool(name="file_op", scope_targets=[_PATH_TARGET])
         config = {"allowed_directories": ["/home/user/sandbox"]}
         result = ScopeGuardrail.check(td, {"operation": "read", "path": "/home/user/sandbox/file.txt"}, config)
         assert result.passed
 
     def test_blocks_outside_domain(self):
-        td = _make_tool(name="http_request")
+        td = _make_tool(name="http_request", scope_targets=[_DOMAIN_TARGET])
         config = {"allowed_domains": ["example.com"]}
         result = ScopeGuardrail.check(td, {"url": "https://malicious.com/data"}, config)
         assert not result.passed
         assert "not in allowed list" in result.reason
 
     def test_allows_inside_domain(self):
-        td = _make_tool(name="http_request")
+        td = _make_tool(name="http_request", scope_targets=[_DOMAIN_TARGET])
         config = {"allowed_domains": ["example.com"]}
         result = ScopeGuardrail.check(td, {"url": "https://sub.example.com/page"}, config)
         assert result.passed
 
     def test_empty_config_allows_all(self):
-        td = _make_tool(name="file_op")
+        td = _make_tool(name="file_op", scope_targets=[_PATH_TARGET])
         result = ScopeGuardrail.check(td, {"operation": "delete", "path": "/any/path"}, {})
         assert result.passed
 
     def test_allows_browser_to_allowed_domain(self):
-        td = _make_tool(name="browser")
+        td = _make_tool(name="browser", scope_targets=[_DOMAIN_TARGET])
         config = {"allowed_domains": ["trusted.org"]}
         result = ScopeGuardrail.check(td, {"action": "navigate", "url": "https://trusted.org/page"}, config)
         assert result.passed
@@ -83,6 +88,13 @@ class TestScopeGuardrail:
         config = {"allowed_directories": ["/x"]}
         result = ScopeGuardrail.check(td, {"x": 1}, config)
         assert result.passed
+
+    def test_run_code_whitelist_matches_executable_not_substring(self):
+        td = _make_tool(name="run_code", scope_targets=[_COMMAND_TARGET])
+        config = {"allowed_commands": ["git"]}
+        assert ScopeGuardrail.check(td, {"command": "git status"}, config).passed
+        assert not ScopeGuardrail.check(td, {"command": "notgit"}, config).passed
+        assert not ScopeGuardrail.check(td, {"command": "git; malicious"}, config).passed
 
 
 # ── 7.2 RateLimitGuardrail ────────────────────────────────────────
@@ -148,8 +160,13 @@ class TestDestructiveOpGuardrail:
         assert not result.triggers_confirmation
 
     def test_run_code_triggers_confirmation(self):
-        td = _make_tool(name="run_code")
-        result = DestructiveOpGuardrail.check(td, {"command": "rm -rf /"}, {})
+        # ADR-010 D-04: 契约驱动 — operation 声明 requires_confirmation 即触发确认。
+        td = _make_tool(
+            name="run_code",
+            input_schema={"type": "object", "properties": {"command": {"type": "string"}}},
+            operations=[OperationContract(operation="run", requires_confirmation=True)],
+        )
+        result = DestructiveOpGuardrail.check(td, {"operation": "run", "command": "rm -rf /"}, {})
         assert result.passed
         assert result.triggers_confirmation
 
@@ -245,7 +262,9 @@ class TestDependencyGuardrail:
 
     @pytest.mark.asyncio
     async def test_depends_on_payload_filter(self, store):
-        await store.append_event("run-1", EventType.DAG_STEP_COMPLETED, {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"})
+        await store.append_event(
+            "run-1", EventType.DAG_STEP_COMPLETED, {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"}
+        )
         g = DependencyGuardrail(store=store)
         td = _make_tool(
             name="step_tool",
@@ -262,7 +281,9 @@ class TestDependencyGuardrail:
 
     @pytest.mark.asyncio
     async def test_depends_on_payload_filter_mismatch_blocks(self, store):
-        await store.append_event("run-1", EventType.DAG_STEP_COMPLETED, {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"})
+        await store.append_event(
+            "run-1", EventType.DAG_STEP_COMPLETED, {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"}
+        )
         g = DependencyGuardrail(store=store)
         td = _make_tool(
             name="step_tool",
@@ -300,7 +321,12 @@ class FakeSyncGuardrail:
     @staticmethod
     def check(tool_def, input, config):
         fail = config.get("fail", False)
-        return GuardrailResult(passed=not fail, guardrail_id="sync", reason="sync fail" if fail else "", triggers_confirmation=config.get("trigger_confirm", False))
+        return GuardrailResult(
+            passed=not fail,
+            guardrail_id="sync",
+            reason="sync fail" if fail else "",
+            triggers_confirmation=config.get("trigger_confirm", False),
+        )
 
 
 class TestGuardrailRunnerV04:
@@ -355,7 +381,11 @@ class TestExecutorDestructiveOpTrigger:
             return {"success": True}
 
         result = await executor.execute(
-            "run-1", "file_op", {"operation": "delete", "path": "/important.txt"}, td, fake_tool,
+            "run-1",
+            "file_op",
+            {"operation": "delete", "path": "/important.txt"},
+            td,
+            fake_tool,
         )
         assert result.status == ExecutionStatus.CONFIRMATION_NEEDED
         assert result.confirmation_id is not None
@@ -385,7 +415,11 @@ class TestExecutorDestructiveOpTrigger:
         executor = ToolExecutor(store, guardrail_runner=runner)
 
         r1 = await executor.execute(
-            "run-1", "file_op", {"operation": "delete", "path": "/important.txt"}, td, lambda x: {"ok": True},
+            "run-1",
+            "file_op",
+            {"operation": "delete", "path": "/important.txt"},
+            td,
+            lambda x: {"ok": True},
         )
         assert r1.status == ExecutionStatus.CONFIRMATION_NEEDED
 
@@ -399,7 +433,10 @@ class TestExecutorDestructiveOpTrigger:
 
         call_count = []
         r2 = await executor.execute(
-            "run-1", "file_op", {"operation": "delete", "path": "/important.txt"}, td,
+            "run-1",
+            "file_op",
+            {"operation": "delete", "path": "/important.txt"},
+            td,
             lambda x: (call_count.append(1), {"ok": True})[1],
         )
         assert r2.status == ExecutionStatus.COMPLETED
@@ -426,7 +463,11 @@ class TestExecutorDestructiveOpTrigger:
         executor = ToolExecutor(store, guardrail_runner=runner)
 
         result = await executor.execute(
-            "run-1", "file_op", {"operation": "read", "path": "/safe.txt"}, td, lambda x: {"content": "data"},
+            "run-1",
+            "file_op",
+            {"operation": "read", "path": "/safe.txt"},
+            td,
+            lambda x: {"content": "data"},
         )
         assert result.status == ExecutionStatus.COMPLETED
 
@@ -445,12 +486,17 @@ class TestExecutorDestructiveOpTrigger:
             idempotency_key_fields=["operation", "path"],
             side_effects=[],
             guardrails=[Guardrail(guardrail_type="scope", config={"allowed_directories": ["/allowed"]})],
+            scope_targets=[_PATH_TARGET],
         )
         runner = GuardrailRunner({"scope": ScopeGuardrail})
         executor = ToolExecutor(store, guardrail_runner=runner)
 
         result = await executor.execute(
-            "run-1", "file_op", {"operation": "read", "path": "/etc/passwd"}, td, lambda x: {"ok": True},
+            "run-1",
+            "file_op",
+            {"operation": "read", "path": "/etc/passwd"},
+            td,
+            lambda x: {"ok": True},
         )
         assert result.status == ExecutionStatus.GUARDRAIL_BLOCKED
         assert result.guardrail_id == "scope"
@@ -462,6 +508,7 @@ class TestExecutorDestructiveOpTrigger:
         td = _make_tool(
             name="file_op",
             guardrails=[Guardrail(guardrail_type="scope", config={"allowed_directories": ["/ok"]})],
+            scope_targets=[_PATH_TARGET],
         )
         results = await runner.run(td, {"operation": "read", "path": "/bad/file"}, run_id="r1")
         assert results[1].passed is False
@@ -483,7 +530,11 @@ class TestExecutorDestructiveOpTrigger:
         executor = ToolExecutor(store, guardrail_runner=runner)
 
         result = await executor.execute(
-            "run-1", "multi_check", {"x": 1}, td, lambda x: {"ok": True},
+            "run-1",
+            "multi_check",
+            {"x": 1},
+            td,
+            lambda x: {"ok": True},
         )
         assert result.status == ExecutionStatus.COMPLETED
 
@@ -500,7 +551,11 @@ class TestExecutorDestructiveOpTrigger:
         executor = ToolExecutor(store, guardrail_runner=runner)
 
         result = await executor.execute(
-            "run-1", "dep_tool", {"x": 1}, td, lambda x: {"ok": True},
+            "run-1",
+            "dep_tool",
+            {"x": 1},
+            td,
+            lambda x: {"ok": True},
         )
         assert result.status == ExecutionStatus.GUARDRAIL_BLOCKED
         assert "AgentThought" in (result.guardrail_reason or "")

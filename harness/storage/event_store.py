@@ -12,6 +12,7 @@ import aiosqlite
 
 from harness.core.logger import guard_logger
 from harness.models.events import PAYLOAD_MODEL_MAP, Event, EventType
+from harness.models.workspace import Tenant, Workspace, WorkspaceUpdate
 
 _log_write = guard_logger("store.write")
 _log_query = guard_logger("store.query")
@@ -20,12 +21,15 @@ _log_idem = guard_logger("store.idem")
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS events (
     run_id          TEXT    NOT NULL,
+    tenant_id       TEXT    NOT NULL DEFAULT 'default',
+    workspace_id     TEXT,
     seq             INTEGER NOT NULL,
     event_type      TEXT    NOT NULL,
     payload         TEXT    NOT NULL,
     idempotency_key TEXT,
     created_at      REAL    NOT NULL,
     conversation_id TEXT,
+    is_audit        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (run_id, seq)
 );
 
@@ -48,6 +52,7 @@ END;
 
 CREATE TABLE IF NOT EXISTS conversations (
     conversation_id TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL DEFAULT 'default',
     user_id TEXT NOT NULL DEFAULT 'default',
     title TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'active',
@@ -55,6 +60,36 @@ CREATE TABLE IF NOT EXISTS conversations (
     updated_at REAL NOT NULL,
     message_count INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS client_request_claims (
+    tenant_id        TEXT NOT NULL DEFAULT 'default',
+    conversation_id  TEXT NOT NULL,
+    client_request_id TEXT NOT NULL,
+    run_id           TEXT NOT NULL,
+    created_at       REAL NOT NULL,
+    PRIMARY KEY (tenant_id, conversation_id, client_request_id)
+);
+
+CREATE TABLE IF NOT EXISTS tenants (
+    tenant_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    workspace_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    scope TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE (tenant_id, name)
+);
+
 """
 
 
@@ -64,6 +99,23 @@ class DuplicateIdempotencyKeyError(Exception):
 
 class SequenceConflictError(Exception):
     """Raised when PK conflict retries are exhausted."""
+
+
+# Single source of truth for the events table INSERT column list. Shared by
+# append_event() and claim_client_request() so future schema additions can't
+# drift between the two write paths.
+_EVENT_INSERT_COLUMNS = (
+    "run_id",
+    "tenant_id",
+    "workspace_id",
+    "seq",
+    "event_type",
+    "payload",
+    "idempotency_key",
+    "created_at",
+    "conversation_id",
+    "is_audit",
+)
 
 
 class EventStore:
@@ -85,11 +137,16 @@ class EventStore:
         self._conn: aiosqlite.Connection | None = None
         self._post_append: list[Callable[[Event], Awaitable[None]]] = []
         self._seq_locks: dict[str, asyncio.Lock] = {}
+        # SQLite uses one connection here; serialize write transactions so
+        # BEGIN IMMEDIATE cannot interleave across different run IDs.
+        self._db_write_lock = asyncio.Lock()
         self._append_count: int = 0
         # run_id -> conversation_id cache, populated from RunStarted payloads.
         # Used by append_event to fill conversation_id column for subsequent
         # events on the same run whose payload lacks this field.
         self._run_to_conv: dict[str, str] = {}
+        self._run_to_workspace: dict[str, str] = {}
+        self._request_claim_lock = asyncio.Lock()
 
     async def _migrate_add_conversation_id_column(self) -> None:
         """Add conversation_id column to events table for legacy persistent DBs.
@@ -108,10 +165,23 @@ class EventStore:
             _log_write.info("Migrating events table: adding conversation_id column")
             await self.conn.execute("ALTER TABLE events ADD COLUMN conversation_id TEXT")
             await self.conn.commit()
-        await self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_events_conversation ON events(conversation_id)"
-        )
+        await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_conversation ON events(conversation_id)")
         await self.conn.commit()
+
+    async def _migrate_add_is_audit_column(self) -> None:
+        """Add is_audit column to events table for legacy persistent DBs.
+
+        DDL only — does not modify existing rows (Append-Only invariant preserved).
+        Marks the column 0 by default; only Workspace audit events are written
+        with is_audit=1 going forward. Fresh DBs already declare the column in
+        _SCHEMA_SQL, so this is a no-op for them.
+        """
+        cursor = await self.conn.execute("PRAGMA table_info(events)")
+        cols = {r[1] for r in await cursor.fetchall()}
+        if "is_audit" not in cols:
+            _log_write.info("Migrating events table: adding is_audit column")
+            await self.conn.execute("ALTER TABLE events ADD COLUMN is_audit INTEGER NOT NULL DEFAULT 0")
+            await self.conn.commit()
 
     async def _prepopulate_run_to_conv_cache(self) -> None:
         """On startup, rebuild _run_to_conv from existing RunStarted payloads.
@@ -132,6 +202,9 @@ class EventStore:
             cid = p.get("conversation_id")
             if cid:
                 self._run_to_conv[r["run_id"]] = cid
+        cursor = await self.conn.execute("SELECT run_id, workspace_id FROM events WHERE workspace_id IS NOT NULL")
+        for row in await cursor.fetchall():
+            self._run_to_workspace[row["run_id"]] = row["workspace_id"]
 
     async def __aenter__(self) -> EventStore:
         await self.initialize()
@@ -151,10 +224,34 @@ class EventStore:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(_SCHEMA_SQL)
         await self._conn.commit()
-        # Migration: existing persistent DBs predate `conversation_id` column.
-        # DDL is permitted (Append-Only trigger only forbids UPDATE/DELETE on rows).
+        await self._validate_v33_schema()
+        await self.conn.executescript(
+            "CREATE INDEX IF NOT EXISTS idx_events_tenant ON events(tenant_id);"
+            "CREATE INDEX IF NOT EXISTS idx_events_workspace ON events(tenant_id, workspace_id);"
+            "CREATE INDEX IF NOT EXISTS idx_conversations_tenant ON conversations(tenant_id);"
+        )
+        await self.conn.commit()
+        # The v3.3 schema is created as a complete schema. The legacy helper is
+        # retained only for old callers that explicitly create a compatible DB.
         await self._migrate_add_conversation_id_column()
+        await self._migrate_add_is_audit_column()
         await self._prepopulate_run_to_conv_cache()
+
+    async def _validate_v33_schema(self) -> None:
+        required = {
+            "events": {"tenant_id", "workspace_id", "conversation_id"},
+            "conversations": {"tenant_id"},
+            "client_request_claims": {"tenant_id"},
+        }
+        for table, columns in required.items():
+            cursor = await self.conn.execute(f"PRAGMA table_info({table})")
+            actual = {row[1] for row in await cursor.fetchall()}
+            missing = columns - actual
+            if missing:
+                raise RuntimeError(
+                    f"Database is not compatible with v3.3: {table} missing {sorted(missing)}; "
+                    "delete the database and restart"
+                )
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -163,6 +260,87 @@ class EventStore:
 
     def on_append(self, callback: Callable[[Event], Awaitable[None]]) -> None:
         self._post_append.append(callback)
+
+    async def claim_client_request(
+        self,
+        conversation_id: str,
+        client_request_id: str,
+        run_id: str,
+        run_started_payload: dict[str, Any],
+        *,
+        tenant_id: str = "default",
+        workspace_id: str | None = None,
+    ) -> tuple[str, bool]:
+        """Atomically claim a conversation request and create its RunStarted event.
+
+        The unique claim is storage-backed, so the route cannot race between
+        checking history and creating a second run. The returned bool is true
+        only for the request that created the claim.
+        """
+        _validate_payload(EventType.RUN_STARTED, run_started_payload)
+        async with self._request_claim_lock:
+            cursor = await self.conn.execute(
+                "SELECT run_id FROM client_request_claims "
+                "WHERE tenant_id = ? AND conversation_id = ? AND client_request_id = ?",
+                (tenant_id, conversation_id, client_request_id),
+            )
+            existing = await cursor.fetchone()
+            if existing is not None:
+                return str(existing["run_id"]), False
+
+            now = time.time()
+            try:
+                await self.conn.execute(
+                    "INSERT INTO client_request_claims "
+                    "(tenant_id, conversation_id, client_request_id, run_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (tenant_id, conversation_id, client_request_id, run_id, now),
+                )
+                await self.conn.execute(
+                    f"INSERT INTO events ({', '.join(_EVENT_INSERT_COLUMNS)}) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)",
+                    (
+                        run_id,
+                        tenant_id,
+                        workspace_id,
+                        EventType.RUN_STARTED.value,
+                        json.dumps(run_started_payload, ensure_ascii=False),
+                        f"client-request:{conversation_id}:{client_request_id}",
+                        now,
+                        conversation_id,
+                        0,
+                    ),
+                )
+                await self.conn.commit()
+            except sqlite3.IntegrityError:
+                await self.conn.rollback()
+                cursor = await self.conn.execute(
+                    "SELECT run_id FROM client_request_claims "
+                    "WHERE tenant_id = ? AND conversation_id = ? AND client_request_id = ?",
+                    (tenant_id, conversation_id, client_request_id),
+                )
+                existing = await cursor.fetchone()
+                if existing is not None:
+                    return str(existing["run_id"]), False
+                raise
+            self._run_to_conv[run_id] = conversation_id
+            if workspace_id is not None:
+                self._run_to_workspace[run_id] = workspace_id
+
+            event = Event(
+                run_id=run_id,
+                seq=1,
+                event_type=EventType.RUN_STARTED,
+                payload=run_started_payload,
+                idempotency_key=f"client-request:{conversation_id}:{client_request_id}",
+                created_at=now,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+            )
+            for cb in self._post_append:
+                try:
+                    await cb(event)
+                except Exception as exc:
+                    _log_write.error("on_append callback failed: %s", exc)
+            return run_id, True
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -178,18 +356,24 @@ class EventStore:
         event_type: EventType,
         payload: dict[str, Any],
         *,
+        tenant_id: str = "default",
+        workspace_id: str | None = None,
         idempotency_key: str | None = None,
+        is_audit: bool = False,
         _max_retries: int = 3,
     ) -> Event:
-        """Append a new event to the store."""
+        """Append a new event to the store.
+
+        `is_audit=True` marks system-level audit events (e.g. Workspace
+        lifecycle) that must be excluded from ordinary run listings.
+        """
         _t0 = time.monotonic()
         _validate_payload(event_type, payload)
 
         if idempotency_key is not None:
             existing = await self.find_by_idempotency_key(run_id, event_type, idempotency_key)
             if existing is not None:
-                _log_idem.info("Idempotency cache hit: %s @ seq=%d (run=%s)",
-                               event_type.value, existing.seq, run_id)
+                _log_idem.info("Idempotency cache hit: %s @ seq=%d (run=%s)", event_type.value, existing.seq, run_id)
                 return existing
 
         created_at = time.time()
@@ -204,27 +388,52 @@ class EventStore:
         if conversation_id is not None and run_id not in self._run_to_conv:
             # Cache new mapping for future events on this run.
             self._run_to_conv[run_id] = conversation_id
+        if workspace_id is None:
+            workspace_id = self._run_to_workspace.get(run_id)
+        elif run_id not in self._run_to_workspace:
+            self._run_to_workspace[run_id] = workspace_id
 
         sql = (
-            "INSERT INTO events (run_id, seq, event_type, payload, idempotency_key, created_at, conversation_id) "
-            "SELECT ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE run_id = ?), "
-            "?, ?, ?, ?, ?"
+            "INSERT INTO events "
+            f"({', '.join(_EVENT_INSERT_COLUMNS)}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
 
-        lock = self._seq_locks.setdefault(run_id, asyncio.Lock())
+        lock = self._db_write_lock
+        assigned_seq: int | None = None
         async with lock:
             for attempt in range(_max_retries + 1):
                 try:
+                    await self.conn.execute("BEGIN IMMEDIATE")
+                    cursor = await self.conn.execute(
+                        "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE run_id = ?",
+                        (run_id,),
+                    )
+                    row = await cursor.fetchone()
+                    assigned_seq = int(row[0])
                     await self.conn.execute(
                         sql,
-                        (run_id, run_id, event_type.value, payload_json,
-                         idempotency_key, created_at, conversation_id),
+                        (
+                            run_id,
+                            tenant_id,
+                            workspace_id,
+                            assigned_seq,
+                            event_type.value,
+                            payload_json,
+                            idempotency_key,
+                            created_at,
+                            conversation_id,
+                            int(is_audit),
+                        ),
                     )
                     await self.conn.commit()
                     break
                 except sqlite3.IntegrityError as exc:
+                    await self.conn.rollback()
                     error_str = str(exc)
                     if "UNIQUE constraint" in error_str and "events.idempotency_key" in error_str:
+                        if idempotency_key is None:
+                            raise
                         existing = await self.find_by_idempotency_key(run_id, event_type, idempotency_key)
                         if existing is not None:
                             return existing
@@ -232,12 +441,17 @@ class EventStore:
                             f"Duplicate idempotency key '{idempotency_key}' for run '{run_id}'"
                         ) from exc
                     if attempt < _max_retries:
-                        _log_write.warning("Seq conflict on attempt %d/%d for run=%s, retrying...",
-                                           attempt + 1, _max_retries + 1, run_id)
+                        _log_write.warning(
+                            "Seq conflict on attempt %d/%d for run=%s, retrying...",
+                            attempt + 1,
+                            _max_retries + 1,
+                            run_id,
+                        )
                         continue
-                    raise SequenceConflictError(
-                        f"PK conflict on (run_id='{run_id}', seq): {exc}"
-                    ) from exc
+                    raise SequenceConflictError(f"PK conflict on (run_id='{run_id}', seq): {exc}") from exc
+                except Exception:
+                    await self.conn.rollback()
+                    raise
 
         self._append_count += 1
         if self._append_count % 50 == 0:
@@ -247,18 +461,21 @@ class EventStore:
         # Known Issue: count-based eviction above may miss locks held across the
         # 50-write checkpoint. Needs time-based TTL. See TODO_v2.1.md §Known Technical Debt.
 
-        next_seq = await self.get_latest_seq(run_id)
+        if assigned_seq is None:
+            raise RuntimeError("Event append completed without an assigned sequence")
         event = Event(
             run_id=run_id,
-            seq=next_seq,
+            seq=assigned_seq,
             event_type=event_type,
             payload=payload,
             idempotency_key=idempotency_key,
             created_at=created_at,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            is_audit=is_audit,
         )
         _ms = (time.monotonic() - _t0) * 1000
-        _log_write.info("Written event @ seq=%d: %s (run=%s, %dms)",
-                     next_seq, event_type.value, run_id, _ms)
+        _log_write.info("Written event @ seq=%d: %s (run=%s, %dms)", assigned_seq, event_type.value, run_id, _ms)
         for cb in self._post_append:
             try:
                 await cb(event)
@@ -273,7 +490,7 @@ class EventStore:
             "SELECT * FROM events WHERE run_id = ? ORDER BY seq ASC",
             (run_id,),
         )
-        rows = await cursor.fetchall()
+        rows = list(await cursor.fetchall())
         _ms = (time.monotonic() - _start) * 1000
         _log_query.debug("get_events(run=%s): %d rows, %dms", run_id, len(rows), _ms)
         return [e for e in (_row_to_event(dict(r)) for r in rows) if e is not None]
@@ -296,10 +513,9 @@ class EventStore:
                 "SELECT * FROM events WHERE run_id = ? AND seq >= ? ORDER BY seq ASC",
                 (run_id, from_seq),
             )
-        rows = await cursor.fetchall()
+        rows = list(await cursor.fetchall())
         _ms = (time.monotonic() - _t0) * 1000
-        _log_query.debug("get_event_range(run=%s, from=%s): %d rows, %dms",
-                         run_id, from_seq, len(rows), _ms)
+        _log_query.debug("get_event_range(run=%s, from=%s): %d rows, %dms", run_id, from_seq, len(rows), _ms)
         return [e for e in (_row_to_event(dict(r)) for r in rows) if e is not None]
 
     async def get_latest_seq(self, run_id: str) -> int:
@@ -340,47 +556,83 @@ class EventStore:
         row = await cursor.fetchone()
         _ms = (time.monotonic() - _t0) * 1000
         if row is None:
-            _log_idem.debug("IK lookup miss: run=%s type=%s ik=%.16s (%dms)",
-                            run_id, event_type.value, idempotency_key, _ms)
+            _log_idem.debug(
+                "IK lookup miss: run=%s type=%s ik=%.16s (%dms)", run_id, event_type.value, idempotency_key, _ms
+            )
             return None
-        _log_idem.debug("IK lookup hit: run=%s type=%s ik=%.16s seq=%d (%dms)",
-                        run_id, event_type.value, idempotency_key, row["seq"], _ms)
+        _log_idem.debug(
+            "IK lookup hit: run=%s type=%s ik=%.16s seq=%d (%dms)",
+            run_id,
+            event_type.value,
+            idempotency_key,
+            row["seq"],
+            _ms,
+        )
         return _row_to_event(dict(row))
 
     async def list_runs(
         self,
         limit: int = 50,
         offset: int = 0,
+        tenant_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> list[dict]:
         _t0 = time.monotonic()
+        # Exclude conversation-level streams (run_id == conversation_id) and
+        # system audit streams (is_audit=1, e.g. Workspace lifecycle) so the
+        # run list only contains real Run streams. Both clause fragments are
+        # constants composed below — no user input reaches the SQL text.
+        clauses = [
+            "(conversation_id IS NULL OR run_id != conversation_id)",
+            "is_audit = 0",
+        ]
+        params: list[Any] = []
+        if tenant_id is not None:
+            clauses.append("tenant_id = ?")
+            params.append(tenant_id)
+        if workspace_id is not None:
+            clauses.append("workspace_id = ?")
+            params.append(workspace_id)
         cursor = await self.conn.execute(
-            """
+            f"""
             SELECT run_id, MIN(seq) AS seq, MIN(created_at) AS created_at,
                    MAX(created_at) AS updated_at,
-                   COUNT(*) AS event_count
+                   COUNT(*) AS event_count, MAX(workspace_id) AS workspace_id
             FROM events
-            WHERE conversation_id IS NULL OR run_id != conversation_id
+            WHERE {" AND ".join(clauses)}
             GROUP BY run_id
             ORDER BY MAX(created_at) DESC
             LIMIT ? OFFSET ?
             """,
-            (limit, offset),
+            [*params, limit, offset],
         )
         rows = await cursor.fetchall()
         _ms = (time.monotonic() - _t0) * 1000
         result = [dict(r) for r in rows]
-        _log_query.debug("list_runs(limit=%d, offset=%d): %d rows, %dms",
-                         limit, offset, len(result), _ms)
+        _log_query.debug("list_runs(limit=%d, offset=%d): %d rows, %dms", limit, offset, len(result), _ms)
         return result
 
-    async def total_run_count(self) -> int:
+    async def total_run_count(self, tenant_id: str | None = None, workspace_id: str | None = None) -> int:
         _t0 = time.monotonic()
+        # Constants only — see list_runs() for the exclusion rationale.
+        clauses = [
+            "(conversation_id IS NULL OR run_id != conversation_id)",
+            "is_audit = 0",
+        ]
+        params: list[Any] = []
+        if tenant_id is not None:
+            clauses.append("tenant_id = ?")
+            params.append(tenant_id)
+        if workspace_id is not None:
+            clauses.append("workspace_id = ?")
+            params.append(workspace_id)
         cursor = await self.conn.execute(
-            """
+            f"""
             SELECT COUNT(DISTINCT run_id) AS cnt
             FROM events
-            WHERE conversation_id IS NULL OR run_id != conversation_id
-            """
+            WHERE {" AND ".join(clauses)}
+            """,
+            params,
         )
         row = await cursor.fetchone()
         _ms = (time.monotonic() - _t0) * 1000
@@ -388,13 +640,17 @@ class EventStore:
         _log_query.debug("total_run_count: %d, %dms", result, _ms)
         return result
 
-    async def list_all_run_ids(self) -> list[str]:
+    async def list_all_run_ids(self, tenant_id: str | None = None) -> list[str]:
         _t0 = time.monotonic()
+        clause = " AND tenant_id = ?" if tenant_id is not None else ""
+        params = [tenant_id] if tenant_id is not None else []
         cursor = await self.conn.execute(
-            """
+            f"""
             SELECT DISTINCT run_id FROM events
-            WHERE conversation_id IS NULL OR run_id != conversation_id
-            """
+            WHERE (conversation_id IS NULL OR run_id != conversation_id)
+              AND is_audit = 0{clause}
+            """,
+            params,
         )
         rows = await cursor.fetchall()
         _ms = (time.monotonic() - _t0) * 1000
@@ -402,21 +658,35 @@ class EventStore:
         _log_query.debug("list_all_run_ids: %d rows, %dms", len(result), _ms)
         return result
 
-    async def get_events_for_runs(self, run_ids: list[str]) -> list[Event]:
+    async def get_events_for_runs(self, run_ids: list[str], tenant_id: str | None = None) -> list[Event]:
         if not run_ids:
             return []
         _t0 = time.monotonic()
         placeholders = ",".join("?" * len(run_ids))
+        tenant_clause = " AND tenant_id = ?" if tenant_id is not None else ""
         cursor = await self.conn.execute(
-            f"SELECT * FROM events WHERE run_id IN ({placeholders}) ORDER BY run_id, seq ASC",
-            run_ids,
+            f"SELECT * FROM events WHERE run_id IN ({placeholders}){tenant_clause} ORDER BY run_id, seq ASC",
+            [*run_ids, *([tenant_id] if tenant_id is not None else [])],
         )
         rows = await cursor.fetchall()
         _ms = (time.monotonic() - _t0) * 1000
         result = [e for e in (_row_to_event(dict(r)) for r in rows) if e is not None]
-        _log_query.debug("get_events_for_runs(%d runs): %d rows, %dms",
-                         len(run_ids), len(result), _ms)
+        _log_query.debug("get_events_for_runs(%d runs): %d rows, %dms", len(run_ids), len(result), _ms)
         return result
+
+    async def get_workspace_events(self, workspace_id: str, tenant_id: str | None = None) -> list[Event]:
+        """Return the audit trail for a workspace (WORKSPACE_* events only).
+
+        Run events carry workspace_id too but are not part of the config audit
+        trail, so they are filtered out via is_audit=1.
+        """
+        clause = " AND tenant_id = ?" if tenant_id is not None else ""
+        params = [workspace_id, *([tenant_id] if tenant_id is not None else [])]
+        cursor = await self.conn.execute(
+            f"SELECT * FROM events WHERE workspace_id = ? AND is_audit = 1{clause} ORDER BY created_at, seq",
+            params,
+        )
+        return [event for event in (_row_to_event(dict(row)) for row in await cursor.fetchall()) if event is not None]
 
     async def find_confirmation_by_id(self, run_id: str, confirmation_id: str) -> Event | None:
         _t0 = time.monotonic()
@@ -432,13 +702,128 @@ class EventStore:
                 continue
             payload = json.loads(row["payload"])
             if payload.get("confirmation_id") == confirmation_id:
-                _log_query.debug("find_confirmation(run=%s, id=%s): hit, %dms",
-                                 run_id, confirmation_id, _ms)
+                _log_query.debug("find_confirmation(run=%s, id=%s): hit, %dms", run_id, confirmation_id, _ms)
                 return event
-        _log_query.debug("find_confirmation(run=%s, id=%s): miss, %dms",
-                         run_id, confirmation_id, _ms)
+        _log_query.debug("find_confirmation(run=%s, id=%s): miss, %dms", run_id, confirmation_id, _ms)
         return None
 
+    # ── Tenant and workspace records ───────────────────────────
+
+    async def ensure_tenant(self, tenant_id: str, name: str = "") -> Tenant:
+        now = time.time()
+        await self.conn.execute(
+            "INSERT INTO tenants (tenant_id, name, created_at, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(tenant_id) DO UPDATE SET updated_at=excluded.updated_at",
+            (tenant_id, name, now, now),
+        )
+        await self.conn.commit()
+        return Tenant(tenant_id=tenant_id, name=name, created_at=now, updated_at=now)
+
+    async def get_tenant(self, tenant_id: str) -> Tenant | None:
+        cursor = await self.conn.execute("SELECT * FROM tenants WHERE tenant_id = ?", (tenant_id,))
+        row = await cursor.fetchone()
+        return Tenant(**dict(row)) if row else None
+
+    async def create_workspace(self, workspace: Workspace) -> Workspace:
+        # Workspace DML must serialize against append_event's BEGIN IMMEDIATE
+        # on the same connection: otherwise a concurrent append may start its
+        # transaction in the window between this INSERT and commit, producing
+        # "cannot start a transaction within a transaction" (500). (P2 — found
+        # by blackbox concurrent workspace creation.)
+        async with self._db_write_lock:
+            return await self._create_workspace_unlocked(workspace)
+
+    async def _create_workspace_unlocked(self, workspace: Workspace) -> Workspace:
+        try:
+            await self.conn.execute(
+                "INSERT INTO workspaces (workspace_id, tenant_id, name, description, scope, status, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    workspace.workspace_id,
+                    workspace.tenant_id,
+                    workspace.name,
+                    workspace.description,
+                    workspace.scope.model_dump_json(),
+                    workspace.status,
+                    workspace.created_at,
+                    workspace.updated_at,
+                ),
+            )
+            await self.conn.commit()
+        except sqlite3.IntegrityError:
+            await self.conn.rollback()
+            existing = await self.get_workspace(workspace.workspace_id)
+            # P1-A: 只有同租户的既有工作区可复用。跨租户 id 冲突（如共享
+            # "default"）必须抛错，绝不能让调用方继承他人租户的工作区定义
+            # （filesystem_root / allowed_tools）造成跨租户磁盘读写。
+            if existing is None or existing.tenant_id != workspace.tenant_id:
+                raise
+            return existing
+        return workspace
+
+    async def get_workspace(self, workspace_id: str) -> Workspace | None:
+        cursor = await self.conn.execute("SELECT * FROM workspaces WHERE workspace_id = ?", (workspace_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        data["scope"] = json.loads(data["scope"])
+        return Workspace(**data)
+
+    async def list_workspaces(self, tenant_id: str | None = None, include_deleted: bool = False) -> list[Workspace]:
+        clauses, params = [], []
+        if tenant_id is not None:
+            clauses.append("tenant_id = ?")
+            params.append(tenant_id)
+        if not include_deleted:
+            clauses.append("status = 'active'")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        cursor = await self.conn.execute(f"SELECT * FROM workspaces{where} ORDER BY created_at ASC", params)
+        rows = await cursor.fetchall()
+        result = []
+        for row in rows:
+            data = dict(row)
+            data["scope"] = json.loads(data["scope"])
+            result.append(Workspace(**data))
+        return result
+
+    async def update_workspace(self, workspace_id: str, update: WorkspaceUpdate) -> Workspace | None:
+        # Serialize against append_event writes on the shared connection
+        # (same rationale as create_workspace).
+        async with self._db_write_lock:
+            return await self._update_workspace_unlocked(workspace_id, update)
+
+    async def _update_workspace_unlocked(self, workspace_id: str, update: WorkspaceUpdate) -> Workspace | None:
+        current = await self.get_workspace(workspace_id)
+        if current is None:
+            return None
+        changes = update.model_dump(exclude_unset=True)
+        values = current.model_dump()
+        values.update(changes)
+        values["updated_at"] = time.time()
+        updated = Workspace(**values)
+        await self.conn.execute(
+            "UPDATE workspaces SET name=?, description=?, scope=?, updated_at=? WHERE workspace_id=?",
+            (updated.name, updated.description, updated.scope.model_dump_json(), updated.updated_at, workspace_id),
+        )
+        await self.conn.commit()
+        return updated
+
+    async def delete_workspace(self, workspace_id: str) -> Workspace | None:
+        # Serialize against append_event writes on the shared connection
+        # (same rationale as create_workspace).
+        async with self._db_write_lock:
+            current = await self.get_workspace(workspace_id)
+            if current is None:
+                return None
+            updated = current.model_copy(update={"status": "deleted", "updated_at": time.time()})
+            await self.conn.execute(
+                "UPDATE workspaces SET status='deleted', updated_at=? WHERE workspace_id=?",
+                (updated.updated_at, workspace_id),
+            )
+            await self.conn.commit()
+            return updated
 
     # ── Read-only query helpers (for analysis/reporting) ─────────
 
@@ -465,14 +850,16 @@ class EventStore:
         conversation_id: str,
         title: str,
         user_id: str = "default",
+        tenant_id: str = "default",
     ) -> None:
         now = time.time()
         await self.conn.execute(
-            """INSERT INTO conversations (conversation_id, user_id, title, status, created_at, updated_at, message_count)
-               VALUES (?, ?, ?, 'active', ?, ?, 0)
+            """INSERT INTO conversations (conversation_id, tenant_id, user_id, title, status,
+               created_at, updated_at, message_count)
+               VALUES (?, ?, ?, ?, 'active', ?, ?, 0)
                ON CONFLICT(conversation_id) DO UPDATE SET
                title = excluded.title, updated_at = excluded.updated_at""",
-            (conversation_id, user_id, title, now, now),
+            (conversation_id, tenant_id, user_id, title, now, now),
         )
         await self.conn.commit()
 
@@ -481,31 +868,35 @@ class EventStore:
         limit: int = 50,
         offset: int = 0,
         user_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> list[dict]:
+        tenant_clause = " AND tenant_id = ?" if tenant_id is not None else ""
         if user_id:
             cursor = await self.conn.execute(
-                """SELECT * FROM conversations WHERE status = 'active' AND user_id = ?
+                f"""SELECT * FROM conversations WHERE status = 'active' AND user_id = ?{tenant_clause}
                    ORDER BY updated_at DESC LIMIT ? OFFSET ?""",
-                (user_id, limit, offset),
+                [user_id, *([tenant_id] if tenant_id is not None else []), limit, offset],
             )
         else:
             cursor = await self.conn.execute(
-                """SELECT * FROM conversations WHERE status = 'active'
+                f"""SELECT * FROM conversations WHERE status = 'active'{tenant_clause}
                    ORDER BY updated_at DESC LIMIT ? OFFSET ?""",
-                (limit, offset),
+                [*([tenant_id] if tenant_id is not None else []), limit, offset],
             )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
-    async def total_conversation_count(self, user_id: str | None = None) -> int:
+    async def total_conversation_count(self, user_id: str | None = None, tenant_id: str | None = None) -> int:
+        tenant_clause = " AND tenant_id = ?" if tenant_id is not None else ""
         if user_id:
             cursor = await self.conn.execute(
-                "SELECT COUNT(*) AS cnt FROM conversations WHERE status = 'active' AND user_id = ?",
-                (user_id,),
+                f"SELECT COUNT(*) AS cnt FROM conversations WHERE status = 'active' AND user_id = ?{tenant_clause}",
+                [user_id, *([tenant_id] if tenant_id is not None else [])],
             )
         else:
             cursor = await self.conn.execute(
-                "SELECT COUNT(*) AS cnt FROM conversations WHERE status = 'active'",
+                f"SELECT COUNT(*) AS cnt FROM conversations WHERE status = 'active'{tenant_clause}",
+                [tenant_id] if tenant_id is not None else [],
             )
         row = await cursor.fetchone()
         return row["cnt"] if row else 0
@@ -586,8 +977,7 @@ class EventStore:
         rows = await cursor.fetchall()
         _ms = (time.monotonic() - _t0) * 1000
         result = [e for e in (_row_to_event(dict(r)) for r in rows) if e is not None]
-        _log_query.debug("get_events_for_conversation(conv=%s): %d rows, %dms",
-                         conversation_id, len(result), _ms)
+        _log_query.debug("get_events_for_conversation(conv=%s): %d rows, %dms", conversation_id, len(result), _ms)
         return result
 
     def evict_run_to_conv(self, run_id: str) -> None:
@@ -626,7 +1016,9 @@ def _row_to_event(row: dict[str, Any]) -> Event | None:
         _log_query.warning(
             "Skipping row with unknown event_type=%r (run=%s seq=%s) — "
             "likely a legacy event from a removed enum member",
-            raw, row.get("run_id"), row.get("seq"),
+            raw,
+            row.get("run_id"),
+            row.get("seq"),
         )
         return None
     return Event(
@@ -636,4 +1028,7 @@ def _row_to_event(row: dict[str, Any]) -> Event | None:
         payload=json.loads(row["payload"]),
         idempotency_key=row["idempotency_key"],
         created_at=row["created_at"],
+        tenant_id=row.get("tenant_id", "default"),
+        workspace_id=row.get("workspace_id"),
+        is_audit=bool(row.get("is_audit", 0)),
     )

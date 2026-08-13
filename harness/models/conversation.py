@@ -3,7 +3,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
+from harness.models.intent import DeliveryOperationInput
 
 
 class ConversationStatus(str, Enum):
@@ -41,6 +43,9 @@ class CreateConversationRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     message: str
+    client_request_id: str | None = None
+    workspace_id: str | None = None
+    required_operations: list[DeliveryOperationInput] | None = None
 
 
 class UpdateConversationRequest(BaseModel):
@@ -63,6 +68,7 @@ class SendMessageResponse(BaseModel):
     run_id: str
     conversation_id: str
     seq: int
+    claimed: bool = True
 
 
 class DeleteConversationResponse(BaseModel):

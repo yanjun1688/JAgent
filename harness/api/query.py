@@ -20,14 +20,15 @@ import json
 from collections import defaultdict
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query as FastQuery
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi import Query as FastQuery
 from pydantic import BaseModel
 
 from harness.analysis.service import AnalysisService
 from harness.api.deps import HarnessAPI, get_hapi
 from harness.core.fold import RunStatus, fold_events
 from harness.core.logger import guard_logger
-from harness.models.events import EventType
+from harness.models.events import Event, EventType
 from harness.models.tools import ToolDefinition
 
 _log = guard_logger("query")
@@ -110,7 +111,8 @@ async def _query_runs(hapi, run_id, include, page, page_size, since, until):
 
     if not rows:
         return QueryResponse(
-            type="runs", data=[],
+            type="runs",
+            data=[],
             meta=QueryMeta(page=page, page_size=page_size, total=total, has_more=False),
         )
 
@@ -126,28 +128,44 @@ async def _query_runs(hapi, run_id, include, page, page_size, since, until):
         events = grouped.get(rid, [])
         state = fold_events(events) if events else None
         if state is None:
-            summaries.append({
-                "run_id": rid, "intent": "", "status": "running",
-                "event_count": 0, "tool_call_count": 0,
-                "tool_success_count": 0, "tool_failure_count": 0,
-                "created_at": r["created_at"], "updated_at": r["updated_at"],
-            })
+            summaries.append(
+                {
+                    "run_id": rid,
+                    "intent": "",
+                    "status": "running",
+                    "event_count": 0,
+                    "tool_call_count": 0,
+                    "tool_success_count": 0,
+                    "tool_failure_count": 0,
+                    "tool_unsuccessful_count": 0,
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                }
+            )
             continue
-        summaries.append({
-            "run_id": rid,
-            "intent": state.intent,
-            "status": state.status.value,
-            "event_count": len(events),
-            "tool_call_count": len(state.tool_results),
-            "tool_success_count": sum(1 for tr in state.tool_results if tr.status.value in ("completed", "soft_error")),
-            "tool_failure_count": sum(1 for tr in state.tool_results if tr.status.value in ("failed", "timeout", "guardrail_blocked")),
-            "created_at": r["created_at"],
-            "updated_at": r["updated_at"],
-        })
+        summaries.append(
+            {
+                "run_id": rid,
+                "intent": state.intent,
+                "status": state.status.value,
+                "event_count": len(events),
+                "tool_call_count": len(state.tool_results),
+                # v2.2 (D2/D3): tool_success_count 只计真正的成功（拿到东西）。
+                # UNSUCCESSFUL（跑了没拿到）独立统计，不再算进 success。
+                "tool_success_count": sum(1 for tr in state.tool_results if tr.status.value == "completed"),
+                "tool_failure_count": sum(
+                    1 for tr in state.tool_results if tr.status.value in ("failed", "timeout", "guardrail_blocked")
+                ),
+                "tool_unsuccessful_count": sum(1 for tr in state.tool_results if tr.status.value == "unsuccessful"),
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            }
+        )
 
     has_more = (offset + page_size) < total
     return QueryResponse(
-        type="runs", data=summaries,
+        type="runs",
+        data=summaries,
         meta=QueryMeta(page=page, page_size=page_size, total=total, has_more=has_more),
     )
 
@@ -164,11 +182,21 @@ async def _query_run(hapi, run_id, include, page, page_size, since, until):
     for tr in state.tool_results:
         tn = tr.tool_name
         if tn not in tool_stats:
-            tool_stats[tn] = {"call_count": 0, "completed": 0, "failed": 0, "timeout": 0, "guardrail_blocked": 0}
+            tool_stats[tn] = {
+                "call_count": 0,
+                "completed": 0,
+                "unsuccessful": 0,
+                "failed": 0,
+                "timeout": 0,
+                "guardrail_blocked": 0,
+            }
         tool_stats[tn]["call_count"] += 1
         sv = tr.status.value
         if sv == "completed":
             tool_stats[tn]["completed"] += 1
+        elif sv == "unsuccessful":
+            # v2.2 (D2/D3): UNSUCCESSFUL 独立成桶，不再混入 completed。
+            tool_stats[tn]["unsuccessful"] += 1
         elif sv == "failed":
             tool_stats[tn]["failed"] += 1
         elif sv == "timeout":
@@ -181,10 +209,7 @@ async def _query_run(hapi, run_id, include, page, page_size, since, until):
         et = e.event_type.value
         event_type_counts[et] = event_type_counts.get(et, 0) + 1
 
-    total_tokens = sum(
-        e.payload.get("token_count", 0)
-        for e in events if e.event_type == EventType.AGENT_THOUGHT
-    )
+    total_tokens = sum(e.payload.get("token_count", 0) for e in events if e.event_type == EventType.AGENT_THOUGHT)
 
     created_at = events[0].created_at
     completed_at = None
@@ -232,6 +257,7 @@ async def _query_run(hapi, run_id, include, page, page_size, since, until):
         ],
         "latest_plan": state.latest_plan,
         "plan_history": state.plan_history,
+        "completion_evidence": state.completion_evidence,
         "feedback_count": len(state.feedbacks),
         "checkpoint_seq": state.last_checkpoint_seq,
     }
@@ -262,11 +288,12 @@ async def _query_events(hapi, run_id, include, page, page_size, since, until):
         raise HTTPException(404, f"Run not found: {run_id}")
     total = len(events)
     offset = (page - 1) * page_size
-    page_events = events[offset:offset + page_size]
+    page_events = events[offset : offset + page_size]
 
     data = [e.model_dump(mode="json") for e in page_events]
     return QueryResponse(
-        type="events", data=data,
+        type="events",
+        data=data,
         meta=QueryMeta(page=page, page_size=page_size, total=total, has_more=(offset + page_size) < total),
     )
 
@@ -304,12 +331,15 @@ async def _query_timeline(hapi, run_id, include, page, page_size, since, until):
         raise HTTPException(400, "run_id required for type=timeline")
     cursor = (page - 1) * page_size
     service = AnalysisService(hapi.store)
-    result = await service.get_run_timeline(run_id, limit=page_size, cursor=cursor)
     events = await hapi.store.get_events(run_id)
+    if not events:
+        raise HTTPException(404, f"Run not found: {run_id}")
+    result = await service.get_run_timeline(run_id, limit=page_size, cursor=cursor)
     total = len(events)
     data = [item.model_dump(mode="json") for item in result.timeline]
     return QueryResponse(
-        type="timeline", data=data,
+        type="timeline",
+        data=data,
         meta=QueryMeta(page=page, page_size=page_size, total=total, has_more=result.has_more),
     )
 
@@ -317,6 +347,8 @@ async def _query_timeline(hapi, run_id, include, page, page_size, since, until):
 async def _query_tool_traces(hapi, run_id, include, page, page_size, since, until):
     if not run_id:
         raise HTTPException(400, "run_id required for type=tool-traces")
+    if not await hapi.store.get_events(run_id):
+        raise HTTPException(404, f"Run not found: {run_id}")
     service = AnalysisService(hapi.store)
     result = await service.get_run_tool_traces(run_id)
     return QueryResponse(type="tool-traces", data=result.model_dump(mode="json"), meta=None)
@@ -337,9 +369,10 @@ async def _query_tool_defs(hapi, run_id, include, page, page_size, since, until)
     all_tools = [{"tool_name": td.name, "definition": _serialize_tool(td)} for td in hapi.registry.list_tool_defs()]
     total = len(all_tools)
     offset = (page - 1) * page_size
-    page_tools = all_tools[offset:offset + page_size]
+    page_tools = all_tools[offset : offset + page_size]
     return QueryResponse(
-        type="tool-defs", data=page_tools,
+        type="tool-defs",
+        data=page_tools,
         meta=QueryMeta(page=page, page_size=page_size, total=total, has_more=(offset + page_size) < total),
     )
 
@@ -352,32 +385,35 @@ async def _query_schedulers(hapi, run_id, include, page, page_size, since, until
             state = fold_events(events)
         except Exception:
             continue
-        data.append({
-            "run_id": rid,
-            "status": state.status.value,
-            "intent": state.intent,
-            "seq": state.seq,
-            "event_count": len(events),
-            "last_error": state.last_error,
-            "pause_reason": state.pause_reason,
-            "is_active": sched.is_active(rid),
-            "is_paused": sched.is_paused(rid),
-            "config": {
-                "max_iterations": sched.config.max_iterations,
-                "max_consecutive_failures": sched.config.max_consecutive_failures,
-                "pause_timeout_ms": sched.config.pause_timeout_ms,
-                "confirm_timeout_ms": sched.config.confirm_timeout_ms,
-                "max_confirm_retries": sched.config.max_confirm_retries,
-            },
-            "tool_stats": _compute_scheduler_tool_stats(state),
-            "latest_plan": state.latest_plan,
-        })
+        data.append(
+            {
+                "run_id": rid,
+                "status": state.status.value,
+                "intent": state.intent,
+                "seq": state.seq,
+                "event_count": len(events),
+                "last_error": state.last_error,
+                "pause_reason": state.pause_reason,
+                "is_active": sched.is_active(rid),
+                "is_paused": sched.is_paused(rid),
+                "config": {
+                    "max_iterations": sched.config.max_iterations,
+                    "max_consecutive_failures": sched.config.max_consecutive_failures,
+                    "pause_timeout_ms": sched.config.pause_timeout_ms,
+                    "confirm_timeout_ms": sched.config.confirm_timeout_ms,
+                    "max_confirm_retries": sched.config.max_confirm_retries,
+                },
+                "tool_stats": _compute_scheduler_tool_stats(state),
+                "latest_plan": state.latest_plan,
+            }
+        )
 
     total = len(data)
     offset = (page - 1) * page_size
-    page_data = data[offset:offset + page_size]
+    page_data = data[offset : offset + page_size]
     return QueryResponse(
-        type="schedulers", data=page_data,
+        type="schedulers",
+        data=page_data,
         meta=QueryMeta(page=page, page_size=page_size, total=total, has_more=(offset + page_size) < total),
     )
 
@@ -387,11 +423,21 @@ def _compute_scheduler_tool_stats(state) -> dict[str, dict]:
     for tr in state.tool_results:
         tn = tr.tool_name
         if tn not in stats:
-            stats[tn] = {"call_count": 0, "completed": 0, "failed": 0, "timeout": 0, "guardrail_blocked": 0}
+            stats[tn] = {
+                "call_count": 0,
+                "completed": 0,
+                "unsuccessful": 0,
+                "failed": 0,
+                "timeout": 0,
+                "guardrail_blocked": 0,
+            }
         stats[tn]["call_count"] += 1
         sv = tr.status.value
-        if sv in ("completed", "soft_error"):
+        if sv == "completed":
             stats[tn]["completed"] += 1
+        elif sv == "unsuccessful":
+            # v2.2 (D2/D3): UNSUCCESSFUL 独立成桶，不再混入 completed。
+            stats[tn]["unsuccessful"] += 1
         elif sv == "failed":
             stats[tn]["failed"] += 1
         elif sv == "timeout":
@@ -409,15 +455,17 @@ async def _query_mcp(hapi, run_id, include, page, page_size, since, until):
     connected_names = set(mcp.server_names)
     servers: list[dict] = []
     for cfg in mcp.config.servers:
-        servers.append({
-            "name": cfg.name,
-            "command": cfg.command,
-            "url": cfg.url,
-            "enabled": cfg.enabled,
-            "auto_register_tools": cfg.auto_register_tools,
-            "timeout_ms": cfg.timeout_ms,
-            "connected": cfg.name in connected_names,
-        })
+        servers.append(
+            {
+                "name": cfg.name,
+                "command": cfg.command,
+                "url": cfg.url,
+                "enabled": cfg.enabled,
+                "auto_register_tools": cfg.auto_register_tools,
+                "timeout_ms": cfg.timeout_ms,
+                "connected": cfg.name in connected_names,
+            }
+        )
     return QueryResponse(type="mcp", data={"servers": servers, "connected_count": len(connected_names)}, meta=None)
 
 
@@ -428,12 +476,16 @@ async def _query_plans(hapi, run_id, include, page, page_size, since, until):
     if not events:
         raise HTTPException(404, f"Run not found: {run_id}")
     state = fold_events(events)
-    return QueryResponse(type="plans", data={
-        "run_id": run_id,
-        "plan_history": state.plan_history,
-        "latest_plan": state.latest_plan,
-        "plan_boundary_seqs": state.plan_boundary_seqs,
-    }, meta=None)
+    return QueryResponse(
+        type="plans",
+        data={
+            "run_id": run_id,
+            "plan_history": state.plan_history,
+            "latest_plan": state.latest_plan,
+            "plan_boundary_seqs": state.plan_boundary_seqs,
+        },
+        meta=None,
+    )
 
 
 async def _query_system(hapi, run_id, include, page, page_size, since, until):
@@ -456,12 +508,16 @@ async def _query_system(hapi, run_id, include, page, page_size, since, until):
 
     scheduler_config_info = hapi.scheduler_config.__dict__ if hapi.scheduler_config else None
 
-    return QueryResponse(type="system", data={
-        "llm_client": llm_info,
-        "tool_registry": registry_info,
-        "scheduler_config": scheduler_config_info,
-        "tool_defs_count": len(hapi.tool_defs),
-    }, meta=None)
+    return QueryResponse(
+        type="system",
+        data={
+            "llm_client": llm_info,
+            "tool_registry": registry_info,
+            "scheduler_config": scheduler_config_info,
+            "tool_defs_count": len(hapi.tool_defs),
+        },
+        meta=None,
+    )
 
 
 async def _query_ws_clients(hapi, run_id, include, page, page_size, since, until):
@@ -507,7 +563,7 @@ async def _query_feedback(hapi, run_id, include, page, page_size, since, until):
     if run_id:
         total = len(feedback_events)
         offset = (page - 1) * page_size
-        page_feedback = feedback_events[offset:offset + page_size]
+        page_feedback = feedback_events[offset : offset + page_size]
     else:
         page_feedback = feedback_events
 
@@ -532,7 +588,8 @@ async def _query_feedback(hapi, run_id, include, page, page_size, since, until):
         for e in page_feedback
     ]
     return QueryResponse(
-        type="feedback", data=data,
+        type="feedback",
+        data=data,
         meta=QueryMeta(page=page, page_size=page_size, total=total, has_more=(offset + page_size) < total),
     )
 
@@ -596,10 +653,14 @@ async def _query_health(hapi, run_id, include, page, page_size, since, until):
 
     overall = "ok" if all(c["status"] == "ok" for c in components.values()) else "degraded"
 
-    return QueryResponse(type="health", data={
-        "status": overall,
-        "components": components,
-    }, meta=None)
+    return QueryResponse(
+        type="health",
+        data={
+            "status": overall,
+            "components": components,
+        },
+        meta=None,
+    )
 
 
 # ── Helpers ────────────────────────────────────────────────────
@@ -612,16 +673,17 @@ def _row_to_event(row: dict) -> Event | None:
     Append-Only invariant forbids DELETE so historical rows with removed
     enum members persist and would otherwise crash the query read path.
     """
-    from harness.models.events import Event as EventModel
     try:
         et = EventType(row["event_type"])
     except ValueError:
         _log.warning(
             "Skipping query row with unknown event_type=%r (run=%s seq=%s) — likely legacy event",
-            row["event_type"], row.get("run_id"), row.get("seq"),
+            row["event_type"],
+            row.get("run_id"),
+            row.get("seq"),
         )
         return None
-    return EventModel(
+    return Event(
         run_id=row["run_id"],
         seq=row["seq"],
         event_type=et,

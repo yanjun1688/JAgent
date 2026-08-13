@@ -3,6 +3,7 @@ import { colors } from '../api/analysis-styles'
 import { getRunTimeline } from '../api/analysis-client'
 import { confirmAction, pauseRun, resumeRun } from '../api/client'
 import {
+  createClientRequestId,
   getConversation,
   sendMessage,
   createConversation,
@@ -20,8 +21,12 @@ import PendingIndicator, { pendingPulseKeyframes } from './PendingIndicator'
 interface QueuedMessage {
   id: number
   text: string
+  requestId: string
   status: 'queued' | 'sending'
 }
+
+// P0-07: 网络失败时用同一 client_request_id 重试的次数（后端按 id 幂等去重）。
+const MAX_SEND_RETRIES = 3
 
 interface DisplayMessage {
   id: string
@@ -65,6 +70,8 @@ export default function ConversationDrawer({
   const [isExecuting, setIsExecuting] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const initializedRef = useRef(false)
+  // 追踪最近一次请求加载的会话，防止异步 re-attach 串到已切换的会话
+  const conversationIdRef = useRef<string | null>(null)
 
   const { events: wsEvents, runStatus: wsRunStatus, isConnected } = useRunWebSocket(activeRunId)
 
@@ -173,24 +180,54 @@ export default function ConversationDrawer({
     }
   }
 
+  // P0-07: 切回会话时，若该会话最后一条用户消息的 run 仍非终态（running/paused），
+  // 重新挂载其实时订阅（WS 重新连接 + 回填已有 timeline），恢复执行中状态展示。
+  async function resumeActiveRun(lastRunId: string, convId: string) {
+    try {
+      const timeline = await getRunTimeline(lastRunId, 200, 0)
+      if (conversationIdRef.current !== convId) return
+      const events = timeline.timeline as WsEvent[]
+      const last = events[events.length - 1]
+      if (last && (last.event_type === 'RunCompleted' || last.event_type === 'RunFailed')) return
+      setActiveRunId(lastRunId)
+      setActiveRunStatus(last?.event_type === 'RunPaused' ? 'paused' : 'running')
+      setTimelineEvents(events)
+      setThoughtOpen(true)
+      setIsExecuting(true)
+    } catch {
+      // timeline 查询失败不阻断会话加载
+    }
+  }
+
   async function loadConversation(convId: string) {
+    conversationIdRef.current = convId
     setConversationId(convId)
     onConversationChange?.(convId)
     persistCurrentConversationId(convId)
     setLoading(true)
     setError(null)
+    // P0-07: 切换会话必须原子重置上一会话的 run 状态，防止跨会话串线
+    setActiveRunId(null)
+    setActiveRunStatus('')
+    setTimelineEvents([])
+    setIsExecuting(false)
+    setQueue([])
+    setThoughtOpen(false)
     try {
       const detail = await getConversation(convId)
       setConversationTitle(detail.conversation.title)
       const msgs: DisplayMessage[] = detail.messages.map((m: ConversationMessageItem) => ({
         id: `${m.run_id}-${m.seq}`,
-        role: m.role,
+        role: m.role as DisplayMessage['role'],
         content: m.content,
         created_at: m.created_at,
         run_id: m.run_id,
         status: m.status,
       }))
       setMessages(msgs)
+      // P0-07: 切回会话时自动恢复仍执行中的 run（若最后一条是用户消息且 run 未终态）
+      const lastUser = [...msgs].reverse().find((m) => m.role === 'user')
+      if (lastUser) void resumeActiveRun(lastUser.run_id, convId)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setError(msg)
@@ -227,7 +264,11 @@ export default function ConversationDrawer({
       const summary =
         activeRunStatus === 'completed'
           ? String(allEvents.find((e) => e.event_type === 'RunCompleted')?.payload.result_summary || '')
-          : String(allEvents.find((e) => e.event_type === 'RunFailed')?.payload.final_error || '')
+          : String(
+              // P0-07: 失败消息只使用 user_facing_message，不得把内部 final_error 暴露给用户
+              allEvents.find((e) => e.event_type === 'RunFailed')?.payload.user_facing_message ||
+                '任务未能完成，请检查任务要求或稍后重试。',
+            )
 
       setMessages((prev) => {
         const existing = prev.find((m) => m.run_id === activeRunId && m.role === 'assistant')
@@ -262,7 +303,8 @@ export default function ConversationDrawer({
     if (!conversationId) return
     setQueue((prev) => prev.map((q) => (q.id === qm.id ? { ...q, status: 'sending' } : q)))
     try {
-      await submitMessage(conversationId, qm.text)
+      // P0-07: 复用入队时生成的 client_request_id，重试不会产生重复 Run
+      await submitMessage(conversationId, qm.text, qm.requestId)
       setQueue((prev) => prev.filter((q) => q.id !== qm.id))
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -272,28 +314,49 @@ export default function ConversationDrawer({
     }
   }
 
-  async function submitMessage(convId: string, text: string) {
+  async function submitMessage(convId: string, text: string, requestId?: string) {
     setTimelineEvents([])
     setLoading(true)
     setIsExecuting(true)
     setThoughtOpen(true)
 
+    // P0-07: client_request_id 在消息编组时一次性生成；网络失败重试必须复用
+    // 同一个 id，后端按 (conversation, id) 幂等去重，避免重复 Run。
+    const clientRequestId = requestId ?? createClientRequestId()
+
     try {
-      const { run_id } = await sendMessage(convId, text)
+      let runId: string | null = null
+      let lastErr: unknown = null
+      for (let attempt = 0; attempt < MAX_SEND_RETRIES; attempt++) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 300 * attempt))
+        try {
+          const resp = await sendMessage(convId, text, clientRequestId)
+          runId = resp.run_id
+          break
+        } catch (err) {
+          lastErr = err
+        }
+      }
+      if (runId === null) throw lastErr ?? new Error('Failed to send message')
+      const run_id = runId
       setActiveRunId(run_id)
       setActiveRunStatus('running')
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `${run_id}-user`,
-          role: 'user',
-          content: text,
-          created_at: Date.now() / 1000,
-          run_id,
-          status: 'running',
-        },
-      ])
+      // 幂等重试（claimed=false 复用已有 run）时避免追加重复的用户气泡
+      setMessages((prev) => {
+        if (prev.some((m) => m.run_id === run_id && m.role === 'user')) return prev
+        return [
+          ...prev,
+          {
+            id: `${run_id}-user`,
+            role: 'user',
+            content: text,
+            created_at: Date.now() / 1000,
+            run_id,
+            status: 'running',
+          },
+        ]
+      })
 
       const timeline = await getRunTimeline(run_id, 200, 0)
       setTimelineEvents(timeline.timeline as WsEvent[])
@@ -325,7 +388,7 @@ export default function ConversationDrawer({
         persistCurrentConversationId(conv.conversation_id)
         setConversationTitle('Agent Chat')
         setMessages([])
-        await submitMessage(conv.conversation_id, text)
+        await submitMessage(conv.conversation_id, text, createClientRequestId())
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         setError(msg)
@@ -335,11 +398,12 @@ export default function ConversationDrawer({
 
     if (isExecuting) {
       const id = ++queueIdCounter
-      setQueue((prev) => [...prev, { id, text, status: 'queued' }])
+      // 入队时即生成幂等 id，执行队列时复用（P0-07）
+      setQueue((prev) => [...prev, { id, text, requestId: createClientRequestId(), status: 'queued' }])
       return
     }
 
-    await submitMessage(conversationId, text)
+    await submitMessage(conversationId, text, createClientRequestId())
   }
 
   function cancelQueue() {

@@ -16,9 +16,9 @@
 
 | 测试层级 | 目标 | 覆盖范围 |
 |----------|------|----------|
-| **单元测试 (UT)** | `should_not_rerun` 判定纯函数; 枚举映射表; `planner.py:274` 的 `completed_step_ids` 计算 | 100% 分支覆盖 |
-| **集成测试 (IT)** | revise 路径: `DagExecutor → results → Planner.revise → PlanGuardrail`; SOFT_ERROR 后不重排 | 关键路径 |
-| **端到端测试 (E2E)** | 完整 DAG plan-execute-revise 循环: 4 步含 COMPLETED/SOFT_ERROR/FAILED 混合场景 | 1 条端到端 |
+| **单元测试 (UT)** | `should_not_rerun` 判定纯函数; 枚举映射表; `planner.py` 的 `executed_step_ids` 计算 | 100% 分支覆盖 |
+| **集成测试 (IT)** | revise 路径: `DagExecutor → results → Planner.revise → PlanGuardrail`; UNSUCCESSFUL 可被重排 | 关键路径 |
+| **端到端测试 (E2E)** | 完整 DAG plan-execute-revise 循环: 4 步含 COMPLETED/UNSUCCESSFUL/FAILED 混合场景 | 1 条端到端 |
 | **回归测试 (RT)** | 现有 test_planner.py / test_dag_executor.py 全量通过 | 零退化 |
 | **契约测试 (CT)** | `StepResult.should_not_rerun` 属性签名; `ExecState`/`TaskState` 枚举值列表 | 类型兼容 |
 
@@ -33,9 +33,9 @@
 | 用例 ID | ExecState 输入 | 期望 `should_not_rerun` | 期望 `should_not_rerun` 为 False |
 |----------|---------------|------------------------|-------------------------------|
 | tc-srr-01 | `COMPLETED` | True | — |
-| tc-srr-02 | `SOFT_ERROR` | True | — |
+| tc-srr-02 | `UNSUCCESSFUL` | — | False |
 | tc-srr-03 | `IDEMPOTENT` | True | — |
-| tc-srr-04 | `SKIPPED` | True | — |
+| tc-srr-04 | `SKIPPED` | — | False |
 | tc-srr-05 | `CANCELLED` | True | — |
 | tc-srr-06 | `PENDING` | — | False |
 | tc-srr-07 | `RUNNING` | — | False |
@@ -47,9 +47,9 @@ from harness.core.dag_types import StepResult, ExecState, TaskState
 
 @pytest.mark.parametrize("exec_state,expected", [
     (ExecState.COMPLETED, True),
-    (ExecState.SOFT_ERROR, True),
+    (ExecState.UNSUCCESSFUL, False),
     (ExecState.IDEMPOTENT, True),
-    (ExecState.SKIPPED, True),
+    (ExecState.SKIPPED, False),
     (ExecState.CANCELLED, True),
     (ExecState.PENDING, False),
     (ExecState.RUNNING, False),
@@ -88,9 +88,9 @@ def test_step_result_default_task_state_is_unknown():
 | 用例 ID | results 中 step 状态 | 期望 `completed_step_ids` 包含 |
 |----------|---------------------|------------------------------|
 | tc-csi-01 | s1=COMPLETED, s2=COMPLETED | {s1, s2} |
-| tc-csi-02 | s1=COMPLETED, s2=SOFT_ERROR | {s1, s2} (关键—旧代码不含 s2) |
+| tc-csi-02 | s1=COMPLETED, s2=UNSUCCESSFUL | {s1} (UNSUCCESSFUL 可重排，不算已执行) |
 | tc-csi-03 | s1=COMPLETED, s2=FAILED | {s1} (FAILED 不视为已完成) |
-| tc-csi-04 | s1=SOFT_ERROR, s2=FAILED | {s1} |
+| tc-csi-04 | s1=UNSUCCESSFUL, s2=FAILED | {} |
 
 ```python
 from harness.core.dag_types import StepResult, ExecState
@@ -103,8 +103,8 @@ from harness.core.dag_types import StepResult, ExecState
     ),
     (
         {"s1": StepResult("s1", exec_state=ExecState.COMPLETED),
-         "s2": StepResult("s2", exec_state=ExecState.SOFT_ERROR)},
-        {"s1", "s2"},  # was {} in old code
+         "s2": StepResult("s2", exec_state=ExecState.UNSUCCESSFUL)},
+         {"s1"},  # UNSUCCESSFUL is allowed to rerun
     ),
     (
         {"s1": StepResult("s1", exec_state=ExecState.COMPLETED),
@@ -112,12 +112,12 @@ from harness.core.dag_types import StepResult, ExecState
         {"s1"},
     ),
     (
-        {"s1": StepResult("s1", exec_state=ExecState.SOFT_ERROR),
-         "s2": StepResult("s2", exec_state=ExecState.FAILED)},
-        {"s1"},
+         {"s1": StepResult("s1", exec_state=ExecState.UNSUCCESSFUL),
+          "s2": StepResult("s2", exec_state=ExecState.FAILED)},
+         set(),
     ),
 ])
-def test_completed_step_ids_includes_soft_error(results, expected_ids):
+def test_executed_step_ids_excludes_unsuccessful(results, expected_ids):
     computed = {
         sid for sid, r in results.items()
         if isinstance(r, StepResult) and r.should_not_rerun
@@ -142,18 +142,18 @@ def test_build_dag_status_text_includes_should_not_rerun():
 
 ### 3.1 Planner.revise() 使用 `executed_step_ids` (tc-rev-01)
 
-**场景**: 4 步 DAG plan，2 步 COMPLETED，1 步 SOFT_ERROR，1 步 FAILED。
+**场景**: 4 步 DAG plan，2 步 COMPLETED，1 步 UNSUCCESSFUL，1 步 FAILED。
 
 | Step | ExecState | 期望 revise 后的 revised.steps |
 |------|-----------|-------------------------------|
 | s1 | COMPLETED | 不出现（已被过滤） |
-| s2 | SOFT_ERROR | 不出现（已被过滤）— 关键断言 |
+| s2 | UNSUCCESSFUL | 允许出现（可被 LLM 选择重跑） |
 | s3 | FAILED | 可能出现（LLM 决定重试） |
 | s4 | PENDING | 可能出现（尚未执行） |
 
 ```python
 @pytest.mark.asyncio
-async def test_revise_excludes_soft_error_from_rerun():
+async def test_revise_allows_unsuccessful_to_rerun():
     planner = Planner(llm_client=MockLLMClient(), ...)
     plan = DagPlan(
         intent="test intent",
@@ -165,14 +165,14 @@ async def test_revise_excludes_soft_error_from_rerun():
     )
     results = {
         "s1": StepResult("s1", exec_state=ExecState.COMPLETED),
-        "s2": StepResult("s2", exec_state=ExecState.SOFT_ERROR, output={"data": 42}),
+        "s2": StepResult("s2", exec_state=ExecState.UNSUCCESSFUL, output={"data": 42}),
         "s3": StepResult("s3", exec_state=ExecState.FAILED, error="timeout"),
     }
     revised = await planner.revise(plan, results, system_state="state summary")
     assert revised is not None
-    # SOFT_ERROR 的 s2 不应在 revised plan 中
+    # UNSUCCESSFUL 的 s2 可以由 revise 选择重跑
     revised_ids = {s.id for s in revised.steps}
-    assert "s2" not in revised_ids, "SOFT_ERROR step should not be re-planned"
+    assert "s2" in revised_ids or "s3" in revised_ids
     assert "s1" not in revised_ids, "COMPLETED step should not be re-planned"
 ```
 
@@ -220,15 +220,15 @@ def test_topological_sort_with_executed_deps():
   - s4 依赖 s3 但 s3 FAILED → guardrail 允许 s4 出现在新 plan 中
   - LLM 决定: 重试 s3 + 执行 s4
 
-**Cycle 2**: execute s3(COMPLETED) → execute s4(SOFT_ERROR)
+**Cycle 2**: execute s3(COMPLETED) → execute s4(UNSUCCESSFUL)
   - `executed_step_ids` = {s1, s2, s3, s4}
-  - LLM 收到 s4 的 SOFT_ERROR output → 判定 `task_state=achieved` → steps=[]
+  - LLM 收到 s4 的 UNSUCCESSFUL output → 判定 `task_state=achieved` → steps=[]
   - RunCompleted
 
 **断言**:
 - [ ] Cycle 1 revise 后 plan 不含 s1、s2
 - [ ] Cycle 2 revise 后 LLM 返回 steps=[] → RunCompleted
-- [ ] s4 的 SOFT_ERROR 输出内容出现在 revise prompt 中
+- [ ] s4 的 UNSUCCESSFUL 输出内容出现在 revise prompt 中
 - [ ] 不存在重复执行（s1、s2 只执行一次）
 
 ```python
@@ -275,7 +275,7 @@ ruff check harness/core/
 ```python
 def test_exec_state_values_are_stable():
     """ExecState 枚举值不随代码重构而改变"""
-    expected = {"pending", "running", "completed", "soft_error", "failed", "skipped", "idempotent", "cancelled"}
+    expected = {"pending", "running", "completed", "unsuccessful", "failed", "skipped", "idempotent", "cancelled"}
     actual = {e.value for e in ExecState}
     assert actual == expected
 

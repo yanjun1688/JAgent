@@ -27,6 +27,7 @@ export interface RunsItem {
   tool_call_count: number
   tool_success_count: number
   tool_failure_count: number
+  tool_unsuccessful_count: number
   created_at: number
   updated_at: number
 }
@@ -42,6 +43,7 @@ export interface RunsResponse {
 export interface ToolStatsEntry {
   call_count: number
   completed: number
+  unsuccessful: number
   failed: number
   timeout: number
   guardrail_blocked: number

@@ -7,20 +7,22 @@ and Monitor auto-circuit-breaker behavior.
 from __future__ import annotations
 
 import pytest
+from typing import TYPE_CHECKING
 
-from harness.core.fold import Event, EventType, RunState, fold_events
-from harness.core.scheduler.base import BaseScheduler, SchedulerConfig, ThinkResult
+if TYPE_CHECKING:
+    from harness.monitoring.run_monitor import RunMonitor
+
+from harness.core.fold import EventType, RunState, fold_events
+from harness.core.scheduler.base import BaseScheduler, SchedulerConfig
 from harness.models.events import (
     AgentThoughtPayload,
     RunCommandPayload,
-    RunCompletedPayload,
-    RunFailedPayload,
     RunStartedPayload,
     ToolCompletedPayload,
     ToolFailedPayload,
 )
-from harness.storage.event_store import EventStore, SequenceConflictError
-from harness.tools.executor import ExecutionStatus, ToolExecutor
+from harness.storage.event_store import EventStore
+from harness.tools.executor import ToolExecutor
 
 
 class TestRunCommandModel:
@@ -29,6 +31,7 @@ class TestRunCommandModel:
     def test_run_command_payload_valid_hard_abort(self):
         """CM-U1: RunCommandPayload with hard_abort command."""
         from harness.models.events import RunCommandPayload
+
         p = RunCommandPayload(command="hard_abort", reason="test")
         assert p.command == "hard_abort"
         assert p.reason == "test"
@@ -56,12 +59,14 @@ class TestRunCommandModel:
         """CM-U2: Invalid command should fail Pydantic validation."""
         from harness.models.events import RunCommandPayload
         from pydantic import ValidationError
+
         with pytest.raises((ValidationError, ValueError)):
             RunCommandPayload(command="invalid_command")
 
     def test_run_command_payload_defaults(self):
         """CM-U3: Default values for optional fields."""
         from harness.models.events import RunCommandPayload
+
         p = RunCommandPayload(command="hard_abort")
         assert p.affected_tool is None
         assert p.issued_by == "monitor"
@@ -69,6 +74,7 @@ class TestRunCommandModel:
     def test_run_command_payload_all_literals(self):
         """CM-U4: All 5 command literals are valid."""
         from harness.models.events import RunCommandPayload
+
         for cmd in ("hard_abort", "soft_abort", "pause", "resume", "skip_tool"):
             p = RunCommandPayload(command=cmd)
             assert p.command == cmd
@@ -76,6 +82,7 @@ class TestRunCommandModel:
     def test_run_command_in_payload_model_map(self):
         """CM-U5: EventType.RUN_COMMAND maps to RunCommandPayload."""
         from harness.models.events import PAYLOAD_MODEL_MAP, RunCommandPayload
+
         assert EventType.RUN_COMMAND in PAYLOAD_MODEL_MAP
         assert PAYLOAD_MODEL_MAP[EventType.RUN_COMMAND] == RunCommandPayload
 
@@ -93,8 +100,11 @@ class TestSchedulerCommandCheck:
     async def test_check_hard_abort(self, store: EventStore):
         """CM-U7: One hard_abort → returns 'hard_abort'."""
         from harness.models.events import RunCommandPayload
+
         await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
-        await store.append_event("r1", EventType.RUN_COMMAND, RunCommandPayload(command="hard_abort", reason="test").model_dump())
+        await store.append_event(
+            "r1", EventType.RUN_COMMAND, RunCommandPayload(command="hard_abort", reason="test").model_dump()
+        )
         scheduler = _make_scheduler(store)
         cmd = await scheduler._check_pending_commands("r1")
         assert cmd == "hard_abort"
@@ -102,9 +112,14 @@ class TestSchedulerCommandCheck:
     async def test_check_multiple_commands_latest(self, store: EventStore):
         """CM-U8: Multiple commands → only latest is returned."""
         from harness.models.events import RunCommandPayload
+
         await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
-        await store.append_event("r1", EventType.RUN_COMMAND, RunCommandPayload(command="pause", reason="1").model_dump())
-        await store.append_event("r1", EventType.RUN_COMMAND, RunCommandPayload(command="hard_abort", reason="2").model_dump())
+        await store.append_event(
+            "r1", EventType.RUN_COMMAND, RunCommandPayload(command="pause", reason="1").model_dump()
+        )
+        await store.append_event(
+            "r1", EventType.RUN_COMMAND, RunCommandPayload(command="hard_abort", reason="2").model_dump()
+        )
         scheduler = _make_scheduler(store)
         cmd = await scheduler._check_pending_commands("r1")
         assert cmd == "hard_abort"
@@ -112,6 +127,7 @@ class TestSchedulerCommandCheck:
     async def test_check_processed_command_skipped(self, store: EventStore):
         """CM-U9: Already processed command → returns None."""
         from harness.models.events import RunCommandPayload
+
         await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
         await store.append_event("r1", EventType.RUN_COMMAND, RunCommandPayload(command="hard_abort").model_dump())
         scheduler = _make_scheduler(store)
@@ -122,9 +138,12 @@ class TestSchedulerCommandCheck:
     async def test_check_skip_already_processed(self, store: EventStore):
         """CM-U10: Skip processed, return newer."""
         from harness.models.events import RunCommandPayload
+
         await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
         await store.append_event("r1", EventType.RUN_COMMAND, RunCommandPayload(command="pause").model_dump())  # seq=1
-        await store.append_event("r1", EventType.RUN_COMMAND, RunCommandPayload(command="hard_abort").model_dump())  # seq=2
+        await store.append_event(
+            "r1", EventType.RUN_COMMAND, RunCommandPayload(command="hard_abort").model_dump()
+        )  # seq=2
         scheduler = _make_scheduler(store)
         scheduler._last_processed_command_seq["r1"] = 1
         cmd = await scheduler._check_pending_commands("r1")
@@ -145,8 +164,11 @@ class TestSchedulerCommandHandling:
     async def test_hard_abort_terminates_run(self, store: EventStore):
         """CM-I1: hard_abort → Run immediately terminates with FAILED."""
         from harness.models.events import RunCommandPayload
+
         await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
-        await store.append_event("r1", EventType.RUN_COMMAND, RunCommandPayload(command="hard_abort", reason="test").model_dump())
+        await store.append_event(
+            "r1", EventType.RUN_COMMAND, RunCommandPayload(command="hard_abort", reason="test").model_dump()
+        )
         scheduler = _make_scheduler(store)
         await scheduler._process_command("r1", "hard_abort")
         events = await store.get_events("r1")
@@ -157,8 +179,11 @@ class TestSchedulerCommandHandling:
     async def test_soft_abort_waits_for_tool(self, store: EventStore):
         """CM-I2: soft_abort → schedules termination after current tool."""
         from harness.models.events import RunCommandPayload
+
         await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
-        await store.append_event("r1", EventType.RUN_COMMAND, RunCommandPayload(command="soft_abort", reason="graceful").model_dump())
+        await store.append_event(
+            "r1", EventType.RUN_COMMAND, RunCommandPayload(command="soft_abort", reason="graceful").model_dump()
+        )
         scheduler = _make_scheduler(store)
         await scheduler._process_command("r1", "soft_abort")
         events = await store.get_events("r1")
@@ -167,7 +192,6 @@ class TestSchedulerCommandHandling:
 
     async def test_pause_switches_to_paused(self, store: EventStore):
         """CM-I3: pause → Run switches to PAUSED."""
-        from harness.models.events import RunCommandPayload
         await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
         scheduler = _make_scheduler(store)
         result = await scheduler._process_command("r1", "pause")
@@ -210,7 +234,8 @@ class TestMonitorAutoCircuitBreaker:
         monitor.attach()
         for i in range(5):
             await store.append_event(
-                "r1", EventType.TOOL_FAILED,
+                "r1",
+                EventType.TOOL_FAILED,
                 ToolFailedPayload(tool_call_id=f"tc-{i}", tool_name="echo", error="fail", retryable=False).model_dump(),
             )
         events = await store.get_events("r1")
@@ -224,7 +249,8 @@ class TestMonitorAutoCircuitBreaker:
         monitor.attach()
         for i in range(5):
             await store.append_event(
-                "r1", EventType.AGENT_THOUGHT,
+                "r1",
+                EventType.AGENT_THOUGHT,
                 AgentThoughtPayload(thought="x" * 200, token_count=50).model_dump(),
             )
         events = await store.get_events("r1")
@@ -238,12 +264,16 @@ class TestMonitorAutoCircuitBreaker:
         monitor.attach()
         for i in range(8):
             await store.append_event(
-                "r1", EventType.TOOL_CALLED,
+                "r1",
+                EventType.TOOL_CALLED,
                 {"tool_call_id": f"tc-{i}", "tool_name": "echo", "input": {"msg": "same"}},
             )
             await store.append_event(
-                "r1", EventType.TOOL_COMPLETED,
-                ToolCompletedPayload(tool_call_id=f"tc-{i}", tool_name="echo", output="same", duration_ms=10).model_dump(),
+                "r1",
+                EventType.TOOL_COMPLETED,
+                ToolCompletedPayload(
+                    tool_call_id=f"tc-{i}", tool_name="echo", output="same", duration_ms=10
+                ).model_dump(),
             )
         events = await store.get_events("r1")
         state = fold_events(events)
@@ -273,6 +303,7 @@ class TestFaultInjection:
     async def test_concurrent_pause_and_abort(self, store: EventStore):
         """CM-F2: Simultaneous hard_abort and pause → hard_abort wins."""
         from harness.models.events import RunCommandPayload
+
         await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
         await store.append_event("r1", EventType.RUN_COMMAND, RunCommandPayload(command="pause").model_dump())
         await store.append_event("r1", EventType.RUN_COMMAND, RunCommandPayload(command="hard_abort").model_dump())
@@ -283,9 +314,7 @@ class TestFaultInjection:
 
 def _make_scheduler(store: EventStore) -> BaseScheduler:
     """Create a minimal scheduler for testing command handling."""
-    from harness.core.scheduler.base import BaseScheduler, SchedulerConfig
-    from harness.models.tools import ToolDefinition
-    from harness.tools.executor import ToolExecutor
+    from harness.core.scheduler.base import BaseScheduler
 
     class TestScheduler(BaseScheduler):
         async def _run_loop(self, run_id: str, intent: str) -> RunState:
@@ -303,4 +332,5 @@ def _make_scheduler(store: EventStore) -> BaseScheduler:
 
 def _make_monitor(store: EventStore, max_tokens: int = 5000) -> "RunMonitor":
     from harness.monitoring.run_monitor import RunMonitor
+
     return RunMonitor(store, max_tokens=max_tokens)

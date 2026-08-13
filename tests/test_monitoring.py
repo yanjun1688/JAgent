@@ -11,9 +11,7 @@ from harness import (
     FeedbackInjectedPayload,
     MockAgentKernel,
     RetryPolicy,
-    RunStatus,
     SchedulerConfig,
-    SideEffect,
     ThinkResult,
     ToolDefinition,
     ToolExecutor,
@@ -23,6 +21,7 @@ from harness.monitoring.run_monitor import RunMonitor
 
 
 # ── Helpers ─────────────────────────────────────────────────────
+
 
 async def _write_event(store: EventStore, run_id: str, event_type: EventType, payload: dict) -> None:
     await store.append_event(run_id, event_type, payload)
@@ -82,9 +81,17 @@ class TestConsecutiveFailures:
     async def test_no_feedback_on_single_failure(self, store: EventStore):
         monitor = RunMonitor(store)
         monitor.attach()
-        await _write_event(store, "run1", EventType.TOOL_FAILED, {
-            "tool_call_id": "t1", "tool_name": "test", "error": "fail", "retryable": False,
-        })
+        await _write_event(
+            store,
+            "run1",
+            EventType.TOOL_FAILED,
+            {
+                "tool_call_id": "t1",
+                "tool_name": "test",
+                "error": "fail",
+                "retryable": False,
+            },
+        )
         fb = await self._state_feedbacks(store)
         assert len(fb) == 0
 
@@ -93,9 +100,17 @@ class TestConsecutiveFailures:
         monitor = RunMonitor(store)
         monitor.attach()
         for i in range(2):
-            await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "test", "error": "fail", "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run1",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "test",
+                    "error": "fail",
+                    "retryable": False,
+                },
+            )
         fb = await self._state_feedbacks(store)
         assert len(fb) == 0
 
@@ -104,9 +119,17 @@ class TestConsecutiveFailures:
         monitor = RunMonitor(store)
         monitor.attach()
         for i in range(3):
-            await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "test", "error": "fail", "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run1",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "test",
+                    "error": "fail",
+                    "retryable": False,
+                },
+            )
         fb = await self._state_feedbacks(store)
         assert len(fb) == 1
         assert fb[0].affected_tool == "test"
@@ -118,9 +141,17 @@ class TestConsecutiveFailures:
         monitor = RunMonitor(store)
         monitor.attach()
         for i in range(6):
-            await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "test", "error": "fail", "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run1",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "test",
+                    "error": "fail",
+                    "retryable": False,
+                },
+            )
         fb = await self._state_feedbacks(store)
         assert len(fb) == 1
 
@@ -129,15 +160,39 @@ class TestConsecutiveFailures:
         monitor = RunMonitor(store)
         monitor.attach()
         for i in range(2):
-            await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "test", "error": "fail", "retryable": False,
-            })
-        await _write_event(store, "run1", EventType.TOOL_COMPLETED, {
-            "tool_call_id": "t2", "tool_name": "test", "output": "ok", "duration_ms": 10,
-        })
-        await _write_event(store, "run1", EventType.TOOL_FAILED, {
-            "tool_call_id": "t3", "tool_name": "test", "error": "fail", "retryable": False,
-        })
+            await _write_event(
+                store,
+                "run1",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "test",
+                    "error": "fail",
+                    "retryable": False,
+                },
+            )
+        await _write_event(
+            store,
+            "run1",
+            EventType.TOOL_COMPLETED,
+            {
+                "tool_call_id": "t2",
+                "tool_name": "test",
+                "output": "ok",
+                "duration_ms": 10,
+            },
+        )
+        await _write_event(
+            store,
+            "run1",
+            EventType.TOOL_FAILED,
+            {
+                "tool_call_id": "t3",
+                "tool_name": "test",
+                "error": "fail",
+                "retryable": False,
+            },
+        )
         fb = await self._state_feedbacks(store)
         assert len(fb) == 0
 
@@ -146,18 +201,42 @@ class TestConsecutiveFailures:
         monitor = RunMonitor(store)
         monitor.attach()
         for i in range(3):
-            await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "test", "error": "fail", "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run1",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "test",
+                    "error": "fail",
+                    "retryable": False,
+                },
+            )
         fb = await self._state_feedbacks(store)
         assert len(fb) == 1
-        await _write_event(store, "run1", EventType.TOOL_COMPLETED, {
-            "tool_call_id": "t3", "tool_name": "test", "output": "ok", "duration_ms": 10,
-        })
+        await _write_event(
+            store,
+            "run1",
+            EventType.TOOL_COMPLETED,
+            {
+                "tool_call_id": "t3",
+                "tool_name": "test",
+                "output": "ok",
+                "duration_ms": 10,
+            },
+        )
         for i in range(4, 7):
-            await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "test", "error": "fail", "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run1",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "test",
+                    "error": "fail",
+                    "retryable": False,
+                },
+            )
         fb = await self._state_feedbacks(store)
         assert len(fb) == 2
 
@@ -174,9 +253,15 @@ class TestTokenWarning:
     async def test_no_warning_below_threshold(self, store: EventStore):
         monitor = RunMonitor(store, max_tokens=1000, token_warning_ratio=0.8)
         monitor.attach()
-        await _write_event(store, "run1", EventType.AGENT_THOUGHT, {
-            "thought": "short", "token_count": 1,
-        })
+        await _write_event(
+            store,
+            "run1",
+            EventType.AGENT_THOUGHT,
+            {
+                "thought": "short",
+                "token_count": 1,
+            },
+        )
         fb = await self._state_feedbacks(store)
         assert len(fb) == 0
 
@@ -185,9 +270,15 @@ class TestTokenWarning:
         monitor = RunMonitor(store, max_tokens=100, token_warning_ratio=0.8)
         monitor.attach()
         long_thought = "hello " * 100
-        await _write_event(store, "run1", EventType.AGENT_THOUGHT, {
-            "thought": long_thought, "token_count": 1,
-        })
+        await _write_event(
+            store,
+            "run1",
+            EventType.AGENT_THOUGHT,
+            {
+                "thought": long_thought,
+                "token_count": 1,
+            },
+        )
         fb = await self._state_feedbacks(store)
         assert len(fb) == 1
         assert "Token warning" in fb[0].feedback_text
@@ -198,9 +289,15 @@ class TestTokenWarning:
         monitor.attach()
         long_thought = "hello " * 100
         for _ in range(3):
-            await _write_event(store, "run1", EventType.AGENT_THOUGHT, {
-                "thought": long_thought, "token_count": 1,
-            })
+            await _write_event(
+                store,
+                "run1",
+                EventType.AGENT_THOUGHT,
+                {
+                    "thought": long_thought,
+                    "token_count": 1,
+                },
+            )
         fb = await self._state_feedbacks(store)
         assert len(fb) == 1
 
@@ -217,9 +314,17 @@ class TestCleanup:
         monitor = RunMonitor(store)
         monitor.attach()
         for i in range(3):
-            await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "test", "error": "fail", "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run1",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "test",
+                    "error": "fail",
+                    "retryable": False,
+                },
+            )
         assert "run1" in monitor._consecutive_failures
         monitor.cleanup("run1")
         assert "run1" not in monitor._consecutive_failures
@@ -234,14 +339,30 @@ class TestCleanup:
         monitor = RunMonitor(store)
         monitor.attach()
         for i in range(3):
-            await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "browser", "error": "NotImplementedError: x", "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run1",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "browser",
+                    "error": "NotImplementedError: x",
+                    "retryable": False,
+                },
+            )
         monitor.cleanup("run1")
         for i in range(3, 6):
-            await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "http_request", "error": "ConnectTimeout: www.example.com", "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run1",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "http_request",
+                    "error": "ConnectTimeout: www.example.com",
+                    "retryable": False,
+                },
+            )
         events = await store.get_events("run1")
         state = fold_events(events)
         assert len(state.feedbacks) == 2  # browser NotImpl + http ConnectTimeout
@@ -264,20 +385,34 @@ class TestCleanup:
         monitor.attach()
         # 3x same endpoint, same error → 1 feedback
         for i in range(3):
-            await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "http_request",
-                "error": "ConnectTimeout: httpbin.org", "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run1",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "http_request",
+                    "error": "ConnectTimeout: httpbin.org",
+                    "retryable": False,
+                },
+            )
         fb = await _state_feedbacks(store)
         assert len(fb) == 1, f"Expected 1 feedback after 3 same errors, got {len(fb)}"
         assert fb[0].error_type == "ConnectTimeout"
 
         # 3x same endpoint, DIFFERENT error → should be a 2nd feedback (not deduped)
         for i in range(3, 6):
-            await _write_event(store, "run1", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "http_request",
-                "error": "InvalidURL: httpbin.org/bad", "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run1",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "http_request",
+                    "error": "InvalidURL: httpbin.org/bad",
+                    "retryable": False,
+                },
+            )
         fb = await _state_feedbacks(store)
         assert len(fb) == 2, (
             f"Bug: different error type should trigger separate feedback, "
@@ -286,6 +421,7 @@ class TestCleanup:
 
 
 # ── FeedbackInjected Event Persistence ─────────────────────────
+
 
 class TestFeedbackEventPersistence:
     """FeedbackInjected events are written to EventStore and foldable."""
@@ -301,9 +437,14 @@ class TestFeedbackEventPersistence:
 
     @pytest.mark.asyncio
     async def test_feedback_event_folded_into_state(self, store: EventStore):
-        await store.append_event("run1", EventType.RUN_STARTED, {
-            "intent": "test", "context_snapshot": {},
-        })
+        await store.append_event(
+            "run1",
+            EventType.RUN_STARTED,
+            {
+                "intent": "test",
+                "context_snapshot": {},
+            },
+        )
         payload = FeedbackInjectedPayload(feedback_text="warning", priority="high")
         await store.append_event("run1", EventType.FEEDBACK_INJECTED, payload.model_dump())
         events = await store.get_events("run1")
@@ -314,14 +455,20 @@ class TestFeedbackEventPersistence:
 
 # ── 9.3 AgentKernel Feedback Parameter ─────────────────────────
 
+
 class TestKernelFeedbackParameter:
     """MockAgentKernel passes through the feedback parameter."""
 
     @pytest.mark.asyncio
     async def test_feedback_default_none(self, store: EventStore):
-        await store.append_event("run1", EventType.RUN_STARTED, {
-            "intent": "test", "context_snapshot": {},
-        })
+        await store.append_event(
+            "run1",
+            EventType.RUN_STARTED,
+            {
+                "intent": "test",
+                "context_snapshot": {},
+            },
+        )
         events = await store.get_events("run1")
         state = fold_events(events)
         kernel = MockAgentKernel([ThinkResult(thought="ok")])
@@ -331,9 +478,14 @@ class TestKernelFeedbackParameter:
 
     @pytest.mark.asyncio
     async def test_feedback_passed_through(self, store: EventStore):
-        await store.append_event("run1", EventType.RUN_STARTED, {
-            "intent": "test", "context_snapshot": {},
-        })
+        await store.append_event(
+            "run1",
+            EventType.RUN_STARTED,
+            {
+                "intent": "test",
+                "context_snapshot": {},
+            },
+        )
         events = await store.get_events("run1")
         state = fold_events(events)
         kernel = MockAgentKernel([ThinkResult(thought="ok")])
@@ -342,6 +494,7 @@ class TestKernelFeedbackParameter:
 
 
 # ── 9.4 Scheduler Feedback Integration ─────────────────────────
+
 
 class TestSchedulerFeedbackIntegration:
     """Scheduler pulls feedbacks from folded state and passes to think()."""
@@ -353,8 +506,12 @@ class TestSchedulerFeedbackIntegration:
     @pytest.mark.asyncio
     async def test_scheduler_no_feedback_when_no_events(self, store: EventStore):
         tool_def = ToolDefinition(
-            name="dummy", description="", idempotency_key_fields=[],
-            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(max_retries=0),
+            name="dummy",
+            description="",
+            idempotency_key_fields=[],
+            side_effects=[],
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(max_retries=0),
         )
         kernel = MockAgentKernel([ThinkResult(thought="done")])
         executor = ToolExecutor(store)
@@ -362,9 +519,13 @@ class TestSchedulerFeedbackIntegration:
         monitor.attach()
 
         scheduler = AgentLoopScheduler(
-            store=store, executor=executor, kernel=kernel,
-            tool_defs=[tool_def], tool_fns={"dummy": dummy_tool},
-            config=SchedulerConfig(max_iterations=3), monitor=monitor,
+            store=store,
+            executor=executor,
+            kernel=kernel,
+            tool_defs=[tool_def],
+            tool_fns={"dummy": dummy_tool},
+            config=SchedulerConfig(max_iterations=3),
+            monitor=monitor,
         )
         await scheduler.run("run1", "test task")
         assert kernel.think_calls[0].get("feedback") is None
@@ -376,8 +537,12 @@ class TestSchedulerFeedbackIntegration:
         """Pre-write events that trigger monitor feedback, then verify scheduler
         reads feedback from state.feedbacks via fold (not in-memory buffer)."""
         tool_def = ToolDefinition(
-            name="dummy", description="", idempotency_key_fields=[],
-            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(max_retries=0),
+            name="dummy",
+            description="",
+            idempotency_key_fields=[],
+            side_effects=[],
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(max_retries=0),
         )
         kernel = MockAgentKernel([ThinkResult(thought="done")])
         executor = ToolExecutor(store)
@@ -385,18 +550,32 @@ class TestSchedulerFeedbackIntegration:
         monitor.attach()
 
         scheduler = AgentLoopScheduler(
-            store=store, executor=executor, kernel=kernel,
-            tool_defs=[tool_def], tool_fns={"dummy": dummy_tool},
-            config=SchedulerConfig(max_iterations=3), monitor=monitor,
+            store=store,
+            executor=executor,
+            kernel=kernel,
+            tool_defs=[tool_def],
+            tool_fns={"dummy": dummy_tool},
+            config=SchedulerConfig(max_iterations=3),
+            monitor=monitor,
         )
 
-        await store.append_event("run1", EventType.RUN_STARTED, {
-            "intent": "test", "context_snapshot": {},
-        })
+        await store.append_event(
+            "run1",
+            EventType.RUN_STARTED,
+            {
+                "intent": "test",
+                "context_snapshot": {},
+            },
+        )
         long_thought = "word " * 200
-        await store.append_event("run1", EventType.AGENT_THOUGHT, {
-            "thought": long_thought, "token_count": 1,
-        })
+        await store.append_event(
+            "run1",
+            EventType.AGENT_THOUGHT,
+            {
+                "thought": long_thought,
+                "token_count": 1,
+            },
+        )
 
         # Verify feedback made it into EventStore before scheduler runs
         fb = await self._assert_feedback_in_state(store)
@@ -427,16 +606,20 @@ class TestDagStepFailedMonitoring:
         monitor.attach()
 
         for i in range(3):
-            await _write_event(store, "run-dag-mon", EventType.DAG_STEP_FAILED, {
-                "plan_id": "p1", "step_id": f"s{i}", "error": "execution error",
-                "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run-dag-mon",
+                EventType.DAG_STEP_FAILED,
+                {
+                    "plan_id": "p1",
+                    "step_id": f"s{i}",
+                    "error": "execution error",
+                    "retryable": False,
+                },
+            )
 
         fb = await self._state_feedbacks(store)
-        assert len(fb) == 1, (
-            f"#37: 3 consecutive DAG_STEP_FAILED should trigger feedback. "
-            f"Got {len(fb)} feedbacks"
-        )
+        assert len(fb) == 1, f"#37: 3 consecutive DAG_STEP_FAILED should trigger feedback. Got {len(fb)} feedbacks"
         assert fb[0].error_type == "execution error"
         assert fb[0].priority == "high"
 
@@ -446,16 +629,24 @@ class TestDagStepFailedMonitoring:
         monitor = RunMonitor(store)
         monitor.attach()
 
-        await _write_event(store, "run-dag-single", EventType.DAG_STEP_FAILED, {
-            "plan_id": "p1", "step_id": "s1", "error": "execution error",
-            "retryable": False,
-        })
+        await _write_event(
+            store,
+            "run-dag-single",
+            EventType.DAG_STEP_FAILED,
+            {
+                "plan_id": "p1",
+                "step_id": "s1",
+                "error": "execution error",
+                "retryable": False,
+            },
+        )
 
         fb = await self._state_feedbacks(store, run_id="run-dag-single")
         assert len(fb) == 0
 
 
 # ── 9.5 attach / cleanup integration ───────────────────────────
+
 
 class TestMonitorLifecycle:
     """RunMonitor attach and cleanup lifecycle."""
@@ -485,26 +676,37 @@ class TestDagStepFailedDedup:
         monitor = RunMonitor(store)
         monitor.attach()
         for i in range(3):
-            await _write_event(store, "run-p1-dedup", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "browser",
-                "error": "NotImplementedError: Browser action failed",
-                "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run-p1-dedup",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "browser",
+                    "error": "NotImplementedError: Browser action failed",
+                    "retryable": False,
+                },
+            )
         fb = await self._state_feedbacks(store)
         assert len(fb) == 1, f"Expected 1 feedback from TOOL_FAILED, got {len(fb)}"
         assert fb[0].affected_tool == "browser"
 
         for i in range(3, 6):
-            await _write_event(store, "run-p1-dedup", EventType.DAG_STEP_FAILED, {
-                "plan_id": "p1", "step_id": f"s{i}",
-                "tool_name": "browser",
-                "error": "NotImplementedError: Browser action failed",
-                "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run-p1-dedup",
+                EventType.DAG_STEP_FAILED,
+                {
+                    "plan_id": "p1",
+                    "step_id": f"s{i}",
+                    "tool_name": "browser",
+                    "error": "NotImplementedError: Browser action failed",
+                    "retryable": False,
+                },
+            )
         fb = await self._state_feedbacks(store)
         assert len(fb) == 1, (
-            f"P1: DAG_STEP_FAILED with tool_name='browser' should dedup against TOOL_FAILED. "
-            f"Got {len(fb)} feedbacks"
+            f"P1: DAG_STEP_FAILED with tool_name='browser' should dedup against TOOL_FAILED. Got {len(fb)} feedbacks"
         )
 
 
@@ -524,14 +726,20 @@ class TestFeedbackSuggestion:
         monitor = RunMonitor(store)
         monitor.attach()
         for i in range(3):
-            await _write_event(store, "run-p2-sugg", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "browser",
-                "error": "NotImplementedError: xyz",
-                "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run-p2-sugg",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "browser",
+                    "error": "NotImplementedError: xyz",
+                    "retryable": False,
+                },
+            )
         fb = await self._last_feedback(store)
         assert fb is not None
-        assert fb.suggestion is not None, f"P2: browser NotImplementedError should have suggestion"
+        assert fb.suggestion is not None, "P2: browser NotImplementedError should have suggestion"
         assert "http_request" in fb.suggestion
 
     @pytest.mark.asyncio
@@ -539,14 +747,20 @@ class TestFeedbackSuggestion:
         monitor = RunMonitor(store)
         monitor.attach()
         for i in range(3):
-            await _write_event(store, "run-p2-nosugg", EventType.TOOL_FAILED, {
-                "tool_call_id": f"t{i}", "tool_name": "browser",
-                "error": "SomeUnknownError: something",
-                "retryable": False,
-            })
+            await _write_event(
+                store,
+                "run-p2-nosugg",
+                EventType.TOOL_FAILED,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "browser",
+                    "error": "SomeUnknownError: something",
+                    "retryable": False,
+                },
+            )
         fb = await self._last_feedback(store, run_id="run-p2-nosugg")
         assert fb is not None
-        assert fb.suggestion is None, f"P2: unknown error should have no suggestion"
+        assert fb.suggestion is None, "P2: unknown error should have no suggestion"
 
 
 # ── Feedback chain tests: consumed_at_seq + since_seq ────────────
@@ -559,8 +773,12 @@ class TestGetFeedbackTextSinceSeq:
     async def test_since_seq_filters_old_feedbacks(self, store: EventStore):
         """Feedbacks injected at or before since_seq should be excluded."""
         tool_def = ToolDefinition(
-            name="dummy", description="", idempotency_key_fields=[],
-            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(max_retries=0),
+            name="dummy",
+            description="",
+            idempotency_key_fields=[],
+            side_effects=[],
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(max_retries=0),
         )
         kernel = MockAgentKernel([ThinkResult(thought="done")])
         executor = ToolExecutor(store)
@@ -569,19 +787,33 @@ class TestGetFeedbackTextSinceSeq:
         monitor.attach()
 
         scheduler = AgentLoopScheduler(
-            store=store, executor=executor, kernel=kernel,
-            tool_defs=[tool_def], tool_fns={"dummy": dummy_tool},
-            config=SchedulerConfig(max_iterations=3), monitor=monitor,
+            store=store,
+            executor=executor,
+            kernel=kernel,
+            tool_defs=[tool_def],
+            tool_fns={"dummy": dummy_tool},
+            config=SchedulerConfig(max_iterations=3),
+            monitor=monitor,
         )
 
-        await store.append_event("run1", EventType.RUN_STARTED, {
-            "intent": "test", "context_snapshot": {},
-        })
+        await store.append_event(
+            "run1",
+            EventType.RUN_STARTED,
+            {
+                "intent": "test",
+                "context_snapshot": {},
+            },
+        )
         # Inject feedback A at a specific seq
         long_thought_a = "word " * 200
-        await store.append_event("run1", EventType.AGENT_THOUGHT, {
-            "thought": long_thought_a, "token_count": 1,
-        })
+        await store.append_event(
+            "run1",
+            EventType.AGENT_THOUGHT,
+            {
+                "thought": long_thought_a,
+                "token_count": 1,
+            },
+        )
 
         events = await store.get_events("run1")
         state = fold_events(events)
@@ -600,8 +832,12 @@ class TestGetFeedbackTextSinceSeq:
     async def test_consumed_feedback_excluded(self, store: EventStore):
         """Feedbacks with consumed_at_seq set should be excluded from _get_feedback_text."""
         tool_def = ToolDefinition(
-            name="dummy", description="", idempotency_key_fields=[],
-            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(max_retries=0),
+            name="dummy",
+            description="",
+            idempotency_key_fields=[],
+            side_effects=[],
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(max_retries=0),
         )
         kernel = MockAgentKernel([ThinkResult(thought="done")])
         executor = ToolExecutor(store)
@@ -609,47 +845,73 @@ class TestGetFeedbackTextSinceSeq:
         monitor.attach()
 
         scheduler = AgentLoopScheduler(
-            store=store, executor=executor, kernel=kernel,
-            tool_defs=[tool_def], tool_fns={"dummy": dummy_tool},
-            config=SchedulerConfig(max_iterations=3), monitor=monitor,
+            store=store,
+            executor=executor,
+            kernel=kernel,
+            tool_defs=[tool_def],
+            tool_fns={"dummy": dummy_tool},
+            config=SchedulerConfig(max_iterations=3),
+            monitor=monitor,
         )
 
         # Simulate: FeedbackInjected → PlanCreated → PlanRevised (which marks consumed)
-        await store.append_event("run1", EventType.RUN_STARTED, {
-            "intent": "test", "context_snapshot": {},
-        })
+        await store.append_event(
+            "run1",
+            EventType.RUN_STARTED,
+            {
+                "intent": "test",
+                "context_snapshot": {},
+            },
+        )
         long_thought = "word " * 200
-        await store.append_event("run1", EventType.AGENT_THOUGHT, {
-            "thought": long_thought, "token_count": 1,
-        })
+        await store.append_event(
+            "run1",
+            EventType.AGENT_THOUGHT,
+            {
+                "thought": long_thought,
+                "token_count": 1,
+            },
+        )
         # PlanRevised event marks feedbacks as consumed in fold
-        await store.append_event("run1", EventType.PLAN_CREATED, {
-            "plan_id": "p1", "intent": "test",
-            "steps_summary": "1 step", "layer_count": 1,
-        })
-        await store.append_event("run1", EventType.PLAN_REVISED, {
-            "plan_id": "p1", "revision_reason": "step_failure",
-            "remaining_steps_summary": "revised",
-        })
+        await store.append_event(
+            "run1",
+            EventType.PLAN_CREATED,
+            {
+                "plan_id": "p1",
+                "intent": "test",
+                "steps_summary": "1 step",
+                "layer_count": 1,
+            },
+        )
+        await store.append_event(
+            "run1",
+            EventType.PLAN_REVISED,
+            {
+                "plan_id": "p1",
+                "revision_reason": "step_failure",
+                "remaining_steps_summary": "revised",
+            },
+        )
 
         events = await store.get_events("run1")
         state = fold_events(events)
         # All feedbacks should have consumed_at_seq set
         for fb in state.feedbacks:
-            assert fb.consumed_at_seq is not None, f"Feedback should be consumed after PlanRevised"
+            assert fb.consumed_at_seq is not None, "Feedback should be consumed after PlanRevised"
 
         fb_text = scheduler._get_feedback_text(state)
-        assert fb_text is None, (
-            f"Consumed feedbacks should not appear in _get_feedback_text. "
-            f"Got: {fb_text}"
-        )
+        assert fb_text is None, f"Consumed feedbacks should not appear in _get_feedback_text. Got: {fb_text}"
 
     @pytest.mark.asyncio
     async def test_since_seq_none_returns_all_unconsumed(self, store: EventStore):
         """since_seq=None (default) should return all active unconsumed feedbacks."""
         tool_def = ToolDefinition(
-            name="dummy", description="", idempotency_key_fields=[],
-            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(max_retries=0),
+            name="dummy",
+            description="",
+            idempotency_key_fields=[],
+            side_effects=[],
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(max_retries=0),
         )
         kernel = MockAgentKernel([ThinkResult(thought="done")])
         executor = ToolExecutor(store)
@@ -657,18 +919,32 @@ class TestGetFeedbackTextSinceSeq:
         monitor.attach()
 
         scheduler = AgentLoopScheduler(
-            store=store, executor=executor, kernel=kernel,
-            tool_defs=[tool_def], tool_fns={"dummy": dummy_tool},
-            config=SchedulerConfig(max_iterations=3), monitor=monitor,
+            store=store,
+            executor=executor,
+            kernel=kernel,
+            tool_defs=[tool_def],
+            tool_fns={"dummy": dummy_tool},
+            config=SchedulerConfig(max_iterations=3),
+            monitor=monitor,
         )
 
-        await store.append_event("run1", EventType.RUN_STARTED, {
-            "intent": "test", "context_snapshot": {},
-        })
+        await store.append_event(
+            "run1",
+            EventType.RUN_STARTED,
+            {
+                "intent": "test",
+                "context_snapshot": {},
+            },
+        )
         long_thought = "word " * 200
-        await store.append_event("run1", EventType.AGENT_THOUGHT, {
-            "thought": long_thought, "token_count": 1,
-        })
+        await store.append_event(
+            "run1",
+            EventType.AGENT_THOUGHT,
+            {
+                "thought": long_thought,
+                "token_count": 1,
+            },
+        )
 
         events = await store.get_events("run1")
         state = fold_events(events)

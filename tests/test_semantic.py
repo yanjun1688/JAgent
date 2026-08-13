@@ -2,18 +2,17 @@
 
 Covers the P4 (429 semantic detection) fix: tool outputs that are
 structurally complete but semantically failed are now recorded as
-TOOL_COMPLETED with result_type=SOFT_ERROR instead of TOOL_FAILED.
+TOOL_COMPLETED with result_type=UNSUCCESSFUL instead of TOOL_FAILED.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
 
 from harness.models.events import Event, EventType, ToolCompletedPayload, ToolResultType
-from harness.models.tools import SideEffect, SuccessIndicator, ToolDefinition
+from harness.models.tools import SuccessIndicator, ToolDefinition
 from harness.tools.semantic import SemanticEvaluator
 from harness.tools.executor import ExecutionStatus
 from harness.storage.event_store import EventStore
@@ -80,18 +79,18 @@ class TestToolCompletedPayloadBackCompat:
         assert reloaded.result_type == ToolResultType.SUCCESS
         assert reloaded.error is None
 
-    def test_round_trip_with_soft_error(self):
+    def test_round_trip_with_unsuccessful(self):
         tp = ToolCompletedPayload(
             tool_call_id="a",
             tool_name="b",
             output={"status_code": 429, "body": ""},
             duration_ms=200,
-            result_type=ToolResultType.SOFT_ERROR,
+            result_type=ToolResultType.UNSUCCESSFUL,
             error="status_code=429 (op=lt, value=400)",
         )
         d = tp.model_dump()
         reloaded = ToolCompletedPayload(**d)
-        assert reloaded.result_type == ToolResultType.SOFT_ERROR
+        assert reloaded.result_type == ToolResultType.UNSUCCESSFUL
         assert reloaded.error == "status_code=429 (op=lt, value=400)"
 
     def test_deserialize_old_event_without_result_type(self):
@@ -154,13 +153,13 @@ class TestSemanticEvaluator:
     def test_eq_failure(self):
         td = self._def(SuccessIndicator(field="success", op="eq", value=True))
         result, error = SemanticEvaluator.evaluate({"success": False, "error": "bad"}, td)
-        assert result == ToolResultType.SOFT_ERROR
+        assert result == ToolResultType.UNSUCCESSFUL
         assert error == "bad"
 
     def test_eq_failure_no_error_key(self):
         td = self._def(SuccessIndicator(field="success", op="eq", value=True))
         result, error = SemanticEvaluator.evaluate({"success": False}, td)
-        assert result == ToolResultType.SOFT_ERROR
+        assert result == ToolResultType.UNSUCCESSFUL
         assert "success=False" in error
 
     # ── ne ────────────────────────────────────────────────────────
@@ -173,7 +172,7 @@ class TestSemanticEvaluator:
     def test_ne_failure(self):
         td = self._def(SuccessIndicator(field="status", op="ne", value="error"))
         result, _ = SemanticEvaluator.evaluate({"status": "error"}, td)
-        assert result == ToolResultType.SOFT_ERROR
+        assert result == ToolResultType.UNSUCCESSFUL
 
     # ── lt (HTTP status_code < 400) ───────────────────────────────
 
@@ -190,17 +189,17 @@ class TestSemanticEvaluator:
     def test_lt_failure_400(self):
         td = self._def(SuccessIndicator(field="status_code", op="lt", value=400))
         result, _ = SemanticEvaluator.evaluate({"status_code": 400}, td)
-        assert result == ToolResultType.SOFT_ERROR
+        assert result == ToolResultType.UNSUCCESSFUL
 
     def test_lt_failure_429(self):
         td = self._def(SuccessIndicator(field="status_code", op="lt", value=400))
         result, _ = SemanticEvaluator.evaluate({"status_code": 429}, td)
-        assert result == ToolResultType.SOFT_ERROR
+        assert result == ToolResultType.UNSUCCESSFUL
 
     def test_lt_failure_500(self):
         td = self._def(SuccessIndicator(field="status_code", op="lt", value=400))
         result, _ = SemanticEvaluator.evaluate({"status_code": 500}, td)
-        assert result == ToolResultType.SOFT_ERROR
+        assert result == ToolResultType.UNSUCCESSFUL
 
     # ── lte ───────────────────────────────────────────────────────
 
@@ -212,7 +211,7 @@ class TestSemanticEvaluator:
     def test_lte_failure(self):
         td = self._def(SuccessIndicator(field="count", op="lte", value=10))
         result, _ = SemanticEvaluator.evaluate({"count": 11}, td)
-        assert result == ToolResultType.SOFT_ERROR
+        assert result == ToolResultType.UNSUCCESSFUL
 
     # ── gt ────────────────────────────────────────────────────────
 
@@ -224,7 +223,7 @@ class TestSemanticEvaluator:
     def test_gt_failure(self):
         td = self._def(SuccessIndicator(field="score", op="gt", value=0))
         result, _ = SemanticEvaluator.evaluate({"score": 0}, td)
-        assert result == ToolResultType.SOFT_ERROR
+        assert result == ToolResultType.UNSUCCESSFUL
 
     # ── gte ───────────────────────────────────────────────────────
 
@@ -236,7 +235,7 @@ class TestSemanticEvaluator:
     def test_gte_failure(self):
         td = self._def(SuccessIndicator(field="level", op="gte", value=1))
         result, _ = SemanticEvaluator.evaluate({"level": 0}, td)
-        assert result == ToolResultType.SOFT_ERROR
+        assert result == ToolResultType.UNSUCCESSFUL
 
     # ── in ────────────────────────────────────────────────────────
 
@@ -248,27 +247,23 @@ class TestSemanticEvaluator:
     def test_in_failure(self):
         td = self._def(SuccessIndicator(field="code", op="in", value=[200, 201, 204]))
         result, _ = SemanticEvaluator.evaluate({"code": 400}, td)
-        assert result == ToolResultType.SOFT_ERROR
+        assert result == ToolResultType.UNSUCCESSFUL
 
     def test_in_empty_list(self):
         td = self._def(SuccessIndicator(field="code", op="in", value=[]))
         result, _ = SemanticEvaluator.evaluate({"code": 200}, td)
-        assert result == ToolResultType.SOFT_ERROR
+        assert result == ToolResultType.UNSUCCESSFUL
 
     # ── error extraction priority ─────────────────────────────────
 
     def test_error_from_error_field(self):
         td = self._def(SuccessIndicator(field="success", op="eq", value=True))
-        _, error = SemanticEvaluator.evaluate(
-            {"success": False, "error": "explicit error", "message": "msg"}, td
-        )
+        _, error = SemanticEvaluator.evaluate({"success": False, "error": "explicit error", "message": "msg"}, td)
         assert error == "explicit error"
 
     def test_error_from_message_field(self):
         td = self._def(SuccessIndicator(field="success", op="eq", value=True))
-        _, error = SemanticEvaluator.evaluate(
-            {"success": False, "message": "fallback message"}, td
-        )
+        _, error = SemanticEvaluator.evaluate({"success": False, "message": "fallback message"}, td)
         assert error == "fallback message"
 
 
@@ -276,7 +271,7 @@ class TestSemanticEvaluator:
 
 
 class TestExecutorSemanticEvaluation:
-    """End-to-end: executor invokes a tool, SemanticEvaluator detects SOFT_ERROR."""
+    """End-to-end: executor invokes a tool, SemanticEvaluator detects UNSUCCESSFUL."""
 
     @pytest.fixture
     def store(self):
@@ -288,7 +283,7 @@ class TestExecutorSemanticEvaluation:
         return store
 
     @pytest.mark.asyncio
-    async def test_http_429_detected_as_soft_error(self, init_store):
+    async def test_http_429_detected_as_unsuccessful(self, init_store):
         store = init_store
         from harness.tools.executor import ToolExecutor
         from harness.tools.http_request import HTTP_REQUEST_DEF
@@ -320,7 +315,7 @@ class TestExecutorSemanticEvaluation:
         completed = [e for e in events if e.event_type == EventType.TOOL_COMPLETED]
         assert len(completed) == 1
         tp = ToolCompletedPayload.model_validate(completed[0].payload)
-        assert tp.result_type == ToolResultType.SOFT_ERROR
+        assert tp.result_type == ToolResultType.UNSUCCESSFUL
         assert tp.error is not None
 
     @pytest.mark.asyncio
@@ -358,7 +353,7 @@ class TestExecutorSemanticEvaluation:
         assert tp.error is None
 
     @pytest.mark.asyncio
-    async def test_file_op_success_false_is_soft_error(self, init_store):
+    async def test_file_op_success_false_is_unsuccessful(self, init_store):
         store = init_store
         from harness.tools.executor import ToolExecutor
         from harness.tools.file_op import FILE_OP_DEF
@@ -385,7 +380,7 @@ class TestExecutorSemanticEvaluation:
         completed = [e for e in events if e.event_type == EventType.TOOL_COMPLETED]
         assert len(completed) == 1
         tp = ToolCompletedPayload.model_validate(completed[0].payload)
-        assert tp.result_type == ToolResultType.SOFT_ERROR
+        assert tp.result_type == ToolResultType.UNSUCCESSFUL
 
     @pytest.mark.asyncio
     async def test_file_op_success_true_is_success(self, init_store):
@@ -411,10 +406,10 @@ class TestExecutorSemanticEvaluation:
         assert result.has_semantic_error is False
 
     @pytest.mark.asyncio
-    async def test_soft_error_result_is_not_idempotency_cached(self, init_store):
-        """v2.1 (Bug S1.1): SOFT_ERROR results must NOT be idempotency-cached.
+    async def test_unsuccessful_result_is_not_idempotency_cached(self, init_store):
+        """v2.1 (Bug S1.1): UNSUCCESSFUL results must NOT be idempotency-cached.
 
-        Only deterministic (SUCCESS) results are cached. If a soft-error result
+        Only deterministic (SUCCESS) results are cached. If a unsuccessful result
         were cached, a same-input retry would hit the cache and never actually
         re-run the tool — silently defeating self-heal (AGENTS.md constraint 4).
         """
@@ -439,20 +434,26 @@ class TestExecutorSemanticEvaluation:
         input_data = {"url": "https://api.example.com/data"}
 
         result1 = await executor.execute(
-            run_id=run_id, tool_name="http_request", input=input_data,
-            tool_def=HTTP_REQUEST_DEF, tool_fn=fake_http,
+            run_id=run_id,
+            tool_name="http_request",
+            input=input_data,
+            tool_def=HTTP_REQUEST_DEF,
+            tool_fn=fake_http,
         )
         assert result1.status == ExecutionStatus.COMPLETED
         assert result1.has_semantic_error is True
         assert call_count == 1
 
         result2 = await executor.execute(
-            run_id=run_id, tool_name="http_request", input=input_data,
-            tool_def=HTTP_REQUEST_DEF, tool_fn=fake_http,
+            run_id=run_id,
+            tool_name="http_request",
+            input=input_data,
+            tool_def=HTTP_REQUEST_DEF,
+            tool_fn=fake_http,
         )
         assert result2.status == ExecutionStatus.COMPLETED
         assert result2.has_semantic_error is True
-        assert result2.cached is False, "SOFT_ERROR must not be served from the cache"
+        assert result2.cached is False, "UNSUCCESSFUL must not be served from the cache"
         assert call_count == 2, "same-input retry must re-execute the tool (self-heal)"
 
     @pytest.mark.asyncio
@@ -493,22 +494,22 @@ class TestExecutorSemanticEvaluation:
 
 
 class TestStepResultProperties:
-    def test_is_done_covers_completed(self):
+    def test_output_available_covers_completed(self):
         sr = StepResult(step_id="s1", exec_state=ExecState.COMPLETED)
         assert sr.is_completed is True
-        assert sr.is_done is True
+        assert sr.output_available is True
         assert sr.is_failed is False
-        assert sr.has_soft_error is False
+        assert sr.is_unsuccessful is False
 
-    def test_is_done_covers_soft_error(self):
-        sr = StepResult(step_id="s1", exec_state=ExecState.SOFT_ERROR, error="e")
+    def test_output_available_covers_unsuccessful(self):
+        sr = StepResult(step_id="s1", exec_state=ExecState.UNSUCCESSFUL, error="e")
         assert sr.is_completed is False
-        assert sr.is_done is True
+        assert sr.output_available is True
         assert sr.is_failed is False
-        assert sr.has_soft_error is True
+        assert sr.is_unsuccessful is True
 
-    def test_soft_error_not_failed(self):
-        sr = StepResult(step_id="s1", exec_state=ExecState.SOFT_ERROR)
+    def test_unsuccessful_not_failed(self):
+        sr = StepResult(step_id="s1", exec_state=ExecState.UNSUCCESSFUL)
         assert sr.is_failed is False
         assert sr.needs_confirmation is False
 
@@ -516,26 +517,33 @@ class TestStepResultProperties:
 # ── Fold integration tests ────────────────────────────────────────
 
 
-class TestFoldSoftError:
-    def test_soft_error_tool_completed_folds_to_soft_error_status(self):
+class TestFoldUnsuccessful:
+    def test_unsuccessful_tool_completed_folds_to_unsuccessful_status(self):
         events = [
             Event(
-                run_id="r", seq=1, event_type=EventType.RUN_STARTED,
-                payload={"intent": "test"}, created_at=1.0,
+                run_id="r",
+                seq=1,
+                event_type=EventType.RUN_STARTED,
+                payload={"intent": "test"},
+                created_at=1.0,
             ),
             Event(
-                run_id="r", seq=2, event_type=EventType.TOOL_CALLED,
+                run_id="r",
+                seq=2,
+                event_type=EventType.TOOL_CALLED,
                 payload={"tool_call_id": "a", "tool_name": "t", "input": {}},
                 created_at=2.0,
             ),
             Event(
-                run_id="r", seq=3, event_type=EventType.TOOL_COMPLETED,
+                run_id="r",
+                seq=3,
+                event_type=EventType.TOOL_COMPLETED,
                 payload={
                     "tool_call_id": "a",
                     "tool_name": "t",
                     "output": {"status_code": 429},
                     "duration_ms": 100,
-                    "result_type": "soft_error",
+                    "result_type": "unsuccessful",
                     "error": "status_code=429 (op=lt, value=400)",
                 },
                 created_at=3.0,
@@ -544,23 +552,30 @@ class TestFoldSoftError:
         state = fold_events(events)
         assert len(state.tool_results) == 1
         tr = state.tool_results[0]
-        assert tr.status == ToolResultStatus.SOFT_ERROR
+        assert tr.status == ToolResultStatus.UNSUCCESSFUL
         assert tr.error == "status_code=429 (op=lt, value=400)"
         assert tr.output == {"status_code": 429}
 
     def test_success_tool_completed_folds_to_completed_status(self):
         events = [
             Event(
-                run_id="r", seq=1, event_type=EventType.RUN_STARTED,
-                payload={"intent": "test"}, created_at=1.0,
+                run_id="r",
+                seq=1,
+                event_type=EventType.RUN_STARTED,
+                payload={"intent": "test"},
+                created_at=1.0,
             ),
             Event(
-                run_id="r", seq=2, event_type=EventType.TOOL_CALLED,
+                run_id="r",
+                seq=2,
+                event_type=EventType.TOOL_CALLED,
                 payload={"tool_call_id": "a", "tool_name": "t", "input": {}},
                 created_at=2.0,
             ),
             Event(
-                run_id="r", seq=3, event_type=EventType.TOOL_COMPLETED,
+                run_id="r",
+                seq=3,
+                event_type=EventType.TOOL_COMPLETED,
                 payload={
                     "tool_call_id": "a",
                     "tool_name": "t",
@@ -579,16 +594,23 @@ class TestFoldSoftError:
     def test_old_event_without_result_type_folds_to_completed(self):
         events = [
             Event(
-                run_id="r", seq=1, event_type=EventType.RUN_STARTED,
-                payload={"intent": "test"}, created_at=1.0,
+                run_id="r",
+                seq=1,
+                event_type=EventType.RUN_STARTED,
+                payload={"intent": "test"},
+                created_at=1.0,
             ),
             Event(
-                run_id="r", seq=2, event_type=EventType.TOOL_CALLED,
+                run_id="r",
+                seq=2,
+                event_type=EventType.TOOL_CALLED,
                 payload={"tool_call_id": "a", "tool_name": "t", "input": {}},
                 created_at=2.0,
             ),
             Event(
-                run_id="r", seq=3, event_type=EventType.TOOL_COMPLETED,
+                run_id="r",
+                seq=3,
+                event_type=EventType.TOOL_COMPLETED,
                 payload={
                     "tool_call_id": "a",
                     "tool_name": "t",
@@ -607,7 +629,7 @@ class TestFoldSoftError:
 # ── DagExecutor chain integration tests ───────────────────────────
 
 
-class TestDagExecutorSoftError:
+class TestDagExecutorUnsuccessful:
     @pytest.fixture
     def store(self):
         return EventStore(db_path=":memory:")
@@ -618,7 +640,7 @@ class TestDagExecutorSoftError:
         return store
 
     @pytest.mark.asyncio
-    async def test_execute_step_returns_soft_error_when_has_semantic_error(self, init_store):
+    async def test_execute_step_returns_unsuccessful_when_has_semantic_error(self, init_store):
         store = init_store
         from harness.tools.executor import ToolExecutor
         from harness.tools.http_request import HTTP_REQUEST_DEF
@@ -628,7 +650,7 @@ class TestDagExecutorSoftError:
 
         executor = ToolExecutor(store=store)
         registry = ToolRegistry()
-        registry.register(HTTP_REQUEST_DEF, lambda i: {"status_code": 429, "headers": {}, "body": "", "elapsed_ms": 10})
+        registry._register(HTTP_REQUEST_DEF, lambda i: {"status_code": 429, "headers": {}, "body": "", "elapsed_ms": 10})
 
         plan = DagPlan(
             intent="test",
@@ -639,9 +661,9 @@ class TestDagExecutorSoftError:
         all_results = await dag.execute(run_id="run-dag-se", plan=plan)
         assert len(all_results) == 1
         sr = all_results["s1"]
-        assert sr.exec_state == ExecState.SOFT_ERROR
-        assert sr.has_soft_error is True
-        assert sr.is_done is True
+        assert sr.exec_state == ExecState.UNSUCCESSFUL
+        assert sr.is_unsuccessful is True
+        assert sr.output_available is True
 
     @pytest.mark.asyncio
     async def test_execute_step_returns_completed_when_no_semantic_error(self, init_store):
@@ -654,7 +676,9 @@ class TestDagExecutorSoftError:
 
         executor = ToolExecutor(store=store)
         registry = ToolRegistry()
-        registry.register(HTTP_REQUEST_DEF, lambda i: {"status_code": 200, "headers": {}, "body": '{"ok":1}', "elapsed_ms": 10})
+        registry._register(
+            HTTP_REQUEST_DEF, lambda i: {"status_code": 200, "headers": {}, "body": '{"ok":1}', "elapsed_ms": 10}
+        )
 
         plan = DagPlan(
             intent="test",
@@ -665,14 +689,14 @@ class TestDagExecutorSoftError:
         all_results = await dag.execute(run_id="run-dag-ok", plan=plan)
         sr = all_results["s1"]
         assert sr.exec_state == ExecState.COMPLETED
-        assert sr.has_soft_error is False
-        assert sr.is_done is True
+        assert sr.is_unsuccessful is False
+        assert sr.output_available is True
 
 
-# ── RunMonitor SOFT_ERROR integration tests ───────────────────────
+# ── RunMonitor UNSUCCESSFUL integration tests ───────────────────────
 
 
-class TestRunMonitorSoftError:
+class TestRunMonitorUnsuccessful:
     @pytest.fixture
     def store(self):
         return EventStore(db_path=":memory:")
@@ -683,7 +707,7 @@ class TestRunMonitorSoftError:
         return store
 
     @pytest.mark.asyncio
-    async def test_soft_error_tool_completed_does_not_reset_consecutive_failures(self, init_store):
+    async def test_unsuccessful_tool_completed_does_not_reset_consecutive_failures(self, init_store):
         store = init_store
         from harness.monitoring.run_monitor import RunMonitor
 
@@ -691,17 +715,19 @@ class TestRunMonitorSoftError:
         monitor.attach()
 
         await store.append_event(
-            "r", EventType.TOOL_CALLED,
+            "r",
+            EventType.TOOL_CALLED,
             {"tool_call_id": "tc1", "tool_name": "http_request", "input": {"url": "http://x"}},
         )
         await store.append_event(
-            "r", EventType.TOOL_COMPLETED,
+            "r",
+            EventType.TOOL_COMPLETED,
             {
                 "tool_call_id": "tc1",
                 "tool_name": "http_request",
                 "output": {"status_code": 429},
                 "duration_ms": 100,
-                "result_type": "soft_error",
+                "result_type": "unsuccessful",
                 "error": "rate limit",
             },
         )
@@ -717,27 +743,31 @@ class TestRunMonitorSoftError:
         monitor.attach()
 
         await store.append_event(
-            "r", EventType.TOOL_CALLED,
+            "r",
+            EventType.TOOL_CALLED,
             {"tool_call_id": "tc1", "tool_name": "http_request", "input": {"url": "http://x"}},
         )
         await store.append_event(
-            "r", EventType.TOOL_COMPLETED,
+            "r",
+            EventType.TOOL_COMPLETED,
             {
                 "tool_call_id": "tc1",
                 "tool_name": "http_request",
                 "output": {"status_code": 429},
                 "duration_ms": 100,
-                "result_type": "soft_error",
+                "result_type": "unsuccessful",
                 "error": "rate limit",
             },
         )
 
         await store.append_event(
-            "r", EventType.TOOL_CALLED,
+            "r",
+            EventType.TOOL_CALLED,
             {"tool_call_id": "tc2", "tool_name": "http_request", "input": {"url": "http://y"}},
         )
         await store.append_event(
-            "r", EventType.TOOL_COMPLETED,
+            "r",
+            EventType.TOOL_COMPLETED,
             {
                 "tool_call_id": "tc2",
                 "tool_name": "http_request",

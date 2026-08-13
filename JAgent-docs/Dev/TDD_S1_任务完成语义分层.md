@@ -3,11 +3,54 @@
 | 属性 | 值 |
 |---|---|
 | **文档类型** | 技术开发文档 (TDD) |
-| **版本** | 2.1 |
-| **日期** | 2026-08-04 |
+| **版本** | 2.2 |
+| **日期** | 2026-08-07 |
 | **相关 ADR** | ADR-007 |
 | **相关 PRD** | PRD_S1 |
-| **目标版本** | V0.7.1 |
+| **目标版本** | V0.7.1+ |
+
+---
+
+## 0.3 v2.2 修订记录（完成门 + step_normal + probe + 可溯源）
+
+> **来源**: `Handover/completion_semantics_chain_redesign_handover_20260807.md` D1–D11
+> **背景**: 上一会话概念对齐（珍珠项链 / DAG 投影 / 三圈套娃）+ 5 个链路缺口溯源。
+> **三个根因问题**:
+> - U1 (自愈不收敛): SOFT_ERROR 步骤被 LLM 反复重试不收敛 → probe 声明让"探测型步骤"的否定答案成为正确答案
+> - U2 (完成脱钩): 完成口径用 `is_done`(含 SOFT_ERROR) 或 LLM"空 steps"一句话 → 机械聚合 `step_normal`
+> - P0-03: SOFT_ERROR 被当 done 传递, 依赖链不阻断 → 下游门控 `step_normal`
+
+### 0.3.1 核心概念（v2.2）
+
+- **`step_normal`**：步骤是否"正常"的机械判据（D3）。纯函数 `(exec_state, probe) → bool`，
+  不读 `task_state`（约束 4）。`COMPLETED`/`IDEMPOTENT` → True；`UNSUCCESSFUL and probe` → True；
+  其余 → False。
+- **完成门**（D5）：最终计划所有步骤 `step_normal` 的聚合 = 任务完成。不再信 LLM"空 steps"。
+- **下游门控**（D7/D9，P0-03 修复）：依赖非 normal → 下游 SKIP 不执行。门控条件唯一 = `step_normal`。
+- **`output_available`**（D8）：`is_done` 收窄改名，仅用于 planner `available_step_ids`（`$var.field` 可用集）。
+- **`probe`**（D4/D10）：step 级只读探测声明，PlanGuardrail 强制校验"仅无副作用工具可标"。
+- **可溯源**（D6）：`step_id ↔ tool_call_id` 挂钩 + 计划结构落事件。
+
+### 0.3.2 v2.2 状态语义表
+
+```
+COMPLETED    = 工具跑完 + 拿到东西         → step_normal ✓
+IDEMPOTENT   = 幂等命中（等效拿到）         → step_normal ✓
+UNSUCCESSFUL = 工具跑完 + 没拿到东西       → 默认 ✗；probe=true 时 ✓
+FAILED       = 工具没跑成                   → step_normal ✗
+SKIPPED      = 被跳过（因依赖不正常）       → step_normal ✗（补记录，D9）
+```
+
+### 0.3.3 task_state 定位（D11，写注释即可，暂不实现对照功能）
+
+`task_state` 是 **LLM 写给系统的纯审计便签**，具备双重未来价值：
+
+1. **审计**：D 阶段随 `PlanRevisedPayload` 落事件（洞 4 修复）
+2. **未来功能**：作为 **"LLM 自评 vs 系统机械判定"差异对比**的素材——per-step 并排展示
+   `[系统 step_normal ✓/✗]` vs `[LLM task_state achieved/not_achieved]`，差异即线索
+   （LLM 说 achieved 但系统判不正常 → 要么该步该标 probe，要么 LLM 幻觉）。
+
+> **注意**：对照功能现在只写注释/文档，**不实现**。且 `task_state` **永不参与任何受信判定**（约束 4）。
 
 ---
 
@@ -62,7 +105,7 @@
 | L4 — Agent Kernel | Planner / System Prompt | L1 Event Store, L2 Tool Layer |
 | L5 — 工具注册与实现 | PlanGuardrail / DagExecutor / DagPlan | L2, L4 |
 
-**受信边界**：`ExecState` 写入权归 `DagExecutor`（受信），`TaskState` 写入权归 `Planner`（非受信，LLM 决定）。`should_not_rerun` 是系统强制属性，纯函数 `ExecState → bool`，不依赖 Agent 任何输出（v2.1 起删除 `task_state` 读入，见 §0）。`is_done` 同样为纯 `ExecState` 函数，且**与 `should_not_rerun` 解耦**（含 SOFT_ERROR）。
+**受信边界**：`ExecState` 写入权归 `DagExecutor`（受信），`TaskState` 写入权归 `Planner`（非受信，LLM 决定，纯审计便签 v2.2 D11）。`should_not_rerun` 是系统强制属性，纯函数 `ExecState → bool`，不依赖 Agent 任何输出（v2.1 起删除 `task_state` 读入，见 §0）。`step_normal`（v2.2）为纯函数 `(exec_state, probe) → bool`，完成判定（完成门）与下游门控均由 `step_normal` 机械聚合，不读 `task_state`（约束 4）。`output_available`（v2.2 由 `is_done` 改名收窄）仅用于 planner 的 `available_step_ids`。
 
 ---
 
@@ -70,7 +113,7 @@
 
 | 文件 | 变更类型 | 说明 |
 |------|----------|------|
-| `harness/core/dag_types.py` | **重写** | 删除 `StepStatus`，新增 `ExecState`/`TaskState`；`StepResult` 改用 `exec_state` (取代 `status`)；新增 `should_not_rerun` 属性；删除 `get()` / `is_completed` / `is_done` / `is_failed` / `needs_confirmation` / `has_soft_error` |
+| `harness/core/dag_types.py` | **重写** | 删除 `StepStatus`，新增 `ExecState`/`TaskState`；`StepResult` 改用 `exec_state` (取代 `status`)；新增 `should_not_rerun` 属性；`is_done`→`output_available`（收窄，仅 `available_step_ids` 用）、`has_soft_error`→`is_unsuccessful`、新增 `step_normal` 与 `probe` 字段（v2.2）；删除 `get()` |
 | `harness/core/planner.py` | **修改** | `revise()` 改用 `should_not_rerun`；删除 `isinstance(r, dict)` 守卫和 `"idempotency_hit"` 死代码 |
 | `harness/core/dag_executor.py` | **修改** | `_run_step` 返回 `StepResult` 时使用 `exec_state`；`build_dag_status_text` 输出 `exec_state`；全局 `is_done`/`is_completed` 引用替换为 `should_not_rerun`（**v2.1 注**：上游上下文注入与层失败计数改用保留的 `is_done`——含 SOFT_ERROR，见 §4.1） |
 | `harness/core/system_prompt.py` | **修改** | revise prompt 增加 `ExecState`/`TaskState` 枚举说明 + few-shot 示例 |
@@ -100,7 +143,7 @@ class ExecState(str, Enum):
     PENDING       = "pending"
     RUNNING       = "running"
     COMPLETED     = "completed"
-    SOFT_ERROR    = "soft_error"
+    UNSUCCESSFUL  = "unsuccessful"      # v2.2 由 SOFT_ERROR 改名: 跑了但没拿到东西
     FAILED        = "failed"
     SKIPPED       = "skipped"
     IDEMPOTENT    = "idempotent"
@@ -110,6 +153,9 @@ class ExecState(str, Enum):
 class TaskState(str, Enum):
     """任务达成态——由 LLM 在 revise 中写入。
 
+    v2.2 (D11): 纯审计便签, 不参与任何受信判定。
+    [FUTURE] 计划作为 "LLM 自评 vs 系统机械判定" 差异对比功能的素材,
+    与 StepResult.step_normal 并排展示。当前只落事件供审计, 不实现对照逻辑。
     回答: "这个 step 的业务目标达成了吗？"
     """
     UNKNOWN       = "unknown"
@@ -129,16 +175,17 @@ class StepResult:
     retryable: bool = False
     confirmation_id: str | None = None
     task_state: TaskState = TaskState.UNKNOWN
+    probe: bool = False                    # v2.2 (D4): 探测型步骤声明, PlanGuardrail 强制校验
 
     @property
     def should_not_rerun(self) -> bool:
         """系统判定：该 step 的工具已执行过且不应再次调度。
 
-        注意: 这不等于"任务目标已达成"——那由 LLM 通过 TaskState 判定。
+        注意: 这不等于"任务目标已达成"——那由系统通过 step_normal 机械聚合。
         这里只回答"工具是否已经跑过了"。
 
         v2.1 修正: 纯 ExecState 状态机，不读取 task_state（受信边界约束 4）。
-        SOFT_ERROR 不在其中 → 可重跑（自愈依赖此）。COMPLETED 不可原地重跑。
+        UNSUCCESSFUL 不在其中 → 可重跑（自愈依赖此）。COMPLETED 不可原地重跑。
         """
         return self.exec_state in (
             ExecState.COMPLETED,
@@ -148,23 +195,41 @@ class StepResult:
         )
 
     @property
-    def is_done(self) -> bool:
-        """系统判定：该 step 是否"已收尾"（可提供上游上下文 / 不构成层失败）。
+    def output_available(self) -> bool:
+        """系统判定：该 step 的输出是否可用（可被下游 `$var.field` 引用）。
 
-        v2.1 修正: 与 should_not_rerun 解耦。SOFT_ERROR 属于"已收尾"
-        （工具跑过了，可给下游用 output），但可以重跑。
+        v2.2 (D8): 由 v2.1 的 is_done 收窄改名而来。职责仅为"输出可用",
+        只用于 planner 的 available_step_ids（`planner.py` 的 `$var.field` 可用集）。
+        完成计数 / 上游上下文注入 / layer 失败检查一律改用 step_normal。
         """
         return self.exec_state in (
             ExecState.COMPLETED,
-            ExecState.SOFT_ERROR,
+            ExecState.UNSUCCESSFUL,
             ExecState.IDEMPOTENT,
             ExecState.SKIPPED,
             ExecState.CANCELLED,
         )
+
+    @property
+    def step_normal(self) -> bool:
+        """v2.2 (D3): 步骤是否"正常"——完成门的原子判据。
+
+        纯函数 (exec_state, probe) → bool，系统计算，不读 task_state（约束 4）。
+        UNSUCCESSFUL 且 step.probe=True 时算正常（"没有"就是正确答案）。
+        """
+        return self.exec_state in (
+            ExecState.COMPLETED,
+            ExecState.IDEMPOTENT,
+        ) or (self.exec_state == ExecState.UNSUCCESSFUL and self.probe)
+
+    @property
+    def is_unsuccessful(self) -> bool:
+        """v2.2 (D1): 由 has_soft_error 改名。"""
+        return self.exec_state == ExecState.UNSUCCESSFUL
 ```
 
-**删除物**：`StepStatus` 枚举、`StepResult.status` 字段、`StepResult.get()`。
-**保留物**：`is_completed`、`is_done`、`is_failed`、`needs_confirmation`、`has_soft_error` 便捷属性 — 保持语义一致性，现由 `exec_state` 推导。
+**删除物**：`StepStatus` 枚举、`StepResult.status` 字段、`StepResult.get()`、`is_done`（改为 `output_available`）、`has_soft_error`（改为 `is_unsuccessful`）。
+**保留物**：`is_completed`、`is_failed`、`needs_confirmation` 便捷属性 — 保持语义一致性，现由 `exec_state` 推导。
 
 ---
 
@@ -184,26 +249,34 @@ class StepResult:
 
 | 旧 | 新 |
 |----|-----|
-| `r.is_done` | `r.should_not_rerun`（**v2.0 语义**；v2.1 起二者解耦，`is_done` 保留含 SOFT_ERROR 语义，见 §4.1） |
+| `r.is_done` | **`r.step_normal`**（v2.2 起：完成计数 / 上游注入 / layer 失败检查全部改用 `step_normal`，见 §0.3）；planner 的 `available_step_ids` 用 `output_available` |
 | `r.is_completed` | `r.exec_state == ExecState.COMPLETED` |
-| `r.has_soft_error` | `r.exec_state == ExecState.SOFT_ERROR` |
+| `r.has_soft_error` | `r.exec_state == ExecState.UNSUCCESSFUL` |
 | `r.status` | `r.exec_state` |
 | `StepStatus.` | `ExecState.` |
 
 ---
 
-### 4.3 scheduler/plan.py — 引用替换
+### 4.3 scheduler/plan.py — 引用替换 + 下游门控
 
 | 旧 | 新 |
 |----|-----|
 | `r.is_completed` | `r.exec_state == ExecState.COMPLETED` |
-| `r.has_soft_error` | `r.exec_state == ExecState.SOFT_ERROR` |
+| `r.has_soft_error` | `r.exec_state == ExecState.UNSUCCESSFUL` |
 | `results[sid].is_completed` | `results[sid].exec_state == ExecState.COMPLETED` |
 | `isinstance(r, StepResult) and r.is_completed` | `isinstance(r, StepResult) and r.should_not_rerun` |
+| 完成计数 `is_done` | **`step_normal`**（v2.2 D8：假绿根因——SOFT_ERROR 不再算完成） |
+| 上游上下文注入 / layer 失败检查 `is_done` | **`step_normal`**（v2.2 D8） |
+| planner `available_step_ids` | **`output_available`**（v2.2 D8：仅此一处用，供 `$var.field`） |
+
+**v2.2 下游门控（P0-03 修复，D7/D9）**：`DagExecutor._execute_step` 中依赖健康检查：
+- 若 `depends_on` 中存在 `step_normal == False` 的已完成步骤（UNSUCCESSFUL 非 probe / FAILED / SKIPPED），
+  当前 step **SKIP 不执行**，`exec_state = SKIPPED`，并**补记录**（D9：现 SKIPPED 全库无生产者，需写 `DagStepSkipped` 或复用现有事件，见 C 阶段事件 schema）。
+- 门控条件**唯一** = `step_normal`；不读 `task_state`（约束 4）；不猜测下游能否消费 probe 否定答案（D7）。
 
 **v2.1 追加**：两处 `revised.step_tasks → results[sid].task_state` 合并逻辑（layer_failure 分支与
 soft_error 分支）提取为公共辅助函数 `_merge_step_tasks(results, revised)`。该合并**不再影响任何调度判定**
-（`should_not_rerun` 不读 task_state），仅保留观测语义。
+（`should_not_rerun` 不读 task_state），仅保留观测语义（v2.2 D11：D 阶段落事件供审计）。
 
 ---
 
@@ -234,6 +307,9 @@ executed_step_ids: set[str] = {
 - SOFT_ERROR 步骤在下轮拓扑排序中**仍参与调度** → 系统保证它可被重跑，**无需 LLM 标记 not_achieved**（约束 4）。
 - 旧 Bug 3 的"补丁式 merge（写 task_state 翻转重跑）"整个不再需要。
 
+**v2.2 补充**：`available_step_ids`（`planner.py:300`，`$var.field` 可用集）改用 `r.output_available`（D8）。
+完成计数 / 门控与 planner 无关（在 scheduler/dag_executor），不在此处读 `step_normal` 之外的状态。
+
 #### 4.4.2 工具过滤逻辑（planner.py:427-439）
 
 如果 `_filter_tools_by_intent` 中使用了 `StepResult.status` 或 `StepStatus`，替换为 `exec_state` 和 `ExecState`。
@@ -255,21 +331,24 @@ executed_step_ids: set[str] = {
 The system reports each step's execution state. This tells you whether the tool ran,
 NOT whether the goal was met. You must NOT modify these values.
 
-| exec_state    | Meaning                                | can rerun |
-|---------------|----------------------------------------|-----------|
-| "completed"   | Tool ran successfully                  | No        |
-| "soft_error"  | Tool ran but returned a minor issue    | Yes       |
-| "idempotent"  | Tool was skipped (duplicate detected)  | No        |
-| "skipped"     | Skipped by system                      | No        |
-| "cancelled"   | Cancelled externally                   | No        |
-| "failed"      | Tool failed (timeout / exception)      | Yes       |
-| "pending"     | Not yet executed                       | -         |
+| exec_state      | Meaning                                | can rerun |
+|-----------------|----------------------------------------|-----------|
+| "completed"     | Tool ran successfully, got the thing   | No        |
+| "unsuccessful"  | Tool ran but did NOT get the thing     | Yes       |
+| "idempotent"    | Tool was skipped (duplicate detected)  | No        |
+| "skipped"       | Skipped by system (dep not normal)     | No        |
+| "cancelled"     | Cancelled externally                   | No        |
+| "failed"        | Tool failed (timeout / exception)      | Yes       |
+| "pending"       | Not yet executed                       | -         |
 
-## Step Task State (task_state) — ADVISORY, YOU MUST OUTPUT
+## Step Task State (task_state) — ADVISORY AUDIT NOTE, YOU MUST OUTPUT
 
 For each COMPLETED step that already ran, judge its task_state for your own
-reference. NOTE: task_state is informational ONLY — it does NOT change whether
-a step re-runs. The system decides re-runnability from exec_state alone.
+reference. NOTE: task_state is an AUDIT NOTE ONLY — it does NOT change whether
+a step re-runs nor whether the task is considered complete. The system decides
+completion mechanically from step_normal (exec_state + probe) alone.
+[FUTURE] task_state will be shown side-by-side with the system's step_normal
+as a "LLM self-judgment vs system mechanical judgment" comparison.
 
 | task_state      | Meaning                                                       |
 |-----------------|---------------------------------------------------------------|
@@ -281,11 +360,19 @@ a step re-runs. The system decides re-runnability from exec_state alone.
 
 Always check the step's output before judging task_state.
 A COMPLETED exec_state does NOT automatically mean task_state=achieved.
-A SOFT_ERROR exec_state does NOT automatically mean task_state=not_achieved.
+An UNSUCCESSFUL exec_state does NOT automatically mean task_state=not_achieved.
+
+## Step Probe Declaration (probe) — SYSTEM-VALIDATED, READ-ONLY
+
+A step may declare `"probe": true` when its goal is to CHECK something and a
+"not found / does not exist" answer IS the correct answer. Only tools with NO
+side effects (read-only / query) may be marked probe — the system rejects the
+plan if you mark a mutating tool as probe. When a probe step returns
+"unsuccessful", the system still counts it as normal (step_normal=True).
 
 ## RERUN RULES (system-enforced, not negotiable)
 
-- To RETRY a step that ran with soft_error or failed: keep the step in the
+- To RETRY a step that ran with unsuccessful or failed: keep the step in the
   revised plan (you MAY reuse its id). The system will re-run it.
 - To REDO a step that is already "completed"/"idempotent": you MUST give the
   step a NEW id. Reusing a completed step's id is silently SKIPPED — the
@@ -294,6 +381,8 @@ A SOFT_ERROR exec_state does NOT automatically mean task_state=not_achieved.
 
 **v2.1 语义变化**：原表格 `should_not_rerun` 列改为 `can rerun`，`soft_error → Yes`；
 `step_tasks` 明确标注为 **advisory**（仅供 LLM 参考，不改变重跑判定）。
+**v2.2 语义变化**：`soft_error` → `unsuccessful`；新增 `probe` 声明段；`task_state` 标注
+`ADVISORY AUDIT NOTE` + 未来 LLM vs 系统差异展示注释（D11，只写注释不实现）。
 
 ---
 
@@ -343,9 +432,10 @@ rg "isinstance\(r.*dict"         # 替换为 isinstance(r, StepResult)
 | 决策点 | 选择 | 理由 |
 |--------|------|------|
 | 一次性替换而非分步迁移 | 直接删除旧枚举，全量替换 | 项目未上线，无用户，无兼容负担 |
-| `SKIPPED` / `CANCELLED` 不新建事件类型 | 枚举值存在，暂不持久化 | DAG 执行中无对应事件类型；枚举存在为 `should_not_rerun` 提供完整规则。新建事件是后续工作 |
+| `SKIPPED` 门控产生后**补记录**（v2.2 D9 修订） | 新增 `DagStepSkipped` 事件（或复用现有 schema），`exec_state=skipped` 落事件 | v2.1 曾规定不新建；v2.2 起门控会真实产生 SKIPPED，必须可观测、可审计 |
+| `CANCELLED` 暂不新建事件 | 枚举值存在，门控不产生 | 取消路径由 RUN_COMMAND 处理，属 Lifecycle 范畴 |
 | `CONFIRMATION_NEEDED` 映射为 `PENDING` | `PENDING` + `confirmation_id` 非空 | 语义正确：等待确认 == 尚未执行 |
-| `ExecState.RUNNING` 不持久化 | 事件流仅 `DagStepStarted → DagStepCompleted/Failed` | 无中间"running"事件；枚举值存在但不写入 Event Store |
+| `ExecState.RUNNING` 不持久化 | 事件流仅 `DagStepStarted → DagStepCompleted/Failed/Skipped` | 无中间"running"事件；枚举值存在但不写入 Event Store |
 | 不保留 backward-compat shim | `get()` / 旧属性全部删除 | 未上线项目没必要保留 |
 
 ---
@@ -355,29 +445,37 @@ rg "isinstance\(r.*dict"         # 替换为 isinstance(r, StepResult)
 - [x] `ExecState` 的写入路径全部在 `DagExecutor`（受信）内，无外部写入点
 - [x] `TaskState` 只有 `Planner.revise()` 能写入，值仅来源于 LLM 输出
 - [x] `should_not_rerun` 判定为纯函数 `ExecState → bool`，不依赖 LLM 输出（v2.1：删除 `task_state` 读入）
-- [x] `is_done` 与 `should_not_rerun` 解耦：`is_done` 含 SOFT_ERROR，`should_not_rerun` 不含（v2.1 新增）
-- [x] 不存在 Agent Kernel 直接驱动 DagExecutor 而绕过 `should_not_rerun` 的路径
-- [x] SOFT_ERROR 结果**不入幂等缓存**，同输入重跑会真实再次执行工具（v2.1 新增，见 `harness/tools/executor.py`）
-- [x] `task_state` 不进入任何受信组件判定路径（v2.1 新增）
-- [x] 全局无 `StepStatus` / `.get("status")` / `"idempotency_hit"` 残留
+- [x] `step_normal` 为纯函数 `(exec_state, probe) → bool`，不读 `task_state`（v2.2 新增，D3）
+- [x] 完成判定（完成门）为 `step_normal` 机械聚合，不读 `task_state`、不信 LLM"空 steps"（v2.2 D5）
+- [x] 下游门控条件**唯一** `step_normal`，不读 `task_state`、不猜下游消费能力（v2.2 D7）
+- [x] `output_available` 仅用于 planner `available_step_ids`，不用于完成计数/门控（v2.2 D8）
+- [x] `probe` 声明由 PlanGuardrail（受信）强制校验仅无副作用工具可标（v2.2 D10）
+- [x] 不存在 Agent Kernel 直接驱动 DagExecutor 而绕过 `should_not_rerun` / 门控的路径
+- [x] UNSUCCESSFUL 结果**不入幂等缓存**，同输入重跑会真实再次执行工具（v2.1 新增，见 `harness/tools/executor.py`）
+- [x] `task_state` 不进入任何受信组件判定路径；仅落事件供审计 + 未来差异展示注释（v2.1 + v2.2 D11）
+- [x] 全局无 `StepStatus` / `.get("status")` / `"idempotency_hit"` / `SOFT_ERROR` / `soft_error` 残留
 
 ---
 
 ## 8. 验收标准
 
 - [x] `ExecState` 与 `TaskState` 完全正交，互不可推导
-- [x] `StepResult.should_not_rerun` 对 COMPLETED / IDEMPOTENT / SKIPPED / CANCELLED → True（v2.1：不含 SOFT_ERROR）
-- [x] `StepResult.should_not_rerun` 对 SOFT_ERROR / PENDING / RUNNING / FAILED → False
-- [x] `StepResult.is_done` 对 COMPLETED / SOFT_ERROR / IDEMPOTENT / SKIPPED / CANCELLED → True（v2.1：含 SOFT_ERROR）
-- [x] `should_not_rerun` / `is_done` 结果与 `task_state` 取值完全无关（v2.1 约束 4 回归）
-- [x] `planner.revise()` 中 SOFT_ERROR 的 step **不在** `executed_step_ids` 内（v2.1 起）
-- [x] e2e：SOFT_ERROR 步骤在 LLM 未标记 not_achieved 时仍被重跑（v2.1 约束 4 回归）
+- [x] `StepResult.should_not_rerun` 对 COMPLETED / IDEMPOTENT / CANCELLED → True（v2.2 D9：SKIPPED 可重跑）
+- [x] `StepResult.should_not_rerun` 对 UNSUCCESSFUL / SKIPPED / PENDING / RUNNING / FAILED → False
+- [x] `StepResult.output_available` 对 COMPLETED / UNSUCCESSFUL / IDEMPOTENT → True；SKIPPED / CANCELLED → False（v2.2 由 is_done 改名收窄）
+- [x] `step_normal` 对 COMPLETED / IDEMPOTENT → True；UNSUCCESSFUL and probe → True；UNSUCCESSFUL 非 probe / FAILED / SKIPPED / PENDING / RUNNING → False（v2.2 D3 全分支）
+- [x] `step_normal` / `output_available` / 完成判定 / 门控结果与 `task_state` 取值完全无关（约束 4 回归）
+- [x] `planner.revise()` 中 UNSUCCESSFUL 的 step **不在** `executed_step_ids` 内（v2.1 起）
+- [x] e2e：UNSUCCESSFUL 步骤在 LLM 未标记 not_achieved 时仍被重跑（v2.1 约束 4 回归）
 - [x] e2e：COMPLETED 步骤即使被标 not_achieved 也不原地重跑（须新 id，v2.1 新增）
-- [x] 幂等缓存：同输入 SOFT_ERROR 重跑命中后不再返回 IDEMPOTENCY_HIT，而是真实再执行（v2.1 新增）
+- [x] e2e：UNSUCCESSFUL（非 probe）下游被门控 SKIP，任务不完成（P0-03 / D7 回归）
+- [x] e2e：probe 步骤 UNSUCCESSFUL（否定答案）算 normal，下游照常执行（D7 回归）
+- [x] 门控产生 SKIPPED 时落事件（D9，C 阶段 schema 确认后实现）
+- [x] 幂等缓存：同输入 UNSUCCESSFUL 重跑命中后不再返回 IDEMPOTENCY_HIT，而是真实再执行（v2.1 新增）
 - [x] `planner.py` 中无 `isinstance(r, dict)` / `"idempotency_hit"` 残留
-- [x] revise prompt 包含 `ExecState`/`TaskState` 定义表 + RERUN RULES（v2.1）
-- [x] `build_dag_status_text()` 输出 `exec_state` 信息，SOFT_ERROR 显示 `replan=MAYBE`
-- [x] 全局 `StepStatus` grep 零匹配
+- [x] revise prompt 包含 `ExecState`/`TaskState` 定义表 + RERUN RULES + probe 声明段（v2.1 + v2.2）
+- [x] `build_dag_status_text()` 输出 `exec_state` 信息，UNSUCCESSFUL 显示 `replan=MAYBE`
+- [x] 全局 `StepStatus` / `SOFT_ERROR` / `soft_error` grep 零匹配（改名彻底）
 - [x] `ruff check harness/` 零警告
 - [x] 全量测试通过
 

@@ -1,6 +1,7 @@
 """Integration tests for Agent Loop Scheduler (L3)."""
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -322,17 +323,34 @@ class TestPlanStateChain:
 
         executor = ToolExecutor(store)
         registry = ToolRegistry()
+        registry._register(
+            ToolDefinition(
+                name="echo",
+                description="echo",
+                input_schema={"type": "object", "properties": {}},
+                side_effects=[],
+            ),
+            lambda value: value,
+        )
         dag = DagExecutor(executor, store, registry)
         planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
         cm = ContextManager(store, token_limit=10000, compression_threshold_ratio=0.5, checkpoint_interval=1)
         sched = PlanningExecutorScheduler(
-            store, executor, planner, dag, [], {},
+            store,
+            executor,
+            planner,
+            dag,
+            [],
+            {},
             context_manager=cm,
         )
 
-        plan = DagPlan(intent="test", steps=[
-            DagStep(id="s1", tool="echo", input={"msg": "hello"}),
-        ])
+        plan = DagPlan(
+            intent="test",
+            steps=[
+                DagStep(id="s1", tool="echo", input={"msg": "hello"}),
+            ],
+        )
         planner.plan = AsyncMock(return_value=plan)
         planner.last_raw_response = "mock"
 
@@ -373,16 +391,33 @@ class TestPlanStateChain:
 
         executor = ToolExecutor(store)
         registry = ToolRegistry()
+        registry._register(
+            ToolDefinition(
+                name="echo",
+                description="echo",
+                input_schema={"type": "object", "properties": {}},
+                side_effects=[],
+            ),
+            lambda value: value,
+        )
         dag = DagExecutor(executor, store, registry)
         planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
         sched = PlanningExecutorScheduler(
-            store, executor, planner, dag, [], {},
+            store,
+            executor,
+            planner,
+            dag,
+            [],
+            {},
             monitor=monitor,
         )
 
-        plan = DagPlan(intent="test", steps=[
-            DagStep(id="s1", tool="echo", input={"msg": "hello"}),
-        ])
+        plan = DagPlan(
+            intent="test",
+            steps=[
+                DagStep(id="s1", tool="echo", input={"msg": "hello"}),
+            ],
+        )
         planner.plan = AsyncMock(return_value=plan)
 
         # First: plan with feedback → execute_layer fails → revise succeeds
@@ -398,16 +433,27 @@ class TestPlanStateChain:
         planner.last_raw_response = "mock"
 
         # Pre-inject a feedback by triggering token warning via a long thought
-        await store.append_event("run-chain-2", EventType.RUN_STARTED, {
-            "intent": "test", "context_snapshot": {},
-        })
-        await store.append_event("run-chain-2", EventType.AGENT_THOUGHT, {
-            "thought": "word " * 200, "token_count": 1,
-        })
+        await store.append_event(
+            "run-chain-2",
+            EventType.RUN_STARTED,
+            {
+                "intent": "test",
+                "context_snapshot": {},
+            },
+        )
+        await store.append_event(
+            "run-chain-2",
+            EventType.AGENT_THOUGHT,
+            {
+                "thought": "word " * 200,
+                "token_count": 1,
+            },
+        )
 
         # Verify feedback is in store before scheduler runs
         pre_events = await store.get_events("run-chain-2")
         from harness.core.fold import fold_events
+
         pre_state = fold_events(pre_events)
         initial_fb_count = len(pre_state.feedbacks)
         assert initial_fb_count >= 1, "Should have token warning feedback before scheduler runs"
@@ -432,7 +478,6 @@ class TestPlanStateChain:
                 f"All feedbacks should have consumed_at_seq after PlanRevised. "
                 f"Feedback '{fb.feedback_text}' has consumed_at_seq={fb.consumed_at_seq}"
             )
-
 
 
 # ── 3.x CRITICAL bug regression tests ────────────────────────────
@@ -464,15 +509,27 @@ class TestStaticPlanUnboundLocalError:
 
         executor = ToolExecutor(store)
         registry = ToolRegistry()
+        registry._register(
+            ToolDefinition(
+                name="echo",
+                description="echo",
+                input_schema={"type": "object", "properties": {}},
+                side_effects=[],
+            ),
+            lambda value: value,
+        )
         dag = DagExecutor(executor, store, registry)
         planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
         sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {})
         sched.config.pause_timeout_ms = 999999
 
-        plan = DagPlan(intent="test", steps=[
-            DagStep(id="s1", tool="echo", input={"msg": "a"}),
-            DagStep(id="s2", tool="echo", input={"msg": "b"}),
-        ])
+        plan = DagPlan(
+            intent="test",
+            steps=[
+                DagStep(id="s1", tool="echo", input={"msg": "a"}),
+                DagStep(id="s2", tool="echo", input={"msg": "b"}),
+            ],
+        )
         planner.plan = AsyncMock(return_value=plan)
         planner.generate_answer = AsyncMock(return_value="Done")
         planner.last_raw_response = "mock"
@@ -494,8 +551,7 @@ class TestStaticPlanUnboundLocalError:
             nonlocal retry_calls
             retry_calls += 1
             if retry_calls == 1:
-                return StepResult(step_id=step_id, exec_state=ExecState.PENDING,
-                                  confirmation_id="cid-1")
+                return StepResult(step_id=step_id, exec_state=ExecState.PENDING, confirmation_id="cid-1")
             return StepResult(step_id=step_id, exec_state=ExecState.COMPLETED, output={})
 
         dag.retry_step = AsyncMock(side_effect=_retry)
@@ -512,16 +568,16 @@ class TestStaticPlanUnboundLocalError:
         await asyncio.sleep(0.2)
 
         try:
-            state = await asyncio.wait_for(task, timeout=3.0)
+            await asyncio.wait_for(task, timeout=3.0)
         except (asyncio.CancelledError, asyncio.TimeoutError):
-            state = None
+            pass
 
         # The point: no UnboundLocalError was raised.
         # If the bug were still present, the task would have crashed.
         events = await store.get_events(run_id)
-        assert any(e.event_type == EventType.PLAN_REVISED for e in events) or \
-               any(e.event_type == EventType.RUN_FAILED for e in events), \
-               "Expected PLAN_REVISED or RUN_FAILED (confirm → layer failure → revise/fallback)"
+        assert any(e.event_type == EventType.PLAN_REVISED for e in events) or any(
+            e.event_type == EventType.RUN_FAILED for e in events
+        ), "Expected PLAN_REVISED or RUN_FAILED (confirm → layer failure → revise/fallback)"
 
         task.cancel()
         try:
@@ -549,6 +605,15 @@ class TestMaxIterationsPlanningExecutor:
 
         executor = ToolExecutor(store)
         registry = ToolRegistry()
+        registry._register(
+            ToolDefinition(
+                name="echo",
+                description="echo",
+                input_schema={"type": "object", "properties": {}},
+                side_effects=[],
+            ),
+            lambda value: value,
+        )
         dag = DagExecutor(executor, store, registry)
         planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
         config = SchedulerConfig(max_iterations=2)
@@ -567,7 +632,22 @@ class TestMaxIterationsPlanningExecutor:
 
         dag.execute_layer = AsyncMock(side_effect=_exec)
         dag.build_dag_status_text = Mock(return_value="")
-        planner.revise = AsyncMock(return_value=plan)  # same plan → loop continues
+
+        # 每次 revise 返回不同输入的失败步骤（非退化，但永不收敛）→ 只能靠
+        # max_iterations 兜底。若返回同一动作会被 E 阶段签名比对守卫提前熔断，
+        # 那测的是退化守卫而非 max_iterations。
+        _iter = {"n": 0}
+
+        async def _revise(*args, **kwargs):
+            _iter["n"] += 1
+            return DagPlan(
+                intent="test",
+                steps=[
+                    DagStep(id="s1", tool="echo", input={"msg": f"attempt-{_iter['n']}"}),
+                ],
+            )
+
+        planner.revise = AsyncMock(side_effect=_revise)
 
         state = await sched.run("run-max-iters", "test")
         assert state.status == RunStatus.FAILED
@@ -604,15 +684,17 @@ class TestCancelDuringDagConfirmation:
         planner.last_raw_response = "mock"
 
         # execute_layer raises PlanSuspended, enters confirmation loop
-        dag.execute_layer = AsyncMock(
-            side_effect=PlanSuspended(confirmations=[("s1", "cid-1")])
-        )
+        dag.execute_layer = AsyncMock(side_effect=PlanSuspended(confirmations=[("s1", "cid-1")]))
         dag.build_dag_status_text = Mock(return_value="")
 
         # retry_step keeps returning confirmation_needed (infinite loop without cancel)
-        dag.retry_step = AsyncMock(return_value=StepResult(
-            step_id="s1", exec_state=ExecState.PENDING, confirmation_id="cid-1",
-        ))
+        dag.retry_step = AsyncMock(
+            return_value=StepResult(
+                step_id="s1",
+                exec_state=ExecState.PENDING,
+                confirmation_id="cid-1",
+            )
+        )
 
         run_id = "run-cancel-dag-confirm"
         task = asyncio.create_task(sched.run(run_id, "test"))
@@ -639,7 +721,8 @@ class TestPlanningExecutorScheduler:
 
     @pytest.mark.asyncio
     async def test_is_subclass_of_base_scheduler(self):
-        from harness.core.scheduler import BaseScheduler, PlanningExecutorScheduler
+        from harness.core.scheduler import PlanningExecutorScheduler
+
         assert issubclass(PlanningExecutorScheduler, BaseScheduler)
 
     @pytest.mark.asyncio
@@ -660,7 +743,12 @@ class TestPlanningExecutorScheduler:
         dag_executor = DagExecutor(executor, store, registry)
         planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
         scheduler = PlanningExecutorScheduler(
-            store, executor, planner, dag_executor, [], {},
+            store,
+            executor,
+            planner,
+            dag_executor,
+            [],
+            {},
         )
 
         assert scheduler.planner is planner
@@ -685,7 +773,13 @@ class TestPlanningExecutorScheduler:
         planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
         config = SchedulerConfig(max_confirm_retries=3)
         scheduler = PlanningExecutorScheduler(
-            store, executor, planner, dag_executor, [], {}, config=config,
+            store,
+            executor,
+            planner,
+            dag_executor,
+            [],
+            {},
+            config=config,
         )
 
         assert scheduler.config.max_confirm_retries == 3
@@ -711,6 +805,15 @@ class TestPlanningExecutorSchedulerExecution:
 
         executor = ToolExecutor(store)
         registry = ToolRegistry()
+        registry._register(
+            ToolDefinition(
+                name="echo",
+                description="echo",
+                input_schema={"type": "object", "properties": {}},
+                side_effects=[],
+            ),
+            lambda value: value,
+        )
         dag = DagExecutor(executor, store, registry)
         planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
         sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {})
@@ -728,6 +831,7 @@ class TestPlanningExecutorSchedulerExecution:
     @staticmethod
     def _mock_exec_layer(*, succeed: bool = True):
         """Return an AsyncMock for execute_layer that populates results."""
+
         async def _execute(run_id, plan, plan_id, layer, layer_idx, layers, all_results):
             for sid in layer:
                 all_results[sid] = StepResult(
@@ -736,6 +840,7 @@ class TestPlanningExecutorSchedulerExecution:
                     output={},
                 )
             return succeed
+
         return AsyncMock(side_effect=_execute)
 
     # ── 1. All layers succeed ────────────────────────────────────────
@@ -787,11 +892,19 @@ class TestPlanningExecutorSchedulerExecution:
             exec_call_count += 1
             if exec_call_count == 1:
                 for sid in layer:
-                    all_results[sid] = {"status": "failed", "output": {}}
+                    all_results[sid] = StepResult(
+                        step_id=sid,
+                        exec_state=ExecState.FAILED,
+                        error="boom",
+                    )
                 return False  # fail → trigger revise
             # Second call with revised plan
             for sid in layer:
-                all_results[sid] = {"status": "completed", "output": {}}
+                all_results[sid] = StepResult(
+                    step_id=sid,
+                    exec_state=ExecState.COMPLETED,
+                    output={},
+                )
             return True
 
         dag.execute_layer = AsyncMock(side_effect=_exec_side)
@@ -814,11 +927,134 @@ class TestPlanningExecutorSchedulerExecution:
         assert any(e.event_type == EventType.RUN_COMPLETED for e in events)
         planner.revise.assert_awaited_once()
 
-    # ── 3. Layer fails → revise returns empty → complete ─────────────
+    @pytest.mark.asyncio
+    async def test_revision_restores_skipped_downstream_and_global_completion_gate(self, store: EventStore):
+        """D12: a successful replacement must reactivate skipped downstream steps.
+
+        The revised plan intentionally contains only a replacement for s2. The
+        trusted scheduler must preserve s3/s4, rewrite their dependencies, and
+        complete the original four-step task without rerunning s1.
+        """
+        from harness.models.plan import DagPlan, DagStep
+
+        sched, planner, dag = self._make_env(store)
+        initial_plan = DagPlan(
+            intent="serial",
+            steps=[
+                DagStep(id="s1", tool="echo", input={"msg": "a"}),
+                DagStep(id="s2", tool="echo", input={"msg": "bad"}, depends_on=["s1"]),
+                DagStep(id="s3", tool="echo", input={"msg": "c"}, depends_on=["s2"]),
+                DagStep(id="s4", tool="echo", input={"msg": "d"}, depends_on=["s3"]),
+            ],
+        )
+        replacement = DagPlan(
+            intent="serial-revised",
+            steps=[
+                DagStep(id="s2_fix", tool="echo", input={"msg": "fixed"}),
+            ],
+        )
+        planner.plan = AsyncMock(return_value=initial_plan)
+        planner.revise = AsyncMock(return_value=replacement)
+        planner.generate_answer = AsyncMock(return_value="Done")
+        planner.last_raw_response = "mock"
+        executed: list[list[str]] = []
+
+        async def _exec(run_id, plan, plan_id, layer, layer_idx, layers, all_results):
+            executed.append(list(layer))
+            for sid in layer:
+                if sid == "s2":
+                    all_results[sid] = StepResult(
+                        step_id=sid,
+                        exec_state=ExecState.UNSUCCESSFUL,
+                        error="404",
+                    )
+                elif sid == "s3" and "s2_fix" not in all_results:
+                    all_results[sid] = StepResult(
+                        step_id=sid,
+                        exec_state=ExecState.SKIPPED,
+                        error="dependency failed",
+                    )
+                elif sid == "s4" and "s3" in all_results and not all_results["s3"].step_normal:
+                    all_results[sid] = StepResult(
+                        step_id=sid,
+                        exec_state=ExecState.SKIPPED,
+                        error="dependency failed",
+                    )
+                else:
+                    all_results[sid] = StepResult(step_id=sid, exec_state=ExecState.COMPLETED, output={})
+            return True
+
+        dag.execute_layer = AsyncMock(side_effect=_exec)
+        dag.build_dag_status_text = Mock(return_value="")
+
+        state = await sched.run("run-d12", "serial")
+        events = await store.get_events("run-d12")
+
+        assert state.status == RunStatus.COMPLETED
+        completed = next(e for e in events if e.event_type == EventType.RUN_COMPLETED)
+        assert completed.payload["all_normal"] is True
+        assert completed.payload["unmet_step_ids"] == []
+        assert executed.count(["s1"]) == 1
+        assert "s2_fix" in [sid for layer in executed for sid in layer]
+        assert "s3" in [sid for layer in executed for sid in layer]
+        assert "s4" in [sid for layer in executed for sid in layer]
+        assert not any(e.event_type == EventType.RUN_FAILED for e in events)
 
     @pytest.mark.asyncio
-    async def test_layer_fails_revise_empty_completes(self, store: EventStore):
-        """Layer fails → revise says no steps left → finalize → COMPLETED."""
+    async def test_empty_plan_answer_receives_conversation_context(self, store: EventStore):
+        """Empty-plan and analysis-only paths must receive the same history."""
+        from harness.models.plan import DagPlan
+
+        sched, planner, _ = self._make_env(store)
+        sched._classify_intent = AsyncMock(return_value=True)
+        planner.plan = AsyncMock(return_value=DagPlan(intent="empty", steps=[]))
+        sched._generate_answer = AsyncMock(return_value="answer")
+
+        await sched.run("run-empty-context", "current request", conversation_context="prior turn")
+
+        assert sched._generate_answer.await_args.kwargs["conversation_context"] == "prior turn"
+
+    @pytest.mark.asyncio
+    async def test_initial_empty_plan_with_delivery_contract_fails(self, store: EventStore):
+        """An initial empty plan must not bypass the deliverable completion gate."""
+        from harness.models.events import RunStartedPayload
+        from harness.models.intent import DeliveryContract, DeliverySource
+        from harness.models.plan import DagPlan
+
+        sched, planner, _ = self._make_env(store)
+        await store.append_event(
+            "run-empty-contract",
+            EventType.RUN_STARTED,
+            RunStartedPayload(
+                intent="write x.txt",
+                contracts=[
+                    DeliveryContract(
+                        tool="file_op",
+                        input={"operation": "write", "path": "x.txt"},
+                        source=DeliverySource.CALLER,
+                    )
+                ],
+            ).model_dump(),
+        )
+        planner.plan = AsyncMock(return_value=DagPlan(intent="empty", steps=[]))
+        sched._classify_intent = AsyncMock(return_value=True)
+        sched._generate_answer = AsyncMock(return_value="must not be used")
+
+        state = await sched.run("run-empty-contract", "write x.txt")
+        events = await store.get_events("run-empty-contract")
+
+        assert state.status == RunStatus.FAILED
+        assert any(event.event_type == EventType.RUN_FAILED for event in events)
+        sched._generate_answer.assert_not_awaited()
+
+    # ── 3. Layer fails → revise returns empty → NOT complete (D5) ──────
+
+    @pytest.mark.asyncio
+    async def test_layer_fails_revise_empty_not_complete(self, store: EventStore):
+        """v2.2 (D5, U2 根治): 层失败 → revise 空 steps 不等于完成。
+
+        s1 仍 FAILED（unmet）→ 完成门拦截 → run FAILED，绝不假绿。
+        """
         sched, planner, dag = self._make_env(store)
 
         planner.plan = AsyncMock(return_value=self._plan(step_ids=["s1"]))
@@ -828,15 +1064,16 @@ class TestPlanningExecutorSchedulerExecution:
         dag.execute_layer = self._mock_exec_layer(succeed=False)
         dag.build_dag_status_text = Mock(return_value="")
 
-        planner.revise = AsyncMock(return_value=self._plan(step_ids=[]))  # no steps = done
+        planner.revise = AsyncMock(return_value=self._plan(step_ids=[]))  # 空 steps 但 s1 仍失败
 
         state = await sched.run("run-empty-revise", "test")
         events = await store.get_events("run-empty-revise")
 
-        assert state.status == RunStatus.COMPLETED
+        assert state.status == RunStatus.FAILED
         assert any(e.event_type == EventType.PLAN_CREATED for e in events)
         assert any(e.event_type == EventType.PLAN_REVISED for e in events)
-        assert any(e.event_type == EventType.RUN_COMPLETED for e in events)
+        assert any(e.event_type == EventType.RUN_FAILED for e in events)
+        assert not any(e.event_type == EventType.RUN_COMPLETED for e in events)
 
     # ── 4. Layer fails → revise returns None → _fail ─────────────────
 
@@ -869,10 +1106,13 @@ class TestPlanningExecutorSchedulerExecution:
         sched, planner, dag = self._make_env(store)
 
         # Plan with 2 dependent steps → 2 layers: [s1], [s2]
-        plan = DagPlan(intent="test", steps=[
-            DagStep(id="s1", tool="echo", input={"msg": "a"}),
-            DagStep(id="s2", tool="echo", input={"msg": "b"}, depends_on=["s1"]),
-        ])
+        plan = DagPlan(
+            intent="test",
+            steps=[
+                DagStep(id="s1", tool="echo", input={"msg": "a"}),
+                DagStep(id="s2", tool="echo", input={"msg": "b"}, depends_on=["s1"]),
+            ],
+        )
         planner.plan = AsyncMock(return_value=plan)
         planner.last_raw_response = "mock"
 
@@ -899,7 +1139,7 @@ class TestPlanningExecutorSchedulerExecution:
 
         # Wait for task to finish (cancel flag detected at layer 1 entry → _fail)
         try:
-            state = await asyncio.wait_for(task, timeout=3.0)
+            await asyncio.wait_for(task, timeout=3.0)
         except (asyncio.CancelledError, Exception):
             pass
 
@@ -920,15 +1160,21 @@ class TestPlanningExecutorSchedulerExecution:
         planner.last_raw_response = "mock"
 
         # execute_layer raises PlanSuspended
-        dag.execute_layer = AsyncMock(side_effect=PlanSuspended(
-            confirmations=[("s1", "cid-1")],
-        ))
+        dag.execute_layer = AsyncMock(
+            side_effect=PlanSuspended(
+                confirmations=[("s1", "cid-1")],
+            )
+        )
         dag.build_dag_status_text = Mock(return_value="")
 
         # retry_step keeps returning confirmation_needed
-        dag.retry_step = AsyncMock(return_value=StepResult(
-            step_id="s1", exec_state=ExecState.PENDING, confirmation_id="cid-1",
-        ))
+        dag.retry_step = AsyncMock(
+            return_value=StepResult(
+                step_id="s1",
+                exec_state=ExecState.PENDING,
+                confirmation_id="cid-1",
+            )
+        )
 
         run_id = "run-confirm-exceed"
         task = asyncio.create_task(sched.run(run_id, "test"))
@@ -952,43 +1198,49 @@ class TestPlanningExecutorSchedulerExecution:
         except (asyncio.CancelledError, Exception):
             pass
 
-    # ── Bug 4: SOFT_ERROR should trigger revise ───────────────────────
+    # ── Bug 4: UNSUCCESSFUL should trigger revise ─────────────────────
 
     @pytest.mark.asyncio
-    async def test_soft_error_triggers_revise(self, store: EventStore):
-        """Bug 4: SOFT_ERROR steps must trigger a revise even when layer returns True."""
+    async def test_unsuccessful_triggers_revise(self, store: EventStore):
+        """Bug 4: UNSUCCESSFUL steps must trigger a revise even when layer returns True.
+
+        v2.2 (D5): revise 返回空 steps 不代表完成 — 完成门机械判定。s2 仍 unmet
+        （UNSUCCESSFUL 非 probe）→ run 必须 FAILED，绝不假绿（U2 根治）。
+        """
         sched, planner, dag = self._make_env(store)
 
         planner.plan = AsyncMock(return_value=self._plan(step_ids=["s1", "s2"]))
         planner.generate_answer = AsyncMock(return_value="Done")
         planner.last_raw_response = "mock plan response"
 
-        async def _exec_with_soft_error(run_id, plan, plan_id, layer, layer_idx, layers, all_results):
+        async def _exec_with_unsuccessful(run_id, plan, plan_id, layer, layer_idx, layers, all_results):
             for sid in layer:
                 all_results[sid] = StepResult(
                     step_id=sid,
-                    exec_state=ExecState.SOFT_ERROR if sid == "s2" else ExecState.COMPLETED,
+                    exec_state=ExecState.UNSUCCESSFUL if sid == "s2" else ExecState.COMPLETED,
                     output={"success": True} if sid == "s1" else {"success": False},
-                    error="soft error" if sid == "s2" else None,
+                    error="unsuccessful" if sid == "s2" else None,
                 )
-            return True  # layer "succeeds" — SOFT_ERROR is not a hard failure
+            return True  # layer "succeeds" — UNSUCCESSFUL is not a hard failure
 
-        dag.execute_layer = AsyncMock(side_effect=_exec_with_soft_error)
+        dag.execute_layer = AsyncMock(side_effect=_exec_with_unsuccessful)
         dag.build_dag_status_text = Mock(return_value="")
 
         planner.revise = AsyncMock(return_value=self._plan(step_ids=[]))
 
-        state = await sched.run("run-soft-error-revise", "test")
-        events = await store.get_events("run-soft-error-revise")
+        state = await sched.run("run-unsuccessful-revise", "test")
+        events = await store.get_events("run-unsuccessful-revise")
 
-        assert state.status == RunStatus.COMPLETED
+        # v2.2 (D5): s2 未达成 → FAILED，不假绿
+        assert state.status == RunStatus.FAILED, f"expected FAILED (s2 unmet), got {state.status.value}"
+        assert "Steps not achieved" in (state.last_error or "")
         planner.revise.assert_awaited_once()
         assert any(e.event_type == EventType.PLAN_REVISED for e in events), (
-            "Bug 4: SOFT_ERROR should trigger a revise, writing PLAN_REVISED"
+            "Bug 4: UNSUCCESSFUL should trigger a revise, writing PLAN_REVISED"
         )
         revised = [e for e in events if e.event_type == EventType.PLAN_REVISED]
-        assert any("soft_error" in (e.payload.get("revision_reason", "") or "") for e in revised), (
-            "Bug 4: PLAN_REVISED reason should indicate it was triggered by soft_error"
+        assert any("unsuccessful" in (e.payload.get("revision_reason", "") or "") for e in revised), (
+            "Bug 4: PLAN_REVISED reason should indicate it was triggered by unsuccessful"
         )
 
 
@@ -1002,8 +1254,12 @@ class TestBoundaryCases:
             return {"ok": True}
 
         tool_def = ToolDefinition(
-            name="slow", description="Slow", idempotency_key_fields=[],
-            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(),
+            name="slow",
+            description="Slow",
+            idempotency_key_fields=[],
+            side_effects=[],
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
         )
         kernel = MockAgentKernel([ThinkResult(thought="Slow work", tool_name="slow", tool_input={})])
         executor = ToolExecutor(store)
@@ -1027,16 +1283,24 @@ class TestBoundaryCases:
     @pytest.mark.asyncio
     async def test_is_paused_on_pending_confirmation(self, store: EventStore):
         dangerous_def = ToolDefinition(
-            name="delete_file", description="Delete",
-            idempotency_key_fields=["path"], side_effects=[SideEffect.DELETE],
-            requires_confirmation=True, timeout_ms=5000, retry_policy=RetryPolicy(),
+            name="delete_file",
+            description="Delete",
+            idempotency_key_fields=["path"],
+            side_effects=[SideEffect.DELETE],
+            requires_confirmation=True,
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
         )
         kernel = MockAgentKernel(
             [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
         )
         executor = ToolExecutor(store)
         scheduler = AgentLoopScheduler(
-            store, executor, kernel, [dangerous_def], {"delete_file": lambda i: {"deleted": i["path"]}},
+            store,
+            executor,
+            kernel,
+            [dangerous_def],
+            {"delete_file": lambda i: {"deleted": i["path"]}},
             config=SchedulerConfig(pause_timeout_ms=999999),
         )
         run_id = "run-is-paused"
@@ -1054,16 +1318,24 @@ class TestBoundaryCases:
     @pytest.mark.asyncio
     async def test_cancel_terminates_confirmation_loop(self, store: EventStore):
         dangerous_def = ToolDefinition(
-            name="delete_file", description="Delete",
-            idempotency_key_fields=["path"], side_effects=[SideEffect.DELETE],
-            requires_confirmation=True, timeout_ms=5000, retry_policy=RetryPolicy(),
+            name="delete_file",
+            description="Delete",
+            idempotency_key_fields=["path"],
+            side_effects=[SideEffect.DELETE],
+            requires_confirmation=True,
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
         )
         kernel = MockAgentKernel(
             [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
         )
         executor = ToolExecutor(store)
         scheduler = AgentLoopScheduler(
-            store, executor, kernel, [dangerous_def], {"delete_file": lambda i: {"deleted": i["path"]}},
+            store,
+            executor,
+            kernel,
+            [dangerous_def],
+            {"delete_file": lambda i: {"deleted": i["path"]}},
             config=SchedulerConfig(pause_timeout_ms=999999),
         )
         run_id = "run-cancel-confirm"
@@ -1080,6 +1352,228 @@ class TestBoundaryCases:
             await task
         except (asyncio.CancelledError, Exception):
             pass
+
+
+# ── JAGENT-2026-P1-13: classify 受信保守门 ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    "intent",
+    [
+        "请在当前 workspace 创建 blackbox.txt，写入 hello harness blackbox，然后重新读取",
+        "请尝试在 workspace 的父目录 ../blackbox-escape.txt 写入 blackbox forbidden",
+        "Read the file report.md and summarize it",
+        "请列出当前目录下的所有文件",
+        "write hello to file data/config.json",
+        "访问 https://example.com 并读取页面内容",
+        "search the web for python async best practices",
+        "open browser and navigate to example.org",
+        "please delete the temp file /tmp/cache.log",
+        "use playwright to screenshot example.com",
+        "mcp memory query: what tasks exist",
+    ],
+)
+def test_intent_requires_tools_trusted_gate_hits(intent):
+    """Bug 1 回归：含文件/路径/URL/浏览器信号的意图必须触发受信保守门。"""
+    from harness.core.scheduler.plan import _intent_requires_tools
+
+    assert _intent_requires_tools(intent) is True, f"trusted gate must catch: {intent}"
+
+
+@pytest.mark.parametrize(
+    "intent",
+    [
+        "你好，今天天气怎么样？",
+        "请解释一下什么是事件溯源架构",
+        "帮我分析这段 Python 代码的复杂度",
+        "What is the capital of France? (based on your knowledge)",
+        "总结一下我们刚才讨论的内容",
+    ],
+)
+def test_intent_requires_tools_trusted_gate_pure_conversation(intent):
+    """Bug 1 回归：纯对话请求不触发保守门（交由 LLM 判定）。"""
+    from harness.core.scheduler.plan import _intent_requires_tools
+
+    assert _intent_requires_tools(intent) is False, f"pure conversation must not trigger gate: {intent}"
+
+
+@pytest.mark.asyncio
+async def test_classify_no_cannot_bypass_tool_layer_for_file_write(store: EventStore):
+    """Bug 1 回归：LLM 返回 'no' 时，文件写入请求仍必须进入 Tool Layer。
+
+    Run 325b42c5 根因：真实模型对路径越界写入返回 no → 跳过 Planner/Guardrail。
+    修复后：受信保守门强制 needs_tools=True，必须出现 PlanCreated 与文件工具调用。
+    """
+    from harness.core.llm_client import MockLLMClient
+    from harness.core.planner import Planner
+    from harness.core.scheduler.plan import PlanningExecutorScheduler
+    from harness.core.dag_executor import DagExecutor
+    from harness.tools.registry import ToolRegistry
+    from harness.tools.file_op import FILE_OP_DEF
+
+    executor = ToolExecutor(store)
+    registry = ToolRegistry()
+    registry._register(FILE_OP_DEF, lambda i: {"success": False, "path": i.get("path"), "error": "blocked"})
+
+    # MockLLM 第 1 个响应是 classify=no，验证受信门不会走到这里 / 即使走到也被覆盖
+    llm = MockLLMClient(
+        responses=[
+            "no",  # classify 返回 no
+            '{"intent":"w","steps":[{"id":"s1","tool":"file_op","input":{"operation":"write","path":"blackbox.txt","content":"x"}}]}',
+            "answer",
+        ]
+    )
+    planner = Planner(llm, registry, store, max_plan_retries=1)
+    dag = DagExecutor(executor, store, registry)
+    sched = PlanningExecutorScheduler(
+        store,
+        executor,
+        planner,
+        dag,
+        [FILE_OP_DEF],
+        {"file_op": lambda i: {"success": False, "path": i.get("path"), "error": "blocked"}},
+        config=SchedulerConfig(max_iterations=5),
+    )
+    sched.dag = dag
+    planner.generate_answer = AsyncMock(return_value="done")
+
+    await sched.run("run-gate-write", "请在当前 workspace 创建 blackbox.txt 并写入 hello")
+
+    events = await store.get_events("run-gate-write")
+    # 必须有 PlanCreated → 说明受信门成功把请求送进了 Tool Layer
+    assert any(e.event_type == EventType.PLAN_CREATED for e in events), "受信门必须让文件写入进入 Tool Layer"
+    # 必须有 ToolCalled(file_op)
+    assert any(
+        e.event_type == EventType.TOOL_CALLED and e.payload.get("tool_name") == "file_op" for e in events
+    ), "file_op 必须被调用（即使被拦截），不允许被 classify=no 绕过"
+
+
+@pytest.mark.asyncio
+async def test_classify_analysis_only_still_skips_tools_for_pure_conversation(store: EventStore):
+    """Bug 1 回归：纯对话请求仍可走分析路径（不误伤）。"""
+    from harness.core.llm_client import MockLLMClient
+    from harness.core.planner import Planner
+    from harness.core.scheduler.plan import PlanningExecutorScheduler
+    from harness.core.dag_executor import DagExecutor
+    from harness.tools.registry import ToolRegistry
+
+    executor = ToolExecutor(store)
+    registry = ToolRegistry()
+    llm = MockLLMClient(responses=["no", "answer"])
+    planner = Planner(llm, registry, store, max_plan_retries=1)
+    dag = DagExecutor(executor, store, registry)
+    sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=SchedulerConfig(max_iterations=5))
+    sched.dag = dag
+    planner.generate_answer = AsyncMock(return_value="answer")
+
+    await sched.run("run-gate-conversation", "请解释什么是事件溯源架构")
+
+    events = await store.get_events("run-gate-conversation")
+    assert not any(e.event_type == EventType.PLAN_CREATED for e in events), "纯对话不应进入 Tool Layer"
+
+
+@pytest.mark.asyncio
+async def test_cee7d7f6_write_read_weakened_to_list_fails(store: EventStore):
+    """Bug 2+3 回归（Run cee7d7f6）：用户要求 write+read，revise 弱化为 list。
+
+    root_plan 声明 declared_operations=[write, read]；write 成功但 read 失败后
+    revise 弱化为 list。完成门回归 declared_operations（机械维度）：read 未达成
+    → RunFailed，禁止"观察成功替代交付成功"。
+    """
+    from harness.core.llm_client import MockLLMClient
+    from harness.core.planner import Planner
+    from harness.core.scheduler.plan import PlanningExecutorScheduler
+    from harness.core.dag_executor import DagExecutor
+    from harness.tools.registry import ToolRegistry
+    from harness.tools.file_op import FILE_OP_DEF
+
+    def file_fn(input: dict) -> dict:
+        op = input.get("operation")
+        if op == "write":
+            return {"success": True, "path": input.get("path", ""), "size": len(input.get("content", ""))}
+        if op == "read":
+            return {"success": False, "path": input.get("path", ""), "error": "File not found: blackbox.txt"}
+        if op == "list":
+            return {"success": True, "path": input.get("path", "."), "content": "", "size": 0}
+        return {"success": False, "path": input.get("path", ""), "error": f"{op} blocked"}
+
+    executor = ToolExecutor(store)
+    registry = ToolRegistry()
+    registry._register(FILE_OP_DEF, file_fn)
+
+    # 首轮 root_plan：write+read 且声明 declared_operations → 通过 guardrail。
+    # read 失败后 revise 弱化为 list（丢 read）。完成门须拦截。
+    llm = MockLLMClient(
+        responses=[
+            '{"intent":"t","steps":[{"id":"s1","tool":"file_op","input":{"operation":"write","path":"blackbox.txt","content":"hello harness blackbox"}},'
+            '{"id":"s2","tool":"file_op","input":{"operation":"read","path":"blackbox.txt"},"depends_on":["s1"]}],'
+            '"declared_operations":[{"tool":"file_op","input":{"operation":"write","path":"blackbox.txt"}},'
+            '{"tool":"file_op","input":{"operation":"read","path":"blackbox.txt"}}]}',
+            '{"intent":"t2","steps":[{"id":"s1","tool":"file_op","input":{"operation":"list","path":"."}}]}',
+            "answer",
+        ]
+    )
+    planner = Planner(llm, registry, store, max_plan_retries=1)
+    dag = DagExecutor(executor, store, registry)
+    sched = PlanningExecutorScheduler(
+        store, executor, planner, dag, [FILE_OP_DEF], {"file_op": file_fn}, config=SchedulerConfig(max_iterations=6)
+    )
+    sched.dag = dag
+    planner.generate_answer = AsyncMock(return_value="answer")
+
+    await sched.run("run-cee7d7f6", "请在 workspace 创建 blackbox.txt 写入 hello 然后读取")
+
+    events = await store.get_events("run-cee7d7f6")
+    assert any(e.event_type == EventType.RUN_FAILED for e in events), "read 未达成必须 RunFailed，禁止假绿"
+    assert not any(e.event_type == EventType.RUN_COMPLETED for e in events)
+
+
+@pytest.mark.asyncio
+async def test_cee7d7f6_write_read_satisfied_completes(store: EventStore):
+    """Bug 2+3 正向：write+read 均达成 → 完成门通过 → RunCompleted。"""
+    from harness.core.llm_client import MockLLMClient
+    from harness.core.planner import Planner
+    from harness.core.scheduler.plan import PlanningExecutorScheduler
+    from harness.core.dag_executor import DagExecutor
+    from harness.tools.registry import ToolRegistry
+    from harness.tools.file_op import FILE_OP_DEF
+
+    def file_fn(input: dict) -> dict:
+        op = input.get("operation")
+        if op in ("write", "append"):
+            return {"success": True, "path": input.get("path", ""), "size": len(input.get("content", ""))}
+        if op == "read":
+            return {"success": True, "path": input.get("path", ""), "content": "hello harness blackbox", "size": 21}
+        if op == "list":
+            return {"success": True, "path": input.get("path", "."), "content": "blackbox.txt", "size": 1}
+        return {"success": False, "path": input.get("path", ""), "error": "unknown"}
+
+    executor = ToolExecutor(store)
+    registry = ToolRegistry()
+    registry._register(FILE_OP_DEF, file_fn)
+
+    llm = MockLLMClient(
+        responses=[
+            '{"intent":"t","steps":[{"id":"s1","tool":"file_op","input":{"operation":"write","path":"blackbox.txt","content":"hello harness blackbox"}},'
+            '{"id":"s2","tool":"file_op","input":{"operation":"read","path":"blackbox.txt"},"depends_on":["s1"]}],'
+            '"declared_operations":[{"tool":"file_op","input":{"operation":"write","path":"blackbox.txt"}},'
+            '{"tool":"file_op","input":{"operation":"read","path":"blackbox.txt"}}]}',
+            "answer",
+        ]
+    )
+    planner = Planner(llm, registry, store, max_plan_retries=1)
+    dag = DagExecutor(executor, store, registry)
+    sched = PlanningExecutorScheduler(
+        store, executor, planner, dag, [FILE_OP_DEF], {"file_op": file_fn}, config=SchedulerConfig(max_iterations=6)
+    )
+    sched.dag = dag
+    planner.generate_answer = AsyncMock(return_value="answer")
+
+    await sched.run("run-cee7d7f6-ok", "请在 workspace 创建 blackbox.txt 写入 hello 然后读取")
+
+    events = await store.get_events("run-cee7d7f6-ok")
+    assert any(e.event_type == EventType.RUN_COMPLETED for e in events), "write+read 均达成应 RunCompleted"
+    assert not any(e.event_type == EventType.RUN_FAILED for e in events)
 
 
 @pytest.mark.asyncio
@@ -1108,9 +1602,7 @@ async def test_timeout_race_resume_rejected_after_timeout(store: EventStore):
     executor = ToolExecutor(store)
     config = SchedulerConfig(max_iterations=5, pause_timeout_ms=100)
 
-    scheduler = AgentLoopScheduler(
-        store, executor, kernel, [dangerous_def], {"delete_file": delete_fn}, config=config
-    )
+    scheduler = AgentLoopScheduler(store, executor, kernel, [dangerous_def], {"delete_file": delete_fn}, config=config)
 
     task = asyncio.create_task(scheduler.run("run-ct1", "CT-1 test"))
     await asyncio.sleep(0.5)
@@ -1123,20 +1615,20 @@ async def test_timeout_race_resume_rejected_after_timeout(store: EventStore):
     except (asyncio.TimeoutError, asyncio.CancelledError):
         events = await store.get_events("run-ct1")
         from harness.core.fold import fold_events
+
         state = fold_events(events)
 
     assert state.status == RunStatus.FAILED, (
-        f"CT-1: resume() after timeout should not resurrect. "
-        f"Got {state.status}, expected FAILED"
+        f"CT-1: resume() after timeout should not resurrect. Got {state.status}, expected FAILED"
     )
     assert "Confirmation timed out" in (state.last_error or "")
 
     events = await store.get_events("run-ct1")
     run_failed_seqs = [e.seq for e in events if e.event_type == EventType.RUN_FAILED]
     run_resumed_after = [
-        e for e in events
-        if e.event_type == EventType.RUN_RESUMED
-        and (not run_failed_seqs or e.seq > max(run_failed_seqs))
+        e
+        for e in events
+        if e.event_type == EventType.RUN_RESUMED and (not run_failed_seqs or e.seq > max(run_failed_seqs))
     ]
     assert len(run_resumed_after) == 0, (
         f"CT-1: RUN_RESUMED event after RUN_FAILED should not exist. "
@@ -1172,9 +1664,7 @@ async def test_timeout_race_concurrent_resume_and_fail(store: EventStore):
     executor = ToolExecutor(store)
     config = SchedulerConfig(max_iterations=5, pause_timeout_ms=5000)
 
-    scheduler = AgentLoopScheduler(
-        store, executor, kernel, [dangerous_def], {"delete_file": delete_fn}, config=config
-    )
+    scheduler = AgentLoopScheduler(store, executor, kernel, [dangerous_def], {"delete_file": delete_fn}, config=config)
 
     run_id = "run-ct1-concurrent"
     task = asyncio.create_task(scheduler.run(run_id, "CT-1 concurrent test"))
@@ -1199,9 +1689,9 @@ async def test_timeout_race_concurrent_resume_and_fail(store: EventStore):
     events = await store.get_events(run_id)
     run_failed_seqs = [e.seq for e in events if e.event_type == EventType.RUN_FAILED]
     run_resumed_after = [
-        e for e in events
-        if e.event_type == EventType.RUN_RESUMED
-        and (not run_failed_seqs or e.seq > max(run_failed_seqs))
+        e
+        for e in events
+        if e.event_type == EventType.RUN_RESUMED and (not run_failed_seqs or e.seq > max(run_failed_seqs))
     ]
     assert len(run_resumed_after) == 0, (
         f"CT-1 concurrent: RUN_RESUMED after RUN_FAILED should not exist. "
@@ -1302,6 +1792,7 @@ async def test_resume_writes_run_resumed_and_completes_execution(store: EventSto
 @pytest.mark.asyncio
 async def test_user_pause_stops_loop(store: EventStore):
     """scheduler.pause() should actually halt the run loop (not just write an event)."""
+
     async def slow_fn(input):
         await asyncio.sleep(0.08)
         return {"ok": True}
@@ -1510,20 +2001,30 @@ class TestSchedulerWithFullWiring:
             return {"ok": True}
 
         tool_def = ToolDefinition(
-            name="dummy", description="", idempotency_key_fields=[],
-            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(),
+            name="dummy",
+            description="",
+            idempotency_key_fields=[],
+            side_effects=[],
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
         )
-        kernel = MockAgentKernel([
-            ThinkResult(thought="call tool", tool_name="dummy", tool_input={}, token_count=5),
-            ThinkResult(thought="call tool again", tool_name="dummy", tool_input={}, token_count=5),
-            ThinkResult(thought="done"),
-        ])
+        kernel = MockAgentKernel(
+            [
+                ThinkResult(thought="call tool", tool_name="dummy", tool_input={}, token_count=5),
+                ThinkResult(thought="call tool again", tool_name="dummy", tool_input={}, token_count=5),
+                ThinkResult(thought="done"),
+            ]
+        )
         executor = ToolExecutor(store)
         scheduler = AgentLoopScheduler(
-            store=store, executor=executor, kernel=kernel,
-            tool_defs=[tool_def], tool_fns={"dummy": dummy_fn},
+            store=store,
+            executor=executor,
+            kernel=kernel,
+            tool_defs=[tool_def],
+            tool_fns={"dummy": dummy_fn},
             config=SchedulerConfig(max_iterations=5),
-            context_manager=cm, monitor=monitor,
+            context_manager=cm,
+            monitor=monitor,
         )
 
         state = await scheduler.run("run-wired", "test full wiring")
@@ -1540,7 +2041,6 @@ class TestInheritanceFromBaseScheduler:
     """Verify AgentLoopScheduler properly inherits from BaseScheduler."""
 
     def test_is_subclass(self):
-        from harness.core.scheduler import BaseScheduler
         assert issubclass(AgentLoopScheduler, BaseScheduler)
 
     def test_inherited_methods_exist(self):
@@ -1567,7 +2067,8 @@ class TestInheritanceFromBaseScheduler:
         so that both AgentLoopScheduler and PlanningExecutorScheduler share
         the same implementation (which uses 'thought(s)' terminology for both).
         """
-        from harness.core.scheduler import BaseScheduler, PlanningExecutorScheduler
+        from harness.core.scheduler import PlanningExecutorScheduler
+
         assert AgentLoopScheduler._fail is BaseScheduler._fail
         assert PlanningExecutorScheduler._fail is BaseScheduler._fail
         # All three share the same unified implementation
@@ -1594,16 +2095,24 @@ class TestSeparatePauseConfirmEvents:
     @pytest.mark.asyncio
     async def test_cancel_sets_both_events(self, store: EventStore):
         dangerous_def = ToolDefinition(
-            name="delete_file", description="Delete",
-            idempotency_key_fields=["path"], side_effects=[SideEffect.DELETE],
-            requires_confirmation=True, timeout_ms=5000, retry_policy=RetryPolicy(),
+            name="delete_file",
+            description="Delete",
+            idempotency_key_fields=["path"],
+            side_effects=[SideEffect.DELETE],
+            requires_confirmation=True,
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
         )
         kernel = MockAgentKernel(
             [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
         )
         executor = ToolExecutor(store)
         scheduler = AgentLoopScheduler(
-            store, executor, kernel, [dangerous_def], {"delete_file": lambda i: {"deleted": i["path"]}},
+            store,
+            executor,
+            kernel,
+            [dangerous_def],
+            {"delete_file": lambda i: {"deleted": i["path"]}},
             config=SchedulerConfig(pause_timeout_ms=999999),
         )
         run_id = "run-ct2-cancel"
@@ -1632,9 +2141,13 @@ class TestConfirmRetryLimit:
     async def test_confirm_retry_limit_exceeded(self, store: EventStore):
         """After max_confirm_retries, the loop should fail the run."""
         dangerous_def = ToolDefinition(
-            name="delete_file", description="Delete",
-            idempotency_key_fields=["path"], side_effects=[SideEffect.DELETE],
-            requires_confirmation=True, timeout_ms=5000, retry_policy=RetryPolicy(),
+            name="delete_file",
+            description="Delete",
+            idempotency_key_fields=["path"],
+            side_effects=[SideEffect.DELETE],
+            requires_confirmation=True,
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
         )
         kernel = MockAgentKernel(
             [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
@@ -1642,7 +2155,11 @@ class TestConfirmRetryLimit:
         executor = ToolExecutor(store)
         config = SchedulerConfig(max_confirm_retries=2, pause_timeout_ms=999999)
         scheduler = AgentLoopScheduler(
-            store, executor, kernel, [dangerous_def], {"delete_file": lambda i: {"deleted": i["path"]}},
+            store,
+            executor,
+            kernel,
+            [dangerous_def],
+            {"delete_file": lambda i: {"deleted": i["path"]}},
             config=config,
         )
         run_id = "run-ct4"
@@ -1671,16 +2188,24 @@ class TestFailCancelsTask:
     @pytest.mark.asyncio
     async def test_fail_cancels_running_task(self, store: EventStore):
         dangerous_def = ToolDefinition(
-            name="delete_file", description="Delete",
-            idempotency_key_fields=["path"], side_effects=[SideEffect.DELETE],
-            requires_confirmation=True, timeout_ms=5000, retry_policy=RetryPolicy(),
+            name="delete_file",
+            description="Delete",
+            idempotency_key_fields=["path"],
+            side_effects=[SideEffect.DELETE],
+            requires_confirmation=True,
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
         )
         kernel = MockAgentKernel(
             [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
         )
         executor = ToolExecutor(store)
         scheduler = AgentLoopScheduler(
-            store, executor, kernel, [dangerous_def], {"delete_file": lambda i: {"deleted": i["path"]}},
+            store,
+            executor,
+            kernel,
+            [dangerous_def],
+            {"delete_file": lambda i: {"deleted": i["path"]}},
         )
         run_id = "run-ct6"
         task = asyncio.create_task(scheduler.run(run_id, "CT-6 test"))
@@ -1695,7 +2220,7 @@ class TestFailCancelsTask:
 
 class TestSeparateTimeoutConfigs:
     """CT-7/8: confirmation timeout and pause timeout should be independently configurable."""
-    
+
     def test_confirm_timeout_separate_from_pause_timeout(self):
         config = SchedulerConfig(confirm_timeout_ms=5000, pause_timeout_ms=30000)
         assert config.confirm_timeout_ms == 5000
@@ -1708,9 +2233,13 @@ class TestSeparateTimeoutConfigs:
     @pytest.mark.asyncio
     async def test_confirm_timeout_uses_confirm_config(self, store: EventStore):
         dangerous_def = ToolDefinition(
-            name="delete_file", description="Delete",
-            idempotency_key_fields=["path"], side_effects=[SideEffect.DELETE],
-            requires_confirmation=True, timeout_ms=5000, retry_policy=RetryPolicy(),
+            name="delete_file",
+            description="Delete",
+            idempotency_key_fields=["path"],
+            side_effects=[SideEffect.DELETE],
+            requires_confirmation=True,
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
         )
         kernel = MockAgentKernel(
             [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
@@ -1719,7 +2248,11 @@ class TestSeparateTimeoutConfigs:
         # Short confirm timeout, long pause timeout
         config = SchedulerConfig(confirm_timeout_ms=100, pause_timeout_ms=999999)
         scheduler = AgentLoopScheduler(
-            store, executor, kernel, [dangerous_def], {"delete_file": lambda i: {"deleted": i["path"]}},
+            store,
+            executor,
+            kernel,
+            [dangerous_def],
+            {"delete_file": lambda i: {"deleted": i["path"]}},
             config=config,
         )
         run_id = "run-ct7"
@@ -1735,3 +2268,78 @@ class TestSeparateTimeoutConfigs:
             await task
         except (asyncio.CancelledError, Exception):
             pass
+
+    @pytest.mark.asyncio
+    async def test_run_budget_caps_confirmation_wait(self, store: EventStore):
+        """Q-07: Run 全局 deadline 约束确认等待 — 即使 confirm_timeout 更长。
+
+        run_timeout_ms=200 应优先于 confirm_timeout_ms=3000 让 Run 更快失败，
+        验证等待使用 min(confirm_timeout, run_remaining)。
+        """
+        dangerous_def = ToolDefinition(
+            name="delete_file",
+            description="Delete",
+            idempotency_key_fields=["path"],
+            side_effects=[SideEffect.DELETE],
+            requires_confirmation=True,
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
+        )
+        kernel = MockAgentKernel(
+            [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
+        )
+        executor = ToolExecutor(store)
+        config = SchedulerConfig(confirm_timeout_ms=3000, pause_timeout_ms=30000, run_timeout_ms=200)
+        scheduler = AgentLoopScheduler(
+            store,
+            executor,
+            kernel,
+            [dangerous_def],
+            {"delete_file": lambda i: {"deleted": i["path"]}},
+            config=config,
+        )
+        started = time.monotonic()
+        task = asyncio.create_task(scheduler.run("run-budget-confirm", "budget-confirm test"))
+        failed_seen = False
+        for _ in range(40):
+            events = await store.get_events("run-budget-confirm")
+            if any(e.event_type == EventType.RUN_FAILED for e in events):
+                failed_seen = True
+                break
+            await asyncio.sleep(0.05)
+        elapsed = time.monotonic() - started
+        assert failed_seen, "run budget must force RUN_FAILED"
+        assert elapsed < 1.4, f"expected run budget to fail fast, elapsed={elapsed:.2f}s"
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+# ── JAGENT-2026-P1-13 Bug 5: Run 级 watchdog ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_watchdog_times_out_and_writes_run_failed(store: EventStore):
+    """Bug 5 回归：run_timeout_ms 超时后必须写结构化 RunFailed，禁止无限停留。"""
+    from harness.core.scheduler import AgentLoopScheduler
+
+    class _HangingKernel:
+        async def think(self, *args, **kwargs):
+            await asyncio.sleep(30)
+            return [ThinkResult(thought="never", tool_name=None)]
+
+    executor = ToolExecutor(store)
+    kernel = _HangingKernel()
+    config = SchedulerConfig(max_iterations=5, run_timeout_ms=200)
+    scheduler = AgentLoopScheduler(store, executor, kernel, [], {}, config=config)
+
+    state = await scheduler.run("run-watchdog", "hang forever")
+    assert state.status == RunStatus.FAILED
+    assert "timed out" in (state.last_error or "")
+
+    events = await store.get_events("run-watchdog")
+    failed = [e for e in events if e.event_type == EventType.RUN_FAILED]
+    assert failed, "watchdog 必须写 RUN_FAILED"
+    assert "timed out" in (failed[-1].payload.get("final_error") or "")

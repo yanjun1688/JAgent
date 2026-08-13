@@ -2,22 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections import defaultdict
-
-from harness.core.fold import RunStatus, fold_events
-from harness.core.logger import guard_logger
-from harness.models.events import (
-    ConfirmationReceivedPayload,
-    ConfirmationRequestedPayload,
-    Event,
-    EventType,
-    GuardrailTriggeredPayload,
-    ToolCalledPayload,
-    ToolCompletedPayload,
-    ToolFailedPayload,
-    ToolTimeoutPayload,
-)
-from harness.storage.event_store import EventStore
+from typing import Any
 
 from harness.analysis.schemas import (
     DashboardOverview,
@@ -33,6 +18,18 @@ from harness.analysis.schemas import (
     ToolTraceItem,
     ToolTracesResponse,
 )
+from harness.core.fold import RunStatus, fold_events
+from harness.core.logger import guard_logger
+from harness.models.events import (
+    Event,
+    EventType,
+    GuardrailTriggeredPayload,
+    ToolCalledPayload,
+    ToolCompletedPayload,
+    ToolFailedPayload,
+    ToolTimeoutPayload,
+)
+from harness.storage.event_store import EventStore
 
 _log = guard_logger("analysis")
 
@@ -53,22 +50,24 @@ class AnalysisService:
 
     # ── Dashboard ────────────────────────────────────────────────
 
-    async def get_dashboard(
-        self, since: float | None = None, until: float | None = None
-    ) -> DashboardResponse:
+    async def get_dashboard(self, since: float | None = None, until: float | None = None) -> DashboardResponse:
         _t0 = time.monotonic()
         until = until or time.time()
         since = since or 0
 
         # 2 queries instead of 4: type counts + merged (distinct_runs + token_sum)
         type_rows = await self._store.execute_query(
-            "SELECT event_type, COUNT(*) as cnt FROM events WHERE created_at >= ? AND created_at <= ? GROUP BY event_type",
+            "SELECT event_type, COUNT(*) as cnt FROM events WHERE created_at >= ? "
+            "AND created_at <= ? GROUP BY event_type",
             (since, until),
         )
         type_counts: dict[str, int] = {r["event_type"]: r["cnt"] for r in type_rows}
 
         agg = await self._store.execute_query_one(
-            "SELECT COUNT(DISTINCT run_id) as run_count, COALESCE(SUM(CASE WHEN event_type = ? THEN json_extract(payload, '$.token_count') ELSE 0 END), 0) as token_sum FROM events WHERE created_at >= ? AND created_at <= ?",
+            "SELECT COUNT(DISTINCT run_id) as run_count, "
+            "COALESCE(SUM(CASE WHEN event_type = ? THEN "
+            "json_extract(payload, '$.token_count') ELSE 0 END), 0) as token_sum "
+            "FROM events WHERE created_at >= ? AND created_at <= ?",
             (EventType.AGENT_THOUGHT.value, since, until),
         )
         total_runs = agg["run_count"] if agg else 0
@@ -76,9 +75,8 @@ class AnalysisService:
 
         total_events = sum(type_counts.values())
         total_tool_calls = type_counts.get(EventType.TOOL_CALLED.value, 0)
-        total_failures = (
-            type_counts.get(EventType.TOOL_FAILED.value, 0)
-            + type_counts.get(EventType.TOOL_TIMEOUT.value, 0)
+        total_failures = type_counts.get(EventType.TOOL_FAILED.value, 0) + type_counts.get(
+            EventType.TOOL_TIMEOUT.value, 0
         )
         total_guardrails = type_counts.get(EventType.GUARDRAIL_TRIGGERED.value, 0)
         completed = type_counts.get(EventType.RUN_COMPLETED.value, 0)
@@ -87,13 +85,24 @@ class AnalysisService:
         paused = type_counts.get(EventType.RUN_PAUSED.value, 0)
 
         total_tool_results = type_counts.get(EventType.TOOL_COMPLETED.value, 0) + total_failures
-        avg_rate = round(
-            type_counts.get(EventType.TOOL_COMPLETED.value, 0) / total_tool_results, 2
-        ) if total_tool_results > 0 else 0.0
+        avg_rate = (
+            round(type_counts.get(EventType.TOOL_COMPLETED.value, 0) / total_tool_results, 2)
+            if total_tool_results > 0
+            else 0.0
+        )
 
-        _log.info("dashboard since=%.0f until=%.0f runs=%d events=%d tools=%d failures=%d guardrails=%d tokens=%d (%.0fms)",
-                  since, until, total_runs, total_events, total_tool_calls, total_failures,
-                  total_guardrails, total_tokens, (time.monotonic() - _t0) * 1000)
+        _log.info(
+            "dashboard since=%.0f until=%.0f runs=%d events=%d tools=%d failures=%d guardrails=%d tokens=%d (%.0fms)",
+            since,
+            until,
+            total_runs,
+            total_events,
+            total_tool_calls,
+            total_failures,
+            total_guardrails,
+            total_tokens,
+            (time.monotonic() - _t0) * 1000,
+        )
 
         return DashboardResponse(
             overview=DashboardOverview(
@@ -113,9 +122,7 @@ class AnalysisService:
 
     # ── Tool Stats ───────────────────────────────────────────────
 
-    async def get_tool_stats(
-        self, since: float | None = None, until: float | None = None
-    ) -> ToolStatsResponse:
+    async def get_tool_stats(self, since: float | None = None, until: float | None = None) -> ToolStatsResponse:
         _t0 = time.monotonic()
         until = until or time.time()
         since = since or 0
@@ -127,7 +134,15 @@ class AnalysisService:
         for e in events:
             tn = e.payload.get("tool_name", "?")
             if tn not in stats:
-                stats[tn] = {"call_count": 0, "success_count": 0, "failure_count": 0, "timeout_count": 0, "guardrail_count": 0, "total_duration": 0, "result_count": 0}
+                stats[tn] = {
+                    "call_count": 0,
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "timeout_count": 0,
+                    "guardrail_count": 0,
+                    "total_duration": 0,
+                    "result_count": 0,
+                }
 
             if e.event_type == EventType.TOOL_CALLED:
                 stats[tn]["call_count"] += 1
@@ -146,18 +161,27 @@ class AnalysisService:
 
         items = []
         for name, s in sorted(stats.items(), key=lambda x: -x[1]["call_count"]):
-            items.append(ToolStatItem(
-                tool_name=name,
-                call_count=s["call_count"],
-                success_count=s["success_count"],
-                failure_count=s["failure_count"],
-                timeout_count=s["timeout_count"],
-                guardrail_blocked_count=s["guardrail_count"],
-                avg_duration_ms=round(s["total_duration"] / s["success_count"], 1) if s["success_count"] > 0 else 0.0,
-            ))
+            items.append(
+                ToolStatItem(
+                    tool_name=name,
+                    call_count=s["call_count"],
+                    success_count=s["success_count"],
+                    failure_count=s["failure_count"],
+                    timeout_count=s["timeout_count"],
+                    guardrail_blocked_count=s["guardrail_count"],
+                    avg_duration_ms=round(s["total_duration"] / s["success_count"], 1)
+                    if s["success_count"] > 0
+                    else 0.0,
+                )
+            )
 
-        _log.info("tool_stats since=%.0f until=%.0f tools=%d (%.0fms)",
-                  since, until, len(items), (time.monotonic() - _t0) * 1000)
+        _log.info(
+            "tool_stats since=%.0f until=%.0f tools=%d (%.0fms)",
+            since,
+            until,
+            len(items),
+            (time.monotonic() - _t0) * 1000,
+        )
         return ToolStatsResponse(tools=items)
 
     # ── Guardrail Stats ──────────────────────────────────────────
@@ -191,8 +215,13 @@ class AnalysisService:
             for gid, s in sorted(stats.items(), key=lambda x: -x[1]["count"])
         ]
 
-        _log.info("guardrail_stats since=%.0f until=%.0f guardrails=%d (%.0fms)",
-                  since, until, len(items), (time.monotonic() - _t0) * 1000)
+        _log.info(
+            "guardrail_stats since=%.0f until=%.0f guardrails=%d (%.0fms)",
+            since,
+            until,
+            len(items),
+            (time.monotonic() - _t0) * 1000,
+        )
         return GuardrailStatsResponse(guardrails=items)
 
     # ── Run Analysis ─────────────────────────────────────────────
@@ -206,13 +235,9 @@ class AnalysisService:
 
         state = fold_events(events)
 
-        total_tokens = sum(
-            e.payload.get("token_count", 0)
-            for e in events if e.event_type == EventType.AGENT_THOUGHT
-        )
+        total_tokens = sum(e.payload.get("token_count", 0) for e in events if e.event_type == EventType.AGENT_THOUGHT)
         total_duration = sum(
-            e.payload.get("duration_ms", 0)
-            for e in events if e.event_type == EventType.TOOL_COMPLETED
+            e.payload.get("duration_ms", 0) for e in events if e.event_type == EventType.TOOL_COMPLETED
         )
 
         tool_call_count = sum(1 for e in events if e.event_type == EventType.TOOL_CALLED)
@@ -227,9 +252,14 @@ class AnalysisService:
                     completed_at = e.created_at
                     break
 
-        _log.info("run_analysis run=%s status=%s events=%d tokens=%d (%.0fms)",
-                  run_id, state.status.value, len(events), total_tokens,
-                  (time.monotonic() - _t0) * 1000)
+        _log.info(
+            "run_analysis run=%s status=%s events=%d tokens=%d (%.0fms)",
+            run_id,
+            state.status.value,
+            len(events),
+            total_tokens,
+            (time.monotonic() - _t0) * 1000,
+        )
 
         return RunAnalysisSummary(
             run_id=run_id,
@@ -245,9 +275,7 @@ class AnalysisService:
             feedback_count=feedback_count,
         )
 
-    async def get_run_timeline(
-        self, run_id: str, limit: int = 50, cursor: int = 0
-    ) -> TimelineResponse:
+    async def get_run_timeline(self, run_id: str, limit: int = 50, cursor: int = 0) -> TimelineResponse:
         _t0 = time.monotonic()
         all_events = await self._store.get_events(run_id)
         if not all_events:
@@ -264,9 +292,16 @@ class AnalysisService:
         next_cursor = end if end < total else 0
         has_more = end < total
 
-        _log.info("timeline run=%s cursor=%d limit=%d returned=%d total=%d has_more=%s (%.0fms)",
-                  run_id, cursor, limit, len(items), total, has_more,
-                  (time.monotonic() - _t0) * 1000)
+        _log.info(
+            "timeline run=%s cursor=%d limit=%d returned=%d total=%d has_more=%s (%.0fms)",
+            run_id,
+            cursor,
+            limit,
+            len(items),
+            total,
+            has_more,
+            (time.monotonic() - _t0) * 1000,
+        )
 
         return TimelineResponse(timeline=items, next_cursor=next_cursor, has_more=has_more)
 
@@ -276,6 +311,7 @@ class AnalysisService:
 
         calls: dict[str, dict] = {}
         guardrails: dict[str, dict] = {}
+        p: Any = None
 
         for e in events:
             if e.event_type == EventType.TOOL_CALLED:
@@ -302,7 +338,12 @@ class AnalysisService:
                     entry.update(status="failed", completed_seq=e.seq, error=p.error)
                 elif e.event_type == EventType.TOOL_TIMEOUT:
                     p = ToolTimeoutPayload(**e.payload)
-                    entry.update(status="timeout", completed_seq=e.seq, error=f"Timeout after {p.timeout_ms}ms", duration_ms=p.timeout_ms)
+                    entry.update(
+                        status="timeout",
+                        completed_seq=e.seq,
+                        error=f"Timeout after {p.timeout_ms}ms",
+                        duration_ms=p.timeout_ms,
+                    )
 
             elif e.event_type == EventType.GUARDRAIL_TRIGGERED:
                 p = GuardrailTriggeredPayload(**e.payload)
@@ -325,48 +366,50 @@ class AnalysisService:
             if g and status in ("failed", "timeout"):
                 retryable.requires_input_modification = True
 
-            traces.append(ToolTraceItem(
-                tool_call_id=tid,
-                tool_name=c.get("tool_name", "?"),
-                called_seq=c.get("called_seq"),
-                input=c.get("input"),
-                idempotency_key=c.get("idempotency_key"),
-                status=status,
-                completed_seq=c.get("completed_seq"),
-                output=c.get("output"),
-                error=c.get("error"),
-                duration_ms=c.get("duration_ms", 0),
-                guardrail_id=g.get("guardrail_id"),
-                guardrail_reason=g.get("guardrail_reason"),
-                retryable=retryable,
-            ))
+            traces.append(
+                ToolTraceItem(
+                    tool_call_id=tid,
+                    tool_name=c.get("tool_name", "?"),
+                    called_seq=c.get("called_seq"),
+                    input=c.get("input"),
+                    idempotency_key=c.get("idempotency_key"),
+                    status=status,
+                    completed_seq=c.get("completed_seq"),
+                    output=c.get("output"),
+                    error=c.get("error"),
+                    duration_ms=c.get("duration_ms", 0),
+                    guardrail_id=g.get("guardrail_id"),
+                    guardrail_reason=g.get("guardrail_reason"),
+                    retryable=retryable,
+                )
+            )
 
         # Guardrail-only entries: blocked before TOOL_CALLED was ever written
         for gid, g in guardrails.items():
             if gid not in calls:
-                traces.append(ToolTraceItem(
-                    tool_call_id=gid,
-                    tool_name=g.get("tool_name", "?"),
-                    called_seq=g.get("called_seq"),
-                    status="guardrail_blocked",
-                    guardrail_id=g.get("guardrail_id"),
-                    guardrail_reason=g.get("guardrail_reason"),
-                    retryable=self._build_retryable("guardrail_blocked"),
-                ))
+                traces.append(
+                    ToolTraceItem(
+                        tool_call_id=gid,
+                        tool_name=g.get("tool_name", "?"),
+                        called_seq=g.get("called_seq"),
+                        status="guardrail_blocked",
+                        guardrail_id=g.get("guardrail_id"),
+                        guardrail_reason=g.get("guardrail_reason"),
+                        retryable=self._build_retryable("guardrail_blocked"),
+                    )
+                )
 
-        _log.info("tool_traces run=%s traces=%d (%.0fms)",
-                  run_id, len(traces), (time.monotonic() - _t0) * 1000)
+        _log.info("tool_traces run=%s traces=%d (%.0fms)", run_id, len(traces), (time.monotonic() - _t0) * 1000)
         return ToolTracesResponse(tool_traces=traces)
 
     # ── Internal helpers ─────────────────────────────────────────
 
-    async def _fetch_events_by_types(
-        self, types: set[EventType], since: float, until: float
-    ) -> list[dict]:
+    async def _fetch_events_by_types(self, types: set[EventType], since: float, until: float) -> list[dict]:
         type_names = [t.value for t in types]
         placeholders = ",".join("?" * len(type_names))
         return await self._store.execute_query(
-            f"SELECT * FROM events WHERE event_type IN ({placeholders}) AND created_at >= ? AND created_at <= ? ORDER BY run_id, seq",
+            f"SELECT * FROM events WHERE event_type IN ({placeholders}) "
+            "AND created_at >= ? AND created_at <= ? ORDER BY run_id, seq",
             (*type_names, since, until),
         )
 
@@ -454,9 +497,10 @@ class AnalysisService:
             et = EventType(row["event_type"])
         except ValueError:
             _log.warning(
-                "Skipping analysis row with unknown event_type=%r "
-                "(run=%s seq=%s) — likely legacy event",
-                row["event_type"], row.get("run_id"), row.get("seq"),
+                "Skipping analysis row with unknown event_type=%r (run=%s seq=%s) — likely legacy event",
+                row["event_type"],
+                row.get("run_id"),
+                row.get("seq"),
             )
             return None
         return Event(

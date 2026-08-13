@@ -8,25 +8,28 @@
    5. Serial Step Execution → 单步 plan + 每步 revise
 
 Usage:
-  cd D:\Project\JAgent
-  .venv\Scripts\Activate.ps1
+  cd D:\\Project\\JAgent
+  .venv\\Scripts\\Activate.ps1
   python scripts\test_v07_integration.py
 """
+
+# Imports follow the local source-path bootstrap below.
+# ruff: noqa: E402
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import os
 import sys
-import time
 import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)-5s] %(name)s: %(message)s", datefmt="%H:%M:%S")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)-5s] %(name)s: %(message)s", datefmt="%H:%M:%S"
+)
 logging.getLogger("harness.agent").setLevel(logging.WARNING)
 logging.getLogger("harness.guard").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -65,21 +68,21 @@ async def api_get_events(run_id: str) -> list[dict] | None:
 
 # ── V0.7 直接测试 (不依赖后端HTTP) ───────────────────────
 
-from harness.core.scheduler import (
-    PlanningExecutorScheduler, SchedulerConfig, AgentKernel, ThinkResult,
-)
-from harness.core.planner import Planner, PlanGuardrail
-from harness.core.dag_executor import DagExecutor
-from harness.core.fold import fold_events, RunState, RunStatus
-from harness.core.llm_client import MockLLMClient
 from harness.core.context_manager import ContextManager
+from harness.core.dag_executor import DagExecutor
+from harness.core.fold import RunStatus
+from harness.core.llm_client import MockLLMClient
+from harness.core.planner import PlanGuardrail, Planner
+from harness.core.scheduler import (
+    PlanningExecutorScheduler,
+    SchedulerConfig,
+)
 from harness.models.events import EventType
 from harness.models.plan import DagPlan, DagStep
-from harness.models.tools import ToolDefinition, SideEffect, RetryPolicy
+from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ToolExecutor
 from harness.tools.registry import ToolRegistry
-
 
 # ── Tool Definitions ─────────────────────────────────────
 
@@ -90,8 +93,10 @@ ECHO_DEF = ToolDefinition(
     output_schema={"type": "object"},
     idempotency_key_fields=["msg"],
     side_effects=[SideEffect.WRITE],
-    timeout_ms=5000, retry_policy=RetryPolicy(),
-    dangerous_with=[], max_parallel=3,
+    timeout_ms=5000,
+    retry_policy=RetryPolicy(),
+    dangerous_with=[],
+    max_parallel=3,
 )
 
 SEARCH_DEF = ToolDefinition(
@@ -101,8 +106,10 @@ SEARCH_DEF = ToolDefinition(
     output_schema={"type": "object"},
     idempotency_key_fields=["q"],
     side_effects=[SideEffect.WRITE],
-    timeout_ms=5000, retry_policy=RetryPolicy(),
-    dangerous_with=[], max_parallel=5,
+    timeout_ms=5000,
+    retry_policy=RetryPolicy(),
+    dangerous_with=[],
+    max_parallel=5,
 )
 
 DELETE_DEF = ToolDefinition(
@@ -112,8 +119,10 @@ DELETE_DEF = ToolDefinition(
     output_schema={"type": "object"},
     idempotency_key_fields=["path"],
     side_effects=[SideEffect.DELETE],
-    timeout_ms=5000, retry_policy=RetryPolicy(),
-    dangerous_with=["delete_all"], max_parallel=1,
+    timeout_ms=5000,
+    retry_policy=RetryPolicy(),
+    dangerous_with=["delete_all"],
+    max_parallel=1,
 )
 
 DELETE_ALL_DEF = ToolDefinition(
@@ -123,8 +132,10 @@ DELETE_ALL_DEF = ToolDefinition(
     output_schema={"type": "object"},
     idempotency_key_fields=["confirm"],
     side_effects=[SideEffect.DELETE],
-    timeout_ms=5000, retry_policy=RetryPolicy(),
-    dangerous_with=["delete_file"], max_parallel=1,
+    timeout_ms=5000,
+    retry_policy=RetryPolicy(),
+    dangerous_with=["delete_file"],
+    max_parallel=1,
 )
 
 ALL_DEFS = [ECHO_DEF, SEARCH_DEF, DELETE_DEF, DELETE_ALL_DEF]
@@ -146,10 +157,10 @@ def _init_registry(defs: list[ToolDefinition] | None = None) -> ToolRegistry:
 def _dump_events(label: str, events: list) -> None:
     print(f"\n  ── {label} ({len(events)} events) ──")
     for e in events:
-        et = e.event_type.value if hasattr(e, 'event_type') else e.get("event_type", "?")
-        seq = e.seq if hasattr(e, 'seq') else e.get("seq", "?")
-        ik = f" ik={e.idempotency_key[:16]}..." if hasattr(e, 'idempotency_key') and e.idempotency_key else ""
-        p = e.payload if hasattr(e, 'payload') else e.get("payload", {})
+        et = e.event_type.value if hasattr(e, "event_type") else e.get("event_type", "?")
+        seq = e.seq if hasattr(e, "seq") else e.get("seq", "?")
+        ik = f" ik={e.idempotency_key[:16]}..." if hasattr(e, "idempotency_key") and e.idempotency_key else ""
+        p = e.payload if hasattr(e, "payload") else e.get("payload", {})
         if isinstance(p, dict):
             short = json.dumps(p, ensure_ascii=False, default=str)[:80]
         else:
@@ -160,6 +171,7 @@ def _dump_events(label: str, events: list) -> None:
 # ═══════════════════════════════════════════════════════════
 # Test 1: HTTP API 冒烟
 # ═══════════════════════════════════════════════════════════
+
 
 async def test_http_smoke() -> dict:
     _log.info("=" * 56)
@@ -201,6 +213,7 @@ async def test_http_smoke() -> dict:
 # ═══════════════════════════════════════════════════════════
 # Test 2: PlanGuardrail — dangerous_with 拦截
 # ═══════════════════════════════════════════════════════════
+
 
 async def test_guardrail_dangerous_combination() -> dict:
     _log.info("=" * 56)
@@ -247,6 +260,7 @@ async def test_guardrail_dangerous_combination() -> dict:
 # Test 3: PlanGuardrail — max_parallel 拦截
 # ═══════════════════════════════════════════════════════════
 
+
 async def test_guardrail_max_parallel() -> dict:
     _log.info("=" * 56)
     _log.info("Test 3: PlanGuardrail — max_parallel")
@@ -278,7 +292,8 @@ async def test_guardrail_max_parallel() -> dict:
         output_schema={"type": "object"},
         idempotency_key_fields=["x"],
         side_effects=[SideEffect.WRITE],
-        timeout_ms=5000, retry_policy=RetryPolicy(),
+        timeout_ms=5000,
+        retry_policy=RetryPolicy(),
         max_parallel=1,
     )
     reg2 = _init_registry([one_at_a_time_def, SEARCH_DEF])
@@ -307,6 +322,7 @@ async def test_guardrail_max_parallel() -> dict:
 # ═══════════════════════════════════════════════════════════
 # Test 4: DAG — 拓扑排序 + 并行执行
 # ═══════════════════════════════════════════════════════════
+
 
 async def test_dag_execution() -> dict:
     _log.info("=" * 56)
@@ -362,6 +378,7 @@ async def test_dag_execution() -> dict:
 # Test 5: DagExecutor — 上游选择器 + 截断
 # ═══════════════════════════════════════════════════════════
 
+
 async def test_upstream_selectors() -> dict:
     _log.info("=" * 56)
     _log.info("Test 5: Upstream Selectors + Output Truncation")
@@ -377,8 +394,9 @@ async def test_upstream_selectors() -> dict:
         intent="Selector test",
         steps=[
             DagStep(id="s1", tool="echo", input={"msg": "hello world"}),
-            DagStep(id="s2", tool="echo", input={"msg": "hello2"}, depends_on=["s1"],
-                    upstream_selectors={"s1": "echo.msg"}),
+            DagStep(
+                id="s2", tool="echo", input={"msg": "hello2"}, depends_on=["s1"], upstream_selectors={"s1": "echo.msg"}
+            ),
         ],
     )
 
@@ -388,7 +406,7 @@ async def test_upstream_selectors() -> dict:
     _dump_events("Selector Test Events", events)
 
     s2_result = results.get("s2", {})
-    s2_input = s2_result.get("output", {})
+    s2_result.get("output", {})
     # s2's merged input should include s1_result from selector resolving: echo.msg -> "hello world"
     has_upstream = s2_result.get("status") == "completed"
 
@@ -413,6 +431,7 @@ async def test_upstream_selectors() -> dict:
 # Test 6: DAG — Step 错误处理
 # ═══════════════════════════════════════════════════════════
 
+
 async def test_dag_step_error() -> dict:
     _log.info("=" * 56)
     _log.info("Test 6: DAG Step Error Handling")
@@ -425,8 +444,10 @@ async def test_dag_step_error() -> dict:
         output_schema={"type": "object"},
         idempotency_key_fields=["x"],
         side_effects=[SideEffect.WRITE],
-        timeout_ms=5000, retry_policy=RetryPolicy(),
+        timeout_ms=5000,
+        retry_policy=RetryPolicy(),
     )
+
     async def fail_fn(input_: dict) -> dict:
         raise RuntimeError(f"Intentional failure: {input_}")
 
@@ -452,7 +473,7 @@ async def test_dag_step_error() -> dict:
     _dump_events("Error Test Events", events)
 
     s1_failed = results.get("s1", {}).get("status") == "error"
-    s2_not_executed = "s2" not in results or results["s2"].get("status") != "completed"
+    "s2" not in results or results["s2"].get("status") != "completed"
     has_plan_failed = any(e.event_type == EventType.PLAN_FAILED for e in events)
     has_step_failed = any(e.event_type == EventType.DAG_STEP_FAILED for e in events)
 
@@ -465,13 +486,14 @@ async def test_dag_step_error() -> dict:
     return {
         "name": "DAG Step Error",
         "passed": passed,
-        "detail": f"s1={results.get('s1',{}).get('status')}, PlanFailed={has_plan_failed}",
+        "detail": f"s1={results.get('s1', {}).get('status')}, PlanFailed={has_plan_failed}",
     }
 
 
 # ═══════════════════════════════════════════════════════════
 # Test 7: Planner (Mock) + DagExecutor — 完整循环
 # ═══════════════════════════════════════════════════════════
+
 
 async def test_planner_executor_cycle() -> dict:
     """全流程：Planner.plan() → DagExecutor.execute() → Planner.revise() → done"""
@@ -487,22 +509,29 @@ async def test_planner_executor_cycle() -> dict:
     dag = DagExecutor(executor, store, reg)
 
     # Use MockLLMClient that returns a valid JSON plan
-    mock_llm = MockLLMClient(responses=[
-        json.dumps({
-            "steps": [
-                {"id": "s1", "tool": "search", "input": {"q": "weather"}},
-                {"id": "s2", "tool": "search", "input": {"q": "news"}},
-            ]
-        }),
-        # Revise response: task complete
-        json.dumps({"steps": []}),
-    ])
+    mock_llm = MockLLMClient(
+        responses=[
+            json.dumps(
+                {
+                    "steps": [
+                        {"id": "s1", "tool": "search", "input": {"q": "weather"}},
+                        {"id": "s2", "tool": "search", "input": {"q": "news"}},
+                    ]
+                }
+            ),
+            # Revise response: task complete
+            json.dumps({"steps": []}),
+        ]
+    )
     planner = Planner(mock_llm, reg, store, max_plan_retries=1)
 
     p_sched = PlanningExecutorScheduler(
-        store=store, executor=executor, planner=planner,
+        store=store,
+        executor=executor,
+        planner=planner,
         dag_executor=dag,
-        tool_defs=ALL_DEFS, tool_fns=ALL_FNS,
+        tool_defs=ALL_DEFS,
+        tool_fns=ALL_FNS,
         config=SchedulerConfig(max_iterations=5),
         context_manager=cm,
     )
@@ -519,8 +548,14 @@ async def test_planner_executor_cycle() -> dict:
     has_step_completed = any(e.event_type == EventType.DAG_STEP_COMPLETED for e in events)
     is_completed = state.status == RunStatus.COMPLETED
 
-    passed = (has_plan_created and has_plan_completed and has_agent_thought
-              and has_step_started and has_step_completed and is_completed)
+    passed = (
+        has_plan_created
+        and has_plan_completed
+        and has_agent_thought
+        and has_step_started
+        and has_step_completed
+        and is_completed
+    )
     _log.info("  PlanCreated: %s, PlanCompleted: %s", has_plan_created, has_plan_completed)
     _log.info("  AgentThought: %s, DagSteps: %s/%s", has_agent_thought, has_step_started, has_step_completed)
     _log.info("  Status: %s", state.status.value)
@@ -538,6 +573,7 @@ async def test_planner_executor_cycle() -> dict:
 # Test 8: Serial Step Execution — per-step revise
 # ═══════════════════════════════════════════════════════════
 
+
 async def test_serial_step_execution() -> dict:
     """single-step plan → execute → revise → empty plan → complete"""
     _log.info("=" * 56)
@@ -551,20 +587,27 @@ async def test_serial_step_execution() -> dict:
     cm = ContextManager(store, token_limit=5000, checkpoint_interval=20)
     dag = DagExecutor(executor, store, reg)
 
-    mock_llm = MockLLMClient(responses=[
-        json.dumps({
-            "steps": [
-                {"id": "s1", "tool": "echo", "input": {"msg": "step1"}},
-            ],
-        }),
-        json.dumps({"steps": []}),
-    ])
+    mock_llm = MockLLMClient(
+        responses=[
+            json.dumps(
+                {
+                    "steps": [
+                        {"id": "s1", "tool": "echo", "input": {"msg": "step1"}},
+                    ],
+                }
+            ),
+            json.dumps({"steps": []}),
+        ]
+    )
     planner = Planner(mock_llm, reg, store, max_plan_retries=1)
 
     p_sched = PlanningExecutorScheduler(
-        store=store, executor=executor, planner=planner,
+        store=store,
+        executor=executor,
+        planner=planner,
         dag_executor=dag,
-        tool_defs=ALL_DEFS, tool_fns=ALL_FNS,
+        tool_defs=ALL_DEFS,
+        tool_fns=ALL_FNS,
         config=SchedulerConfig(max_iterations=5),
         context_manager=cm,
     )
@@ -580,6 +623,7 @@ async def test_serial_step_execution() -> dict:
 
     # Plan executes 1 step, then revise returns empty → task completes
     _log.info("  Steps completed: %d, PlanRevised: %d", len(step_completed), len(plan_revised))
+    plan_created_count = sum(1 for event in events if event.event_type == EventType.PLAN_CREATED)
     _log.info("  PlanCreated count: %d", plan_created_count)
     _log.info("  Status: %s", state.status.value)
 
@@ -598,6 +642,7 @@ async def test_serial_step_execution() -> dict:
 # Test 9: Fallback — Planner 失败降级
 # ═══════════════════════════════════════════════════════════
 
+
 async def test_planner_fallback() -> dict:
     """Planner 全重试失败 → 降级到 AgentLoopScheduler 串行路径"""
     _log.info("=" * 56)
@@ -612,16 +657,21 @@ async def test_planner_fallback() -> dict:
     dag = DagExecutor(executor, store, reg)
 
     # MockLLMClient always returns invalid JSON → Planner will fail all retries
-    mock_llm = MockLLMClient(responses=[
-        "{invalid json",
-        "{also invalid",
-    ])
+    mock_llm = MockLLMClient(
+        responses=[
+            "{invalid json",
+            "{also invalid",
+        ]
+    )
     planner = Planner(mock_llm, reg, store, max_plan_retries=1)
 
     p_sched = PlanningExecutorScheduler(
-        store=store, executor=executor, planner=planner,
+        store=store,
+        executor=executor,
+        planner=planner,
         dag_executor=dag,
-        tool_defs=ALL_DEFS, tool_fns=ALL_FNS,
+        tool_defs=ALL_DEFS,
+        tool_fns=ALL_FNS,
         config=SchedulerConfig(max_iterations=2),
         context_manager=cm,
     )
@@ -654,6 +704,7 @@ async def test_planner_fallback() -> dict:
 # ═══════════════════════════════════════════════════════════
 # Test 10: 系统状态注入标记
 # ═══════════════════════════════════════════════════════════
+
 
 async def test_system_state_injection() -> dict:
     _log.info("=" * 56)
@@ -699,6 +750,7 @@ async def test_system_state_injection() -> dict:
 # Test 11: 拓扑排序有环检测
 # ═══════════════════════════════════════════════════════════
 
+
 async def test_topological_cycle() -> dict:
     _log.info("=" * 56)
     _log.info("Test 11: Topological Sort — Cycle Detection")
@@ -729,12 +781,17 @@ async def test_topological_cycle() -> dict:
 
     passed = caught and guardrail_caught
     _log.info("  %s", "✅ PASSED" if passed else "❌ FAILED")
-    return {"name": "Cycle Detection", "passed": passed, "detail": f"topological={caught}, guardrail={guardrail_caught}"}
+    return {
+        "name": "Cycle Detection",
+        "passed": passed,
+        "detail": f"topological={caught}, guardrail={guardrail_caught}",
+    }
 
 
 # ═══════════════════════════════════════════════════════════
 # Test 12: Revise 续传 — revise 返回非空 plan
 # ═══════════════════════════════════════════════════════════
+
 
 async def test_revise_continuation() -> dict:
     """plan→execute→revise(return more steps)→execute→revise(done)"""
@@ -749,23 +806,32 @@ async def test_revise_continuation() -> dict:
     cm = ContextManager(store, token_limit=5000, checkpoint_interval=20)
     dag = DagExecutor(executor, store, reg)
 
-    mock_llm = MockLLMClient(responses=[
-        # 1. Initial plan: multiple steps (the plan() is always called on each while iteration,
-        #    not revise(). After DAG execution + revise returns continuation, plan() is called
-        #    again fresh. So we put all steps in the initial plan.)
-        json.dumps({"steps": [
-            {"id": "s1", "tool": "echo", "input": {"msg": "first"}},
-            {"id": "s2", "tool": "echo", "input": {"msg": "second"}},
-        ]}),
-        # 2. Revise after s1+s2: done
-        json.dumps({"steps": []}),
-    ])
+    mock_llm = MockLLMClient(
+        responses=[
+            # 1. Initial plan: multiple steps (the plan() is always called on each while iteration,
+            #    not revise(). After DAG execution + revise returns continuation, plan() is called
+            #    again fresh. So we put all steps in the initial plan.)
+            json.dumps(
+                {
+                    "steps": [
+                        {"id": "s1", "tool": "echo", "input": {"msg": "first"}},
+                        {"id": "s2", "tool": "echo", "input": {"msg": "second"}},
+                    ]
+                }
+            ),
+            # 2. Revise after s1+s2: done
+            json.dumps({"steps": []}),
+        ]
+    )
     planner = Planner(mock_llm, reg, store, max_plan_retries=1)
 
     p_sched = PlanningExecutorScheduler(
-        store=store, executor=executor, planner=planner,
+        store=store,
+        executor=executor,
+        planner=planner,
         dag_executor=dag,
-        tool_defs=ALL_DEFS, tool_fns=ALL_FNS,
+        tool_defs=ALL_DEFS,
+        tool_fns=ALL_FNS,
         config=SchedulerConfig(max_iterations=5),
         context_manager=cm,
     )
@@ -783,8 +849,12 @@ async def test_revise_continuation() -> dict:
     # Architecture note: plan() is called on every while iteration (not revise()).
     # Revise is called after DAG execution to decide if done. All steps are in one plan.
     passed = len(plan_completed) >= 1 and len(plan_revised) >= 1 and len(steps_completed) >= 1 and is_completed
-    _log.info("  Plans completed: %d, Revised: %d, Steps completed: %d",
-              len(plan_completed), len(plan_revised), len(steps_completed))
+    _log.info(
+        "  Plans completed: %d, Revised: %d, Steps completed: %d",
+        len(plan_completed),
+        len(plan_revised),
+        len(steps_completed),
+    )
     _log.info("  Status: %s", state.status.value)
     _log.info("  %s", "✅ PASSED" if passed else "❌ FAILED")
 
@@ -792,13 +862,17 @@ async def test_revise_continuation() -> dict:
     return {
         "name": "Revise Continuation",
         "passed": passed,
-        "detail": f"completed={len(plan_completed)}, revised={len(plan_revised)}, steps={len(steps_completed)}, status={state.status.value}",
+        "detail": (
+            f"completed={len(plan_completed)}, revised={len(plan_revised)}, "
+            f"steps={len(steps_completed)}, status={state.status.value}"
+        ),
     }
 
 
 # ═══════════════════════════════════════════════════════════
 # Test 13: upstream_selectors 路径解析到 None
 # ═══════════════════════════════════════════════════════════
+
 
 async def test_upstream_selector_none_path() -> dict:
     _log.info("=" * 56)
@@ -815,8 +889,13 @@ async def test_upstream_selector_none_path() -> dict:
         intent="None path test",
         steps=[
             DagStep(id="s1", tool="echo", input={"msg": "hello"}),
-            DagStep(id="s2", tool="echo", input={"msg": "world"}, depends_on=["s1"],
-                    upstream_selectors={"s1": "nonexistent.deep.path"}),
+            DagStep(
+                id="s2",
+                tool="echo",
+                input={"msg": "world"},
+                depends_on=["s1"],
+                upstream_selectors={"s1": "nonexistent.deep.path"},
+            ),
         ],
     )
     results = await dag.execute("none-path", plan)
@@ -835,6 +914,7 @@ async def test_upstream_selector_none_path() -> dict:
 # ═══════════════════════════════════════════════════════════
 # Test 14: DAG Unknown dependency — PlanGuardrail 拦截
 # ═══════════════════════════════════════════════════════════
+
 
 async def test_unknown_dependency() -> dict:
     _log.info("=" * 56)
@@ -860,6 +940,7 @@ async def test_unknown_dependency() -> dict:
 # ═══════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════
+
 
 async def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")

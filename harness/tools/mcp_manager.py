@@ -99,17 +99,21 @@ class MCPServerManager:
             self._sessions[cfg.name] = mcp_sess
 
             tools_result = await mcp_sess.session.list_tools()
-            tools_info = [{
-                "name": t.name,
-                "description": t.description,
-                "inputSchema": getattr(t, "inputSchema", None),
-            } for t in tools_result.tools]
+            tools_info = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "inputSchema": getattr(t, "inputSchema", None),
+                }
+                for t in tools_result.tools
+            ]
 
             mcp_sess.tool_names = [t.name for t in tools_result.tools]
 
             _logger.debug(
                 "Connected MCP server '%s': %d tools",
-                cfg.name, len(tools_info),
+                cfg.name,
+                len(tools_info),
             )
 
             if cfg.auto_register_tools and self.registry is not None:
@@ -219,21 +223,19 @@ class MCPServerManager:
             raise
 
     def _register_tools(self, server_name: str, tools: list[Any]) -> None:
-        from harness.models.tools import Guardrail, SideEffect, ToolDefinition
+        # ADR-010 D-05: 动态工具构造 BaseTool 实例走 register_tool（invoker 永不 None）。
+        from harness.tools.mcp_call import McpDynamicTool
 
         for t in tools:
-            td = ToolDefinition(
-                name=t.name,
-                description=f"[{server_name}] {t.description}",
-                input_schema=t.inputSchema or {},
-                output_schema={},
-                idempotency_key_fields=[],
-                side_effects=[SideEffect.EXTERNAL],
-                guardrails=[Guardrail(guardrail_type="scope", config={})],
-                timeout_ms=60000,
-            )
             try:
-                self.registry.register(td, None)
+                self.registry.register_tool(
+                    McpDynamicTool(
+                        name=t.name,
+                        description=f"[{server_name}] {t.description}",
+                        input_schema=t.inputSchema or {},
+                        server_name=server_name,
+                    )
+                )
                 _logger.debug("Registered MCP tool '%s' from server '%s'", t.name, server_name)
             except ValueError:
                 _logger.debug("Tool '%s' already registered, skipping", t.name)

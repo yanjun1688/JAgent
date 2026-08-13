@@ -2,14 +2,15 @@ const BASE = '/api/v1'
 
 // Types are generated from OpenAPI schema via `npm run generate-api`.
 // See schema.ts for the full set of generated interfaces.
-import type { RunSummary, RunDetailResponse, EventResponse } from './schema'
+import type { RunSummary, RunDetailResponse, EventResponse, WorkspaceListResponse, WorkspaceResponse, WorkspaceScope } from './schema'
 
 export type { RunSummary }
 export type RunDetail = RunDetailResponse
 export type HarnessEvent = EventResponse
 
-export async function listRuns(): Promise<{ runs: RunSummary[]; total: number }> {
-  const res = await fetch(`${BASE}/runs`)
+export async function listRuns(workspaceId?: string): Promise<{ runs: RunSummary[]; total: number }> {
+  const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ''
+  const res = await fetch(`${BASE}/runs${query}`)
   return res.json()
 }
 
@@ -24,12 +25,34 @@ export async function getRunEvents(runId: string): Promise<{ events: HarnessEven
   return res.json()
 }
 
-export async function createRun(intent: string): Promise<{ run_id: string }> {
+export async function createRun(
+  intent: string,
+  workspaceId?: string,
+  requiredOperations?: { tool: string; input: Record<string, unknown> }[],
+): Promise<{ run_id: string }> {
   const res = await fetch(`${BASE}/runs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ intent }),
+    body: JSON.stringify({ intent, workspace_id: workspaceId, required_operations: requiredOperations }),
   })
+  return res.json()
+}
+
+export async function listWorkspaces(): Promise<WorkspaceListResponse> {
+  const res = await fetch(`${BASE}/workspaces`)
+  if (!res.ok) throw new Error(`Failed to list workspaces: ${res.statusText}`)
+  return res.json()
+}
+
+export async function createWorkspace(payload: { name: string; description: string; scope: WorkspaceScope }): Promise<WorkspaceResponse> {
+  const res = await fetch(`${BASE}/workspaces`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+  if (!res.ok) throw new Error(`Failed to create workspace: ${res.statusText}`)
+  return res.json()
+}
+
+export async function deleteWorkspace(workspaceId: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${BASE}/workspaces/${workspaceId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`Failed to delete workspace: ${res.statusText}`)
   return res.json()
 }
 

@@ -11,7 +11,6 @@ Tests focus on:
 
 from __future__ import annotations
 
-import json
 from unittest.mock import patch
 
 import pytest
@@ -64,7 +63,7 @@ async def test_mock_llm_client_accepts_chatresponse():
 
 
 def test_system_prompt_includes_tool_descriptions():
-    tool_defs = [
+    [
         ToolDefinition(
             name="http",
             description="Make HTTP request",
@@ -83,8 +82,11 @@ def test_system_prompt_includes_tool_descriptions():
             requires_confirmation=True,
         ),
     ]
-    prompt = get_prompt(AgentPhase.SERIAL_THINK_FN, intent="Test intent",
-                        tool_list="  - **http**: Make HTTP request\n  - **delete**: Delete file (require confirmation)")
+    prompt = get_prompt(
+        AgentPhase.SERIAL_THINK_FN,
+        intent="Test intent",
+        tool_list="  - **http**: Make HTTP request\n  - **delete**: Delete file (require confirmation)",
+    )
     assert "Test intent" in prompt
     assert "**http**" in prompt
     assert "function-calling" in prompt
@@ -169,17 +171,21 @@ async def test_openai_client_preserves_tool_call_id_on_parse_failure(caplog):
     from harness.core.llm_client import OpenAILLMClient
 
     fake_response = {
-        "choices": [{
-            "message": {
-                "content": "",
-                "tool_calls": [{
-                    "id": "call_xyz",
-                    "type": "function",
-                    "function": {"name": "http", "arguments": "not a json"},
-                }],
-            },
-            "finish_reason": "tool_calls",
-        }],
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_xyz",
+                            "type": "function",
+                            "function": {"name": "http", "arguments": "not a json"},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1},
     }
 
@@ -188,16 +194,25 @@ async def test_openai_client_preserves_tool_call_id_on_parse_failure(caplog):
     class _FakeResp:
         status_code = 200
         text = ""
+
         def json(self):
             return fake_response
+
         def raise_for_status(self):
             pass
 
     class _FakeAsync:
-        def __init__(self, *a, **kw): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): return False
-        async def post(self, *a, **kw): return _FakeResp()
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            return _FakeResp()
 
     with patch("harness.core.llm_client.httpx.AsyncClient", _FakeAsync):
         result = await client.chat([{"role": "user", "content": "hi"}])
@@ -223,19 +238,18 @@ async def test_llm_kernel_history_pairing_two_rounds():
         ThoughtEntry(seq=3, thought="round 2"),
     ]
     state.tool_results = [
-        ToolResult(tool_call_id="tc_1", tool_name="http", status=ToolResultStatus.COMPLETED,
-                   output="out1", event_seq=2),
-        ToolResult(tool_call_id="tc_2", tool_name="file_op", status=ToolResultStatus.COMPLETED,
-                   output="out2", event_seq=4),
+        ToolResult(
+            tool_call_id="tc_1", tool_name="http", status=ToolResultStatus.COMPLETED, output="out1", event_seq=2
+        ),
+        ToolResult(
+            tool_call_id="tc_2", tool_name="file_op", status=ToolResultStatus.COMPLETED, output="out2", event_seq=4
+        ),
     ]
 
     await kernel.think("intent", [], state)
     sent_messages = client.calls[0]["messages"]
 
-    assistant_msgs_with_tool_calls = [
-        m for m in sent_messages
-        if m.get("role") == "assistant" and m.get("tool_calls")
-    ]
+    assistant_msgs_with_tool_calls = [m for m in sent_messages if m.get("role") == "assistant" and m.get("tool_calls")]
     assert len(assistant_msgs_with_tool_calls) == 2
 
     tool_msgs = [m for m in sent_messages if m.get("role") == "tool"]
@@ -263,16 +277,17 @@ async def test_parse_failure_observable_no_silent_pass():
     from harness.core.llm_client import OpenAILLMClient
 
     fake_response = {
-        "choices": [{
-            "message": {
-                "content": "",
-                "tool_calls": [
-                    {"id": "b1", "type": "function",
-                     "function": {"name": "f", "arguments": "{bad"}},
-                ],
-            },
-            "finish_reason": "tool_calls",
-        }],
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "b1", "type": "function", "function": {"name": "f", "arguments": "{bad"}},
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
         "usage": {},
     }
     client = OpenAILLMClient(api_key="k", model="m", base_url="http://fake")
@@ -280,14 +295,25 @@ async def test_parse_failure_observable_no_silent_pass():
     class _FakeResp:
         status_code = 200
         text = ""
-        def json(self): return fake_response
-        def raise_for_status(self): pass
+
+        def json(self):
+            return fake_response
+
+        def raise_for_status(self):
+            pass
 
     class _FakeAsync:
-        def __init__(self, *a, **kw): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): return False
-        async def post(self, *a, **kw): return _FakeResp()
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            return _FakeResp()
 
     with patch("harness.core.llm_client.httpx.AsyncClient", _FakeAsync):
         resp = await client.chat([{"role": "user", "content": "x"}])
@@ -296,9 +322,9 @@ async def test_parse_failure_observable_no_silent_pass():
     assert resp.tool_calls[0].name == "f"
     assert resp.tool_calls[0].id == "b1"
 
-    kernel = LLMAgentKernel(MockLLMClient([
-        ChatResponse(tool_calls=[ToolCall(id="b1", name="f", arguments={"_parse_error": "{bad"})])
-    ]))
+    kernel = LLMAgentKernel(
+        MockLLMClient([ChatResponse(tool_calls=[ToolCall(id="b1", name="f", arguments={"_parse_error": "{bad"})])])
+    )
     state = RunState(run_id="r")
     results = await kernel.think("intent", [], state)
     assert results[0].tool_name == "f"
@@ -312,10 +338,12 @@ async def test_parse_failure_observable_no_silent_pass():
 @pytest.mark.asyncio
 async def test_llm_kernel_stop_triggers_summary():
     """When content contains <STOP>, _generate_stop_summary produces direct_answer."""
-    client = MockLLMClient([
-        ChatResponse(content="<STOP>"),
-        ChatResponse(content="I have completed the task by fetching the data and saving it."),
-    ])
+    client = MockLLMClient(
+        [
+            ChatResponse(content="<STOP>"),
+            ChatResponse(content="I have completed the task by fetching the data and saving it."),
+        ]
+    )
     kernel = LLMAgentKernel(client)
     state = RunState(run_id="test")
     tool_defs: list[ToolDefinition] = []
@@ -330,6 +358,7 @@ async def test_llm_kernel_stop_triggers_summary():
 @pytest.mark.asyncio
 async def test_llm_kernel_stop_summary_failure_does_not_break():
     """When summary generation fails, direct_answer stays None but think still succeeds."""
+
     class _FailingSummaryClient(MockLLMClient):
         async def chat(self, messages, *, tools=None, temperature=0.0, max_tokens=4096):
             self.calls.append({"messages": messages, "tools": tools})

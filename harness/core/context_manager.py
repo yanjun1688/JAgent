@@ -122,13 +122,19 @@ class ContextManager:
         self._last_compressed_iteration[run_id] = iteration
 
         if ratio > 0.9:
-            _log_compress.info("COMPRESSION_DECIDE %s", fmtkv(run_id=run_id, strategy="emergency_compact", ratio=f"{ratio:.2%}"))
+            _log_compress.info(
+                "COMPRESSION_DECIDE %s", fmtkv(run_id=run_id, strategy="emergency_compact", ratio=f"{ratio:.2%}")
+            )
             await self._emergency_compact(run_id, state, estimate)
         elif ratio > 0.7:
-            _log_compress.info("COMPRESSION_DECIDE %s", fmtkv(run_id=run_id, strategy="episode_archive", ratio=f"{ratio:.2%}"))
+            _log_compress.info(
+                "COMPRESSION_DECIDE %s", fmtkv(run_id=run_id, strategy="episode_archive", ratio=f"{ratio:.2%}")
+            )
             await self._archive_episode(run_id, state, estimate)
         else:
-            _log_compress.info("COMPRESSION_DECIDE %s", fmtkv(run_id=run_id, strategy="lazy_clear", ratio=f"{ratio:.2%}"))
+            _log_compress.info(
+                "COMPRESSION_DECIDE %s", fmtkv(run_id=run_id, strategy="lazy_clear", ratio=f"{ratio:.2%}")
+            )
             await self._lazy_clear(run_id, state, estimate)
 
     async def _lazy_clear(self, run_id: str, state: RunState, token_count: int) -> None:
@@ -356,7 +362,7 @@ class ContextManager:
             status_val = entry.status.value if hasattr(entry.status, "value") else str(entry.status)
             if status_val in ("failed", "timeout", "guardrail_blocked"):
                 return 0.8
-            if status_val == "soft_error":
+            if status_val == "unsuccessful":
                 return 0.6
             return 0.2
 
@@ -369,8 +375,14 @@ class ContextManager:
         Only prunes events with importance <= 0.2 that are not in the recent window.
         """
         keep_recent = max(state.keep_recent_count, 2)
-        recent_thought_seqs = {t.seq for t in state.thought_history[-keep_recent:]} if len(state.thought_history) > keep_recent else set()
-        recent_result_seqs = {tr.event_seq for tr in state.tool_results[-keep_recent:]} if len(state.tool_results) > keep_recent else set()
+        recent_thought_seqs = (
+            {t.seq for t in state.thought_history[-keep_recent:]} if len(state.thought_history) > keep_recent else set()
+        )
+        recent_result_seqs = (
+            {tr.event_seq for tr in state.tool_results[-keep_recent:]}
+            if len(state.tool_results) > keep_recent
+            else set()
+        )
 
         pruned_refs = []
         pruned_tokens = 0
@@ -505,7 +517,10 @@ class ContextManager:
 
         try:
             data = json.loads(response)
-            _log_compress.info("EPISODE_JSON_PARSE_OK %s", fmtkv(parsed_keys=list(data.keys()) if isinstance(data, dict) else "not_dict"))
+            _log_compress.info(
+                "EPISODE_JSON_PARSE_OK %s",
+                fmtkv(parsed_keys=list(data.keys()) if isinstance(data, dict) else "not_dict"),
+            )
         except (json.JSONDecodeError, TypeError, ValueError) as e:
             data = None
             _log_compress.warning("EPISODE_JSON_PARSE_FAIL %s", fmtkv(error=str(e)[:100], fallback="legacy"))

@@ -2,6 +2,7 @@
 
 import asyncio
 import contextvars
+import json
 import time
 import uuid
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Any, Callable
 import jsonschema
 
 from harness.core.logger import agent_logger, guard_logger
+from harness.execution.base import ExecutionBackend
 from harness.models.events import (
     ConfirmationReceivedPayload,
     ConfirmationRequestedPayload,
@@ -23,8 +25,10 @@ from harness.models.events import (
     ToolTimeoutPayload,
 )
 from harness.models.tools import ToolDefinition
+from harness.models.workspace import WorkspaceScope
 from harness.monitoring.langfuse_tracer import _get_current_trace_ctx, _get_current_tracer
 from harness.storage.event_store import EventStore
+from harness.tools.base import current_backend
 from harness.tools.guardrails import GuardrailRunner
 from harness.tools.idempotency import IdempotencyKeyGenerator
 from harness.tools.retry import RetryRunner
@@ -38,6 +42,20 @@ _log_idem = guard_logger("executor.idempotency")
 _log_confirm = guard_logger("executor.confirm")
 _log_sandbox = guard_logger("executor.sandbox")
 
+
+def _log_summary(value: Any, limit: int = 240) -> str:
+    """Bound and redact common secret-bearing fields before logging."""
+    if isinstance(value, dict):
+        value = {
+            key: "<redacted>" if key.lower() in {"authorization", "cookie", "token", "api_key"} else item
+            for key, item in value.items()
+        }
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        text = repr(value)
+    return text[:limit]
+
 # Context variable that tool functions can read to discover the current run_id.
 # Set by ToolExecutor.execute() before each invocation.
 current_run_id: contextvars.ContextVar[str] = contextvars.ContextVar("current_run_id", default="")
@@ -45,10 +63,11 @@ current_run_id: contextvars.ContextVar[str] = contextvars.ContextVar("current_ru
 
 class ConfirmationNeededError(Exception):
     """Raised by tool wrappers when an inner tool requires human confirmation.
-    
+
     Caught by ToolExecutor.execute() and converted to CONFIRMATION_NEEDED status
     so the Scheduler can pause and wait for operator confirmation.
     """
+
     def __init__(self, tool_name: str, confirmation_id: str):
         self.tool_name = tool_name
         self.confirmation_id = confirmation_id
@@ -100,9 +119,15 @@ class ToolExecutor:
                 _guard_log.debug("[trace] event failed (ignored)", exc_info=True)
 
     def _trace_tool(
-        self, tool_name: str, tool_input: dict, tool_output: Any,
-        status: str, duration_ms: int, error: str | None = None,
-        cached: bool = False, retry_attempts: int = 0,
+        self,
+        tool_name: str,
+        tool_input: dict,
+        tool_output: Any,
+        status: str,
+        duration_ms: int,
+        error: str | None = None,
+        cached: bool = False,
+        retry_attempts: int = 0,
     ) -> None:
         tracer = _get_current_tracer()
         ctx = _get_current_trace_ctx()
@@ -131,6 +156,10 @@ class ToolExecutor:
         tool_fn: Callable[[dict[str, Any]], Any],
         *,
         override_tool_call_id: str | None = None,
+        step_id: str | None = None,
+        workspace_scope: WorkspaceScope | None = None,
+        backend: ExecutionBackend | None = None,
+        workspace_id: str | None = None,
     ) -> ToolExecutionResult:
         _t0 = time.monotonic()
 
@@ -138,22 +167,46 @@ class ToolExecutor:
         tool_call_id = override_tool_call_id or str(uuid.uuid4())
         _guard_log.debug("[setup] tool_call_id=%s", tool_call_id)
 
+        # S02: per-operation contract overrides tool-level attributes
+        # (side_effects / confirmation / idempotency fields) when present.
+        op_contract = tool_def.resolve_operation(input)
+
         # ── Step 2: Compute idempotency key ──────────────────────
-        ik_key = IdempotencyKeyGenerator.compute(tool_def, input)
+        ik_key = IdempotencyKeyGenerator.compute(
+            tool_def, input, key_fields=op_contract.idempotency_key_fields if op_contract else None
+        )
         _log_idem.debug("[idem] ik=%s", ik_key or "null")
+
+        # S11 (问题十 2): 工具调用结构化日志 — tool/operation/ik/状态
+        _log_sandbox.info(
+            "[tool] run=%s tool=%s op=%s ik=%s status=%s input_summary=%s",
+            run_id,
+            tool_name,
+            (
+                op_contract.operation
+                if op_contract
+                else input.get("operation") or input.get("method") or input.get("action")
+            ),
+            ik_key or "none",
+            "started",
+            _log_summary(input),
+        )
 
         # ── Step 1+4: Schema + Guardrails pre-checks ─────────────
         _t_gr = time.monotonic()
-        gr_results = await self.guardrails.run(tool_def, input, run_id=run_id)
-        _ms_gr = (time.monotonic() - _t_gr) * 1000
-        guardrail_triggers_confirmation = any(
-            getattr(gr, "triggers_confirmation", False) for gr in gr_results
+        gr_results = await self.guardrails.run(
+            tool_def,
+            input,
+            run_id=run_id,
+            workspace_scope=workspace_scope,
+            backend=backend,
         )
+        _ms_gr = (time.monotonic() - _t_gr) * 1000
+        guardrail_triggers_confirmation = any(getattr(gr, "triggers_confirmation", False) for gr in gr_results)
 
         for gr in gr_results:
             if not gr.passed:
-                _log_guardrails.warning("[guardrails] Blocked by '%s': %s (%dms)",
-                                        gr.guardrail_id, gr.reason, _ms_gr)
+                _log_guardrails.warning("[guardrails] Blocked by '%s': %s (%dms)", gr.guardrail_id, gr.reason, _ms_gr)
                 await self.store.append_event(
                     run_id,
                     EventType.GUARDRAIL_TRIGGERED,
@@ -162,6 +215,8 @@ class ToolExecutor:
                         tool_name=tool_name,
                         guardrail_id=gr.guardrail_id,
                         reason=gr.reason,
+                        step_id=step_id,
+                        workspace_id=workspace_id,
                     ).model_dump(),
                 )
                 self._trace_event(
@@ -170,7 +225,9 @@ class ToolExecutor:
                     metadata={"guardrail_id": gr.guardrail_id, "reason": gr.reason, "tool": tool_name},
                 )
                 self._trace_tool(
-                    tool_name, input, None,
+                    tool_name,
+                    input,
+                    None,
                     status="guardrail_blocked",
                     duration_ms=int((time.monotonic() - _t0) * 1000),
                     error=gr.reason,
@@ -190,12 +247,17 @@ class ToolExecutor:
             existing_tc = await self.store.find_by_idempotency_key(run_id, EventType.TOOL_COMPLETED, ik_key)
             if existing_tc is not None:
                 payload = ToolCompletedPayload.model_validate(existing_tc.payload)
-                se_flag = payload.result_type == ToolResultType.SOFT_ERROR
-                _log_idem.info("[idem] Cache HIT (previous result @ seq=%d) semantic=%s error=%s",
-                               existing_tc.seq, "SOFT_ERROR" if se_flag else "SUCCESS",
-                               payload.error or "null")
+                se_flag = payload.result_type == ToolResultType.UNSUCCESSFUL
+                _log_idem.info(
+                    "[idem] Cache HIT (previous result @ seq=%d) semantic=%s error=%s",
+                    existing_tc.seq,
+                    "UNSUCCESSFUL" if se_flag else "SUCCESS",
+                    payload.error or "null",
+                )
                 self._trace_tool(
-                    tool_name, input, payload.output,
+                    tool_name,
+                    input,
+                    payload.output,
                     status="completed",
                     duration_ms=payload.duration_ms,
                     error=payload.error if se_flag else None,
@@ -215,12 +277,15 @@ class ToolExecutor:
             _log_idem.debug("[idem] Cache miss")
 
         # ── Step 5: Confirmation check ───────────────────────────
-        needs_confirmation = tool_def.requires_confirmation or guardrail_triggers_confirmation
+        requires_confirmation = (
+            op_contract.requires_confirmation if op_contract is not None else tool_def.requires_confirmation
+        )
+        needs_confirmation = requires_confirmation or guardrail_triggers_confirmation
         if needs_confirmation:
             _log_confirm.info("[confirm] Tool requires human confirmation")
             self._trace_event(
                 "confirmation_needed",
-                metadata={"tool": tool_name, "requires_confirmation": tool_def.requires_confirmation},
+                metadata={"tool": tool_name, "requires_confirmation": requires_confirmation},
             )
             confirm_key = ik_key or f"_noik_{tool_name}"
             existing_req = await self.store.find_by_idempotency_key(
@@ -244,6 +309,7 @@ class ToolExecutor:
                                 tool_name=tool_name,
                                 error="Confirmation denied by operator",
                                 retryable=False,
+                                step_id=step_id,
                             ).model_dump(),
                         )
                         return ToolExecutionResult(
@@ -254,8 +320,9 @@ class ToolExecutor:
                             error="Confirmation denied by operator",
                         )
                 else:
-                    _log_confirm.info("[confirm] Waiting for operator (confirmation_id=%s)",
-                                      req_payload.confirmation_id)
+                    _log_confirm.info(
+                        "[confirm] Waiting for operator (confirmation_id=%s)", req_payload.confirmation_id
+                    )
                     return ToolExecutionResult(
                         status=ExecutionStatus.CONFIRMATION_NEEDED,
                         tool_call_id=tool_call_id,
@@ -271,6 +338,7 @@ class ToolExecutor:
                     tool_name=tool_name,
                     input=input,
                     idempotency_key=confirm_key,
+                    step_id=step_id,
                 )
                 await self.store.append_event(
                     run_id,
@@ -297,14 +365,19 @@ class ToolExecutor:
                 tool_name=tool_name,
                 input=input,
                 idempotency_key=ik_key,
+                step_id=step_id,
             ).model_dump(),
         )
 
         # ── Step 7: Execute via Sandbox with RetryRunner ─────────
         _log_sandbox.info("[sandbox] Executing (timeout=%dms)...", tool_def.timeout_ms)
         step7_start = time.monotonic()
-        token = current_run_id.set(run_id)
+        token_run = current_run_id.set(run_id)
+        # ADR-010 D-03: run 级 backend 经 contextvar 注入 invoker，替代按工具名
+        # partial 特判（file_op）——所有工具统一 Sandbox.invoke(tool_fn, input)。
+        token_backend = current_backend.set(backend)
         try:
+
             async def _run() -> Any:
                 return await Sandbox.invoke(tool_fn, input, timeout_ms=tool_def.timeout_ms)
 
@@ -316,32 +389,45 @@ class ToolExecutor:
 
             # ── Step 7.5: Semantic evaluation ────────────────────
             result_type, semantic_error = SemanticEvaluator.evaluate(output, tool_def)
-            if result_type == ToolResultType.SOFT_ERROR:
-                _log_sandbox.warning("[semantic] tool=%s SOFT_ERROR: %s (%dms)",
-                                     tool_name, semantic_error, duration_ms)
-                if tool_def.side_effects:
-                    _log_sandbox.info("[sidefx] tool=%s side_effects=%s",
-                                      tool_name, [s.value for s in tool_def.side_effects])
+            if result_type == ToolResultType.UNSUCCESSFUL:
+                _log_sandbox.warning(
+                    "[semantic] tool=%s UNSUCCESSFUL: %s (%dms)", tool_name, semantic_error, duration_ms
+                )
+                if op_contract is not None and op_contract.side_effects:
+                    _log_sandbox.info(
+                        "[sidefx] tool=%s op=%s side_effects=%s",
+                        tool_name,
+                        op_contract.operation,
+                        [s.value for s in op_contract.side_effects],
+                    )
+                elif op_contract is None and tool_def.side_effects:
+                    _log_sandbox.info(
+                        "[sidefx] tool=%s side_effects=%s", tool_name, [s.value for s in tool_def.side_effects]
+                    )
                 tp = ToolCompletedPayload(
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     output=output,
                     duration_ms=duration_ms,
-                    result_type=ToolResultType.SOFT_ERROR,
+                    result_type=ToolResultType.UNSUCCESSFUL,
                     error=semantic_error,
+                    step_id=step_id,
                 )
-                # SOFT_ERROR is intentionally NOT written with an idempotency
-                # key: only deterministic (SUCCESS) results are cached. If a
-                # soft-error result were cached, a same-input retry would hit
+                # UNSUCCESSFUL is intentionally NOT written with an idempotency
+                # key: only deterministic (SUCCESS) results are cached. If an
+                # unsuccessful result were cached, a same-input retry would hit
                 # the cache and never actually re-run the tool — silently
                 # defeating self-heal (Bug S1.1, AGENTS.md constraint 4).
                 await self.store.append_event(run_id, EventType.TOOL_COMPLETED, tp.model_dump())
                 _log_sandbox.info(
-                    "[semantic] Wrote TOOL_COMPLETED(SOFT_ERROR) tool=%s call_id=%s (not idempotency-cached)",
-                    tool_name, tool_call_id,
+                    "[semantic] Wrote TOOL_COMPLETED(UNSUCCESSFUL) tool=%s call_id=%s (not idempotency-cached)",
+                    tool_name,
+                    tool_call_id,
                 )
                 self._trace_tool(
-                    tool_name, input, output,
+                    tool_name,
+                    input,
+                    output,
                     status="completed",
                     duration_ms=duration_ms,
                     error=semantic_error,
@@ -359,9 +445,19 @@ class ToolExecutor:
                     error=semantic_error,
                 )
 
-            _log_sandbox.debug("[semantic] tool=%s SUCCESS indicator=%s", tool_name,
-                               tool_def.success_indicator.field if tool_def.success_indicator else "null")
-            _log_sandbox.info("[sandbox] Completed in %dms (retries=%d)", duration_ms, retry_count)
+            _log_sandbox.debug(
+                "[semantic] tool=%s SUCCESS indicator=%s",
+                tool_name,
+                tool_def.success_indicator.field if tool_def.success_indicator else "null",
+            )
+            _log_sandbox.info(
+                "[tool] run=%s tool=%s status=%s duration_ms=%d output_summary=%s",
+                run_id,
+                tool_name,
+                "completed",
+                duration_ms,
+                _log_summary(output),
+            )
 
             if tool_def.output_schema:
                 try:
@@ -376,7 +472,8 @@ class ToolExecutor:
                     else:
                         _log_sandbox.warning(
                             "[sandbox] Output schema validation failed: output=%s (%dms)",
-                            type(output).__name__, duration_ms,
+                            type(output).__name__,
+                            duration_ms,
                         )
                         tp = ToolFailedPayload(
                             tool_call_id=tool_call_id,
@@ -386,10 +483,13 @@ class ToolExecutor:
                                 f" data, got {type(output).__name__}"
                             ),
                             retryable=False,
+                            step_id=step_id,
                         )
                         await self.store.append_event(run_id, EventType.TOOL_FAILED, tp.model_dump())
                         self._trace_tool(
-                            tool_name, input, None,
+                            tool_name,
+                            input,
+                            None,
                             status="failed",
                             duration_ms=duration_ms,
                             error=(
@@ -409,19 +509,30 @@ class ToolExecutor:
                             duration_ms=duration_ms,
                         )
 
-            if tool_def.side_effects:
-                _log_sandbox.info("[sidefx] tool=%s side_effects=%s",
-                                  tool_name, [s.value for s in tool_def.side_effects])
+            if op_contract is not None and op_contract.side_effects:
+                _log_sandbox.info(
+                    "[sidefx] tool=%s op=%s side_effects=%s",
+                    tool_name,
+                    op_contract.operation,
+                    [s.value for s in op_contract.side_effects],
+                )
+            elif op_contract is None and tool_def.side_effects:
+                _log_sandbox.info(
+                    "[sidefx] tool=%s side_effects=%s", tool_name, [s.value for s in tool_def.side_effects]
+                )
 
             tp = ToolCompletedPayload(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 output=output,
                 duration_ms=duration_ms,
+                step_id=step_id,
             )
             await self.store.append_event(run_id, EventType.TOOL_COMPLETED, tp.model_dump(), idempotency_key=ik_key)
             self._trace_tool(
-                tool_name, input, output,
+                tool_name,
+                input,
+                output,
                 status="completed",
                 duration_ms=duration_ms,
                 retry_attempts=retry_count,
@@ -437,16 +548,25 @@ class ToolExecutor:
             )
         except asyncio.TimeoutError:
             duration_ms = int((time.monotonic() - step7_start) * 1000)
-            _log_sandbox.warning("[sandbox] Timed out after %dms (limit=%dms)",
-                                 duration_ms, tool_def.timeout_ms)
+            _log_sandbox.warning(
+                "[tool] run=%s tool=%s status=%s duration_ms=%d output_summary=%s",
+                run_id,
+                tool_name,
+                "timeout",
+                duration_ms,
+                "<none>",
+            )
             tp = ToolTimeoutPayload(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 timeout_ms=tool_def.timeout_ms,
+                step_id=step_id,
             )
             await self.store.append_event(run_id, EventType.TOOL_TIMEOUT, tp.model_dump())
             self._trace_tool(
-                tool_name, input, None,
+                tool_name,
+                input,
+                None,
                 status="timeout",
                 duration_ms=duration_ms,
                 error=f"Tool timed out after {duration_ms}ms",
@@ -462,8 +582,11 @@ class ToolExecutor:
             )
         except ConfirmationNeededError as exc:
             duration_ms = int((time.monotonic() - step7_start) * 1000)
-            _log_confirm.info("[confirm] Tool '%s' needs confirmation (id=%s) — propagating from inner call",
-                              exc.tool_name, exc.confirmation_id)
+            _log_confirm.info(
+                "[confirm] Tool '%s' needs confirmation (id=%s) — propagating from inner call",
+                exc.tool_name,
+                exc.confirmation_id,
+            )
             return ToolExecutionResult(
                 status=ExecutionStatus.CONFIRMATION_NEEDED,
                 tool_call_id=tool_call_id,
@@ -481,17 +604,27 @@ class ToolExecutor:
                     for candidate in tool_def.retry_policy.retryable_errors
                 )
             )
-            _log_sandbox.error("[sandbox] Failed: %s (retryable=%s, %dms)",
-                               exc, retryable, duration_ms)
+            _log_sandbox.error(
+                "[tool] run=%s tool=%s status=%s duration_ms=%d output_summary=%s error=%s",
+                run_id,
+                tool_name,
+                "failed",
+                duration_ms,
+                "<none>",
+                str(exc)[:240],
+            )
             tp = ToolFailedPayload(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 error=str(exc),
                 retryable=retryable,
+                step_id=step_id,
             )
             await self.store.append_event(run_id, EventType.TOOL_FAILED, tp.model_dump())
             self._trace_tool(
-                tool_name, input, None,
+                tool_name,
+                input,
+                None,
                 status="failed",
                 duration_ms=duration_ms,
                 error=str(exc),
@@ -507,7 +640,8 @@ class ToolExecutor:
                 retry_attempts=0,
             )
         finally:
-            current_run_id.reset(token)
+            current_run_id.reset(token_run)
+            current_backend.reset(token_backend)
 
     # ── Helpers ──────────────────────────────────────────────────
 

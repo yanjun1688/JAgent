@@ -1,39 +1,20 @@
 const BASE = '/api/v1'
 
-export interface Conversation {
-  conversation_id: string
-  user_id: string
-  title: string
-  status: 'active' | 'archived'
-  created_at: number
-  updated_at: number
-  message_count: number
-}
+// Single source of truth (AGENTS.md §4.1): all shared data types come from the
+// OpenAPI-generated schema.ts. These re-exports keep existing imports stable.
+import type {
+  ConversationDetail,
+  ConversationListResponse,
+  SendMessageResponse,
+} from './schema'
 
-export interface ConversationMessageItem {
-  seq: number
-  run_id: string
-  role: 'user' | 'assistant'
-  content: string
-  created_at: number
-  status: string
-}
-
-export interface ConversationDetail {
-  conversation: Conversation
-  messages: ConversationMessageItem[]
-}
-
-export interface ConversationListResponse {
-  conversations: Conversation[]
-  total: number
-}
-
-export interface SendMessageResponse {
-  run_id: string
-  conversation_id: string
-  seq: number
-}
+export type {
+  Conversation,
+  ConversationDetail,
+  ConversationListResponse,
+  ConversationMessageItem,
+  SendMessageResponse,
+} from './schema'
 
 export async function createConversation(title?: string): Promise<{ conversation_id: string; title: string; created_at: number }> {
   const res = await fetch(`${BASE}/conversations`, {
@@ -60,14 +41,31 @@ export async function getConversation(id: string): Promise<ConversationDetail> {
 export async function sendMessage(
   conversationId: string,
   message: string,
+  clientRequestId?: string,
+  workspaceId?: string,
 ): Promise<SendMessageResponse> {
+  const body: Record<string, unknown> = { message }
+  if (clientRequestId) body.client_request_id = clientRequestId
+  if (workspaceId) body.workspace_id = workspaceId
   const res = await fetch(`${BASE}/conversations/${conversationId}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(`Failed to send message: ${res.statusText}`)
   return res.json()
+}
+
+/**
+ * Generate a client-side idempotency key for a message submission.
+ * The backend dedups by (conversation, client_request_id) so the same logical
+ * submit cannot create duplicate runs (P0-06 §7.5 / JAGENT-2026-P0-07).
+ */
+export function createClientRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
 export async function deleteConversation(id: string): Promise<{ success: boolean }> {

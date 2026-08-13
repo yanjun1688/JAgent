@@ -60,6 +60,7 @@ def _make_mock_session(tools: list[MagicMock] | None = None) -> AsyncMock:
 def mock_stdio_patch():
     """Patch MCPServerManager._connect_stdio to return a _MCPSession wrapper."""
     from harness.tools.mcp_manager import _MCPSession
+
     session = _make_mock_session(tools=[_make_mock_tool("browser_navigate", "Navigate")])
     mcp_sess = _MCPSession(
         name="test",
@@ -168,9 +169,11 @@ class TestMCPServerManager:
         assert mgr.registry is registry
 
     async def test_connect_server_success(self, mock_stdio_patch):
-        config = MCPConfig(servers=[
-            MCPConnectionConfig(name="test-srv", command=["test-cmd"], enabled=True),
-        ])
+        config = MCPConfig(
+            servers=[
+                MCPConnectionConfig(name="test-srv", command=["test-cmd"], enabled=True),
+            ]
+        )
         mgr = MCPServerManager(config)
         result = await mgr.connect_server(config.servers[0])
 
@@ -181,9 +184,11 @@ class TestMCPServerManager:
         assert mgr.get_session("test-srv") is mock_stdio_patch
 
     async def test_connect_server_no_command_or_url(self):
-        config = MCPConfig(servers=[
-            MCPConnectionConfig(name="bad", enabled=True),
-        ])
+        config = MCPConfig(
+            servers=[
+                MCPConnectionConfig(name="bad", enabled=True),
+            ]
+        )
         mgr = MCPServerManager(config)
         result = await mgr.connect_server(config.servers[0])
 
@@ -191,9 +196,11 @@ class TestMCPServerManager:
         assert "Either command or url" in result["error"]
 
     async def test_connect_server_failure(self):
-        config = MCPConfig(servers=[
-            MCPConnectionConfig(name="fail-srv", command=["crash"], enabled=True),
-        ])
+        config = MCPConfig(
+            servers=[
+                MCPConnectionConfig(name="fail-srv", command=["crash"], enabled=True),
+            ]
+        )
         mgr = MCPServerManager(config)
         with patch.object(mgr, "_connect_stdio", AsyncMock(side_effect=RuntimeError("connection failed"))):
             result = await mgr.connect_server(config.servers[0])
@@ -201,9 +208,11 @@ class TestMCPServerManager:
             assert "connection failed" in result["error"]
 
     async def test_disconnect_server(self, mock_stdio_patch):
-        config = MCPConfig(servers=[
-            MCPConnectionConfig(name="d", command=["x"], enabled=True),
-        ])
+        config = MCPConfig(
+            servers=[
+                MCPConnectionConfig(name="d", command=["x"], enabled=True),
+            ]
+        )
         mgr = MCPServerManager(config)
         await mgr.connect_server(config.servers[0])
         assert "d" in mgr.server_names
@@ -218,26 +227,36 @@ class TestMCPServerManager:
         assert result["success"] is True
 
     async def test_start_all(self, mock_stdio_patch):
-        config = MCPConfig(servers=[
-            MCPConnectionConfig(name="s1", command=["c1"], enabled=True),
-            MCPConnectionConfig(name="s2", command=["c2"], enabled=True),
-        ])
+        config = MCPConfig(
+            servers=[
+                MCPConnectionConfig(name="s1", command=["c1"], enabled=True),
+                MCPConnectionConfig(name="s2", command=["c2"], enabled=True),
+            ]
+        )
         mgr = MCPServerManager(config)
 
-        with patch.object(mgr, "connect_server", AsyncMock(side_effect=[
-            {"name": "s1", "success": True, "tools": []},
-            {"name": "s2", "success": True, "tools": []},
-        ])):
+        with patch.object(
+            mgr,
+            "connect_server",
+            AsyncMock(
+                side_effect=[
+                    {"name": "s1", "success": True, "tools": []},
+                    {"name": "s2", "success": True, "tools": []},
+                ]
+            ),
+        ):
             results = await mgr.start_all()
             assert len(results) == 2
             assert results[0]["success"] is True
             assert results[1]["success"] is True
 
     async def test_start_all_skips_disabled(self, mock_stdio_patch):
-        config = MCPConfig(servers=[
-            MCPConnectionConfig(name="s1", command=["c1"], enabled=True),
-            MCPConnectionConfig(name="s2", command=["c2"], enabled=False),
-        ])
+        config = MCPConfig(
+            servers=[
+                MCPConnectionConfig(name="s1", command=["c1"], enabled=True),
+                MCPConnectionConfig(name="s2", command=["c2"], enabled=False),
+            ]
+        )
         mgr = MCPServerManager(config)
 
         connect_calls = []
@@ -252,10 +271,12 @@ class TestMCPServerManager:
             assert connect_calls == ["s1"]
 
     async def test_shutdown_all(self, mock_stdio_patch):
-        config = MCPConfig(servers=[
-            MCPConnectionConfig(name="a", command=["x"], enabled=True),
-            MCPConnectionConfig(name="b", command=["y"], enabled=True),
-        ])
+        config = MCPConfig(
+            servers=[
+                MCPConnectionConfig(name="a", command=["x"], enabled=True),
+                MCPConnectionConfig(name="b", command=["y"], enabled=True),
+            ]
+        )
         mgr = MCPServerManager(config)
         disconnect_calls = []
 
@@ -271,9 +292,11 @@ class TestMCPServerManager:
 
     async def test_auto_register_tools(self):
         registry = ToolRegistry()
-        config = MCPConfig(servers=[
-            MCPConnectionConfig(name="auto-srv", command=["x"], enabled=True, auto_register_tools=True),
-        ])
+        config = MCPConfig(
+            servers=[
+                MCPConnectionConfig(name="auto-srv", command=["x"], enabled=True, auto_register_tools=True),
+            ]
+        )
         mgr = MCPServerManager(config, registry=registry)
         tool_a = _make_mock_tool("tool_a", "Tool A", {"type": "object"})
         tool_b = _make_mock_tool("tool_b", "Tool B")
@@ -290,13 +313,17 @@ class TestMCPServerManager:
     async def test_auto_register_skips_duplicates(self):
         registry = ToolRegistry()
         existing = ToolDefinition(
-            name="existing_tool", description="", side_effects=[SideEffect.EXTERNAL],
+            name="existing_tool",
+            description="",
+            side_effects=[SideEffect.EXTERNAL],
         )
-        registry.register(existing, lambda i: {})
+        registry._register(existing, lambda i: {})
 
-        config = MCPConfig(servers=[
-            MCPConnectionConfig(name="dup-srv", command=["x"], enabled=True, auto_register_tools=True),
-        ])
+        config = MCPConfig(
+            servers=[
+                MCPConnectionConfig(name="dup-srv", command=["x"], enabled=True, auto_register_tools=True),
+            ]
+        )
         mgr = MCPServerManager(config, registry=registry)
         tool = _make_mock_tool("existing_tool")
 
@@ -308,9 +335,11 @@ class TestMCPServerManager:
         assert registry.get_tool_def("existing_tool") is existing
 
     async def test_get_session(self, mock_stdio_patch):
-        config = MCPConfig(servers=[
-            MCPConnectionConfig(name="s1", command=["x"], enabled=True),
-        ])
+        config = MCPConfig(
+            servers=[
+                MCPConnectionConfig(name="s1", command=["x"], enabled=True),
+            ]
+        )
         mgr = MCPServerManager(config)
         await mgr.connect_server(config.servers[0])
         assert mgr.get_session("s1") is mock_stdio_patch
@@ -343,11 +372,13 @@ class TestMcpCallFn:
         mgr._sessions["playwright"] = session
         set_manager(mgr)
 
-        result = await mcp_call_fn({
-            "server_name": "playwright",
-            "tool_name": "browser_navigate",
-            "arguments": {"url": "https://example.com"},
-        })
+        result = await mcp_call_fn(
+            {
+                "server_name": "playwright",
+                "tool_name": "browser_navigate",
+                "arguments": {"url": "https://example.com"},
+            }
+        )
         assert result["success"] is True
         assert result["content"] == ["hello world"]
         session.call_tool.assert_awaited_once_with("browser_navigate", {"url": "https://example.com"})
@@ -357,10 +388,12 @@ class TestMcpCallFn:
         mgr._sessions["other"] = _make_mock_session()
         set_manager(mgr)
 
-        result = await mcp_call_fn({
-            "server_name": "playwright",
-            "tool_name": "browser_navigate",
-        })
+        result = await mcp_call_fn(
+            {
+                "server_name": "playwright",
+                "tool_name": "browser_navigate",
+            }
+        )
         assert result["success"] is False
         assert "No active MCP session for server 'playwright'" in result["error"]
 
@@ -372,9 +405,11 @@ class TestMcpCallFn:
         mgr._sessions["second-srv"] = _make_mock_session()
         set_manager(mgr)
 
-        result = await mcp_call_fn({
-            "tool_name": "some_tool",
-        })
+        result = await mcp_call_fn(
+            {
+                "tool_name": "some_tool",
+            }
+        )
         assert result["success"] is True
         assert result["content"] == ["fallback result"]
         session.call_tool.assert_awaited_once()
@@ -448,9 +483,17 @@ class TestConnectDisconnectWrappers:
     async def test_connect_wrapper_creates_manager(self, clean_manager):
         assert get_manager() is None
 
-        with patch.object(MCPServerManager, "connect_server", AsyncMock(return_value={
-            "name": "test", "success": True, "tools": [],
-        })):
+        with patch.object(
+            MCPServerManager,
+            "connect_server",
+            AsyncMock(
+                return_value={
+                    "name": "test",
+                    "success": True,
+                    "tools": [],
+                }
+            ),
+        ):
             result = await connect_mcp_server("test", command=["test-cmd"])
             assert result["success"] is True
             assert get_manager() is not None
@@ -459,9 +502,17 @@ class TestConnectDisconnectWrappers:
         existing = MCPServerManager(MCPConfig())
         set_manager(existing)
 
-        with patch.object(existing, "connect_server", AsyncMock(return_value={
-            "name": "new-srv", "success": True, "tools": [],
-        })):
+        with patch.object(
+            existing,
+            "connect_server",
+            AsyncMock(
+                return_value={
+                    "name": "new-srv",
+                    "success": True,
+                    "tools": [],
+                }
+            ),
+        ):
             result = await connect_mcp_server("new-srv", command=["cmd"])
             assert result["success"] is True
             assert get_manager() is existing
@@ -475,9 +526,16 @@ class TestConnectDisconnectWrappers:
         mgr = MCPServerManager(MCPConfig())
         set_manager(mgr)
 
-        with patch.object(mgr, "disconnect_server", AsyncMock(return_value={
-            "name": "srv", "success": True,
-        })):
+        with patch.object(
+            mgr,
+            "disconnect_server",
+            AsyncMock(
+                return_value={
+                    "name": "srv",
+                    "success": True,
+                }
+            ),
+        ):
             result = await disconnect_mcp_server("srv")
             assert result["success"] is True
 
@@ -528,31 +586,45 @@ class TestMCPCallDefinition:
 
 class TestManagerWithCallFn:
     async def test_full_flow(self, mock_stdio_patch, clean_manager):
-        config = MCPConfig(servers=[
-            MCPConnectionConfig(name="playwright", command=["npx", "@playwright/mcp"], enabled=True),
-        ])
+        config = MCPConfig(
+            servers=[
+                MCPConnectionConfig(name="playwright", command=["npx", "@playwright/mcp"], enabled=True),
+            ]
+        )
         mgr = MCPServerManager(config)
         result = await mgr.connect_server(config.servers[0])
         assert result["success"] is True
         set_manager(mgr)
 
-        call_result = await mcp_call_fn({
-            "server_name": "playwright",
-            "tool_name": "browser_navigate",
-            "arguments": {"url": "https://example.com"},
-        })
+        call_result = await mcp_call_fn(
+            {
+                "server_name": "playwright",
+                "tool_name": "browser_navigate",
+                "arguments": {"url": "https://example.com"},
+            }
+        )
         assert call_result["success"] is True
 
     async def test_start_all_and_call(self, mock_stdio_patch, clean_manager):
-        config = MCPConfig(servers=[
-            MCPConnectionConfig(name="srv1", command=["x"], enabled=True),
-        ])
+        config = MCPConfig(
+            servers=[
+                MCPConnectionConfig(name="srv1", command=["x"], enabled=True),
+            ]
+        )
         mgr = MCPServerManager(config)
         set_manager(mgr)
 
-        with patch.object(mgr, "connect_server", AsyncMock(return_value={
-            "name": "srv1", "success": True, "tools": [{"name": "t1"}],
-        })):
+        with patch.object(
+            mgr,
+            "connect_server",
+            AsyncMock(
+                return_value={
+                    "name": "srv1",
+                    "success": True,
+                    "tools": [{"name": "t1"}],
+                }
+            ),
+        ):
             results = await mgr.start_all()
             assert results[0]["success"] is True
 

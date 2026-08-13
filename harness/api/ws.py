@@ -9,6 +9,7 @@ Architecture §8.3.2:
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
 from harness.api.deps import HarnessAPI, get_hapi
+from harness.core.tenant import current_tenant, reset_current_tenant, set_current_tenant
 
 router = APIRouter()
 
@@ -23,13 +24,20 @@ async def ws_events(websocket: WebSocket, run_id: str, api: HarnessAPI = Depends
       3. Stay open; new events arrive via broadcast_event() from tool layer
       4. On disconnect: remove from client list using list comprehension (avoids iteration mutation bugs)
     """
+    token = set_current_tenant(websocket.headers.get("x-tenant-id", "default"))
+    events = await api.store.get_events(run_id)
+    if not events:
+        await websocket.close(code=4404, reason="Run not found")
+        reset_current_tenant(token)
+        return
+
     await websocket.accept()
 
     ws_clients = api._ws_clients.setdefault(run_id, [])
     ws_clients.append(websocket)
+    api._ws_client_tenants[id(websocket)] = current_tenant.get()
 
     try:
-        events = await api.store.get_events(run_id)
         for e in events:
             await websocket.send_json(e.model_dump(mode="json"))
 
@@ -43,6 +51,8 @@ async def ws_events(websocket: WebSocket, run_id: str, api: HarnessAPI = Depends
     except Exception:
         pass
     finally:
+        reset_current_tenant(token)
+        api._ws_client_tenants.pop(id(websocket), None)
         ws_clients[:] = [w for w in ws_clients if w is not websocket]
         if not ws_clients:
             api._ws_clients.pop(run_id, None)

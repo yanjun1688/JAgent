@@ -37,6 +37,7 @@ interface ToolStat {
   tool_name: string
   call_count: number
   completed: number
+  unsuccessful: number
   failed: number
   timeout: number
   guardrail_blocked: number
@@ -79,7 +80,7 @@ export default function OpsRealTimePanel({ runId, events, runStatus, isConnected
       if (e.event_type === 'ToolCalled' && e.tool_call_id) {
         const name = e.tool_name || 'unknown'
         if (!toolStatsMap[name]) {
-          toolStatsMap[name] = { tool_name: name, call_count: 0, completed: 0, failed: 0, timeout: 0, guardrail_blocked: 0 }
+          toolStatsMap[name] = { tool_name: name, call_count: 0, completed: 0, unsuccessful: 0, failed: 0, timeout: 0, guardrail_blocked: 0 }
         }
         toolStatsMap[name].call_count++
         toolCallMap.set(e.tool_call_id, { tool_name: name, input: e.input, called_at: e.created_at })
@@ -89,9 +90,14 @@ export default function OpsRealTimePanel({ runId, events, runStatus, isConnected
         const callInfo = toolCallMap.get(e.tool_call_id)
         const name = callInfo?.tool_name || e.tool_name || 'unknown'
         if (!toolStatsMap[name]) {
-          toolStatsMap[name] = { tool_name: name, call_count: 0, completed: 0, failed: 0, timeout: 0, guardrail_blocked: 0 }
+          toolStatsMap[name] = { tool_name: name, call_count: 0, completed: 0, unsuccessful: 0, failed: 0, timeout: 0, guardrail_blocked: 0 }
         }
-        toolStatsMap[name].completed++
+        // v2.2 (D2/D3): result_type=unsuccessful（跑了没拿到）独立计数，不再算 completed。
+        if (e.payload.result_type === 'unsuccessful') {
+          toolStatsMap[name].unsuccessful++
+        } else {
+          toolStatsMap[name].completed++
+        }
         const duration = e.duration_ms != null ? e.duration_ms : callInfo ? (e.created_at - callInfo.called_at) * 1000 : 0
         traces.push({
           tool_call_id: e.tool_call_id,
@@ -110,7 +116,7 @@ export default function OpsRealTimePanel({ runId, events, runStatus, isConnected
         const callInfo = toolCallMap.get(e.tool_call_id)
         const name = callInfo?.tool_name || e.tool_name || 'unknown'
         if (!toolStatsMap[name]) {
-          toolStatsMap[name] = { tool_name: name, call_count: 0, completed: 0, failed: 0, timeout: 0, guardrail_blocked: 0 }
+          toolStatsMap[name] = { tool_name: name, call_count: 0, completed: 0, unsuccessful: 0, failed: 0, timeout: 0, guardrail_blocked: 0 }
         }
         toolStatsMap[name].failed++
         traces.push({
@@ -130,7 +136,7 @@ export default function OpsRealTimePanel({ runId, events, runStatus, isConnected
         const callInfo = toolCallMap.get(e.tool_call_id)
         const name = callInfo?.tool_name || e.tool_name || 'unknown'
         if (!toolStatsMap[name]) {
-          toolStatsMap[name] = { tool_name: name, call_count: 0, completed: 0, failed: 0, timeout: 0, guardrail_blocked: 0 }
+          toolStatsMap[name] = { tool_name: name, call_count: 0, completed: 0, unsuccessful: 0, failed: 0, timeout: 0, guardrail_blocked: 0 }
         }
         toolStatsMap[name].timeout++
         traces.push({
@@ -149,7 +155,7 @@ export default function OpsRealTimePanel({ runId, events, runStatus, isConnected
       if (e.event_type === 'GuardrailTriggered') {
         const name = e.tool_name || (e.payload.tool_name as string) || 'unknown'
         if (!toolStatsMap[name]) {
-          toolStatsMap[name] = { tool_name: name, call_count: 0, completed: 0, failed: 0, timeout: 0, guardrail_blocked: 0 }
+          toolStatsMap[name] = { tool_name: name, call_count: 0, completed: 0, unsuccessful: 0, failed: 0, timeout: 0, guardrail_blocked: 0 }
         }
         toolStatsMap[name].guardrail_blocked++
         if (e.tool_call_id) {
@@ -271,6 +277,7 @@ export default function OpsRealTimePanel({ runId, events, runStatus, isConnected
                 <th style={th}>Tool</th>
                 <th style={th}>Calls</th>
                 <th style={th}>Done</th>
+                <th style={th}>Unsucc</th>
                 <th style={th}>Fail</th>
                 <th style={th}>Block</th>
               </tr>
@@ -281,6 +288,7 @@ export default function OpsRealTimePanel({ runId, events, runStatus, isConnected
                   <td style={{ ...td, fontWeight: 600, fontSize: 12 }}>{t.tool_name}</td>
                   <td style={{ ...td, fontSize: 12 }}>{fmt(t.call_count)}</td>
                   <td style={{ ...td, fontSize: 12, color: colors.success }}>{fmt(t.completed)}</td>
+                  <td style={{ ...td, fontSize: 12, color: t.unsuccessful > 0 ? '#ffa726' : colors.textSecondary }}>{fmt(t.unsuccessful)}</td>
                   <td style={{ ...td, fontSize: 12, color: t.failed > 0 ? colors.red : colors.textSecondary }}>{fmt(t.failed)}</td>
                   <td style={{ ...td, fontSize: 12, color: t.guardrail_blocked > 0 ? '#ff7043' : colors.textSecondary }}>{fmt(t.guardrail_blocked)}</td>
                 </tr>

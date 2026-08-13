@@ -619,7 +619,10 @@ class TestOutputSchemaStructuralFallback:
         executor = ToolExecutor(store)
 
         result = await executor.execute(
-            "run-1", "http_request", {"url": "https://a.com"}, http_tool_def,
+            "run-1",
+            "http_request",
+            {"url": "https://a.com"},
+            http_tool_def,
             lambda x: {"status_code": 200, "body": [1, 2, 3]},
         )
         assert result.status == ExecutionStatus.COMPLETED
@@ -634,14 +637,19 @@ class TestOutputSchemaStructuralFallback:
     async def test_list_fails_schema_promotes_to_completed(self, store):
         """List output fails strict schema but passes structural check → ToolCompleted."""
         td = ToolDefinition(
-            name="fetch", description="fetch",
-            idempotency_key_fields=["url"], side_effects=[SideEffect.EXTERNAL],
+            name="fetch",
+            description="fetch",
+            idempotency_key_fields=["url"],
+            side_effects=[SideEffect.EXTERNAL],
             output_schema={"type": "object"},
         )
         executor = ToolExecutor(store)
 
         result = await executor.execute(
-            "run-1", "fetch", {"url": "https://a.com"}, td,
+            "run-1",
+            "fetch",
+            {"url": "https://a.com"},
+            td,
             lambda x: [{"login": "alice"}, {"login": "bob"}],
         )
         assert result.status == ExecutionStatus.COMPLETED
@@ -654,14 +662,19 @@ class TestOutputSchemaStructuralFallback:
     async def test_none_fails_both_phases(self, store):
         """None fails both strict schema and structural check → ToolFailed."""
         td = ToolDefinition(
-            name="fetch", description="fetch",
-            idempotency_key_fields=["url"], side_effects=[SideEffect.EXTERNAL],
+            name="fetch",
+            description="fetch",
+            idempotency_key_fields=["url"],
+            side_effects=[SideEffect.EXTERNAL],
             output_schema={"type": "object"},
         )
         executor = ToolExecutor(store)
 
         result = await executor.execute(
-            "run-1", "fetch", {"url": "https://a.com"}, td,
+            "run-1",
+            "fetch",
+            {"url": "https://a.com"},
+            td,
             lambda x: None,
         )
         assert result.status == ExecutionStatus.FAILED
@@ -677,14 +690,19 @@ class TestOutputSchemaStructuralFallback:
     async def test_str_fails_both_phases(self, store):
         """String fails both strict schema and structural check → ToolFailed with sanitized error."""
         td = ToolDefinition(
-            name="fetch", description="fetch",
-            idempotency_key_fields=["url"], side_effects=[SideEffect.EXTERNAL],
+            name="fetch",
+            description="fetch",
+            idempotency_key_fields=["url"],
+            side_effects=[SideEffect.EXTERNAL],
             output_schema={"type": "object"},
         )
         executor = ToolExecutor(store)
 
         result = await executor.execute(
-            "run-1", "fetch", {"url": "https://a.com"}, td,
+            "run-1",
+            "fetch",
+            {"url": "https://a.com"},
+            td,
             lambda x: "hello world",
         )
         assert result.status == ExecutionStatus.FAILED
@@ -694,14 +712,19 @@ class TestOutputSchemaStructuralFallback:
     async def test_bool_fails_both_phases(self, store):
         """Bool fails both strict schema and structural check → ToolFailed."""
         td = ToolDefinition(
-            name="fetch", description="fetch",
-            idempotency_key_fields=["url"], side_effects=[SideEffect.EXTERNAL],
+            name="fetch",
+            description="fetch",
+            idempotency_key_fields=["url"],
+            side_effects=[SideEffect.EXTERNAL],
             output_schema={"type": "object"},
         )
         executor = ToolExecutor(store)
 
         result = await executor.execute(
-            "run-1", "fetch", {"url": "https://a.com"}, td,
+            "run-1",
+            "fetch",
+            {"url": "https://a.com"},
+            td,
             lambda x: True,
         )
         assert result.status == ExecutionStatus.FAILED
@@ -711,14 +734,19 @@ class TestOutputSchemaStructuralFallback:
     async def test_error_text_does_not_contain_raw_output(self, store):
         """Error text on double-fail must not contain raw tool output."""
         td = ToolDefinition(
-            name="fetch", description="fetch",
-            idempotency_key_fields=["url"], side_effects=[SideEffect.EXTERNAL],
+            name="fetch",
+            description="fetch",
+            idempotency_key_fields=["url"],
+            side_effects=[SideEffect.EXTERNAL],
             output_schema={"type": "object"},
         )
         executor = ToolExecutor(store)
 
         result = await executor.execute(
-            "run-1", "fetch", {"url": "https://a.com"}, td,
+            "run-1",
+            "fetch",
+            {"url": "https://a.com"},
+            td,
             lambda x: None,
         )
         assert "None" not in result.error or "got NoneType" in result.error
@@ -735,7 +763,10 @@ class TestOutputSchemaStructuralFallback:
         executor = ToolExecutor(store)
 
         result = await executor.execute(
-            "run-1", "http_request", {"url": "https://a.com"}, http_tool_def,
+            "run-1",
+            "http_request",
+            {"url": "https://a.com"},
+            http_tool_def,
             lambda x: {"x": 1},
         )
         assert result.status == ExecutionStatus.COMPLETED
@@ -745,14 +776,19 @@ class TestOutputSchemaStructuralFallback:
     async def test_int_fails_both_phases(self, store):
         """Integer fails both strict schema and structural check → ToolFailed."""
         td = ToolDefinition(
-            name="fetch", description="fetch",
-            idempotency_key_fields=["url"], side_effects=[SideEffect.EXTERNAL],
+            name="fetch",
+            description="fetch",
+            idempotency_key_fields=["url"],
+            side_effects=[SideEffect.EXTERNAL],
             output_schema={"type": "object"},
         )
         executor = ToolExecutor(store)
 
         result = await executor.execute(
-            "run-1", "fetch", {"url": "https://a.com"}, td,
+            "run-1",
+            "fetch",
+            {"url": "https://a.com"},
+            td,
             lambda x: 42,
         )
         assert result.status == ExecutionStatus.FAILED

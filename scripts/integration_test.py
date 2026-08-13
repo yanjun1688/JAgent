@@ -1,4 +1,4 @@
-"""JAgent 全链路集成测试 (Stage C/D/E 验证)
+r"""JAgent 全链路集成测试 (Stage C/D/E 验证)
 
 测试场景:
   A. 全链路单层执行 + 全部工具可见 (C-1)
@@ -25,30 +25,28 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from harness import (
-    EventStore,
-    ToolExecutor,
-    ToolDefinition,
-    RetryPolicy,
-    MockLLMClient,
     ChatResponse,
-    ToolRegistry,
-    PlanningExecutorScheduler,
-    SchedulerConfig,
     DagExecutor,
-    Planner,
     DagPlan,
     DagStep,
-    StepResult,
-    ExecState,
-    TaskState,
+    EventStore,
     EventType,
-    RunStatus,
+    ExecState,
+    MockLLMClient,
+    Planner,
+    PlanningExecutorScheduler,
+    RetryPolicy,
     RunState,
-    fold_events,
+    RunStatus,
+    SchedulerConfig,
+    StepResult,
+    TaskState,
+    ToolDefinition,
+    ToolExecutor,
+    ToolRegistry,
     setup_logging,
 )
 from harness.core.system_prompt import _PLAN_PROMPT, _REVISE_PROMPT
-
 
 PASS = "  PASS"
 FAIL = "  FAIL"
@@ -58,7 +56,8 @@ def make_tool_def(name: str, description: str = "", input_schema: dict | None = 
     return ToolDefinition(
         name=name,
         description=description or f"Tool: {name}",
-        input_schema=input_schema or {
+        input_schema=input_schema
+        or {
             "type": "object",
             "properties": {"msg": {"type": "string", "description": "Message to process"}},
         },
@@ -93,10 +92,17 @@ async def run_full_pipeline(
         max_consecutive_failures=max_consecutive_failures,
     )
     scheduler = PlanningExecutorScheduler(
-        store, executor, planner, dag, tool_defs, tool_fns, config=config,
+        store,
+        executor,
+        planner,
+        dag,
+        tool_defs,
+        tool_fns,
+        config=config,
     )
 
     import uuid
+
     run_id = f"int-{uuid.uuid4().hex[:8]}"
     state = await scheduler.run(run_id, intent)
 
@@ -113,28 +119,35 @@ async def scenario_a_all_tools_visible():
         make_tool_def("reverse", "Reverse a string"),
         make_tool_def("count_chars", "Count characters in a string"),
         make_tool_def("current_time", "Get current system time"),
-        make_tool_def("add", "Add two numbers", {
-            "type": "object",
-            "properties": {
-                "a": {"type": "number", "description": "First number"},
-                "b": {"type": "number", "description": "Second number"},
+        make_tool_def(
+            "add",
+            "Add two numbers",
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number", "description": "First number"},
+                    "b": {"type": "number", "description": "Second number"},
+                },
             },
-        }),
+        ),
     ]
     tool_fns = {name: lambda x, n=name: {"ok": True, "tool": n, "input": x} for name in tool_names}
 
-    plan_json = json.dumps({
-        "intent": "Echo a message and reverse it",
-        "steps": [
-            {"id": "s1", "tool": "echo", "input": {"msg": "hello"}},
-            {"id": "s2", "tool": "reverse", "input": {"msg": "$s1.input.msg"}, "depends_on": ["s1"]},
-        ],
-    })
+    plan_json = json.dumps(
+        {
+            "intent": "Echo a message and reverse it",
+            "steps": [
+                {"id": "s1", "tool": "echo", "input": {"msg": "hello"}},
+                {"id": "s2", "tool": "reverse", "input": {"msg": "$s1.input.msg"}, "depends_on": ["s1"]},
+            ],
+        }
+    )
 
     state, calls, store = await run_full_pipeline(
         "Echo and reverse a message",
         ["yes", plan_json],
-        tool_defs, tool_fns,
+        tool_defs,
+        tool_fns,
     )
 
     assert state.status == RunStatus.COMPLETED, f"Expected COMPLETED, got {state.status}"
@@ -170,10 +183,14 @@ async def scenario_b_user_intent_persistence():
     print("\n=== Scenario B: user_intent persistence through revision (C-2) ===")
 
     echo_def = make_tool_def("echo", "Echo back the input message")
-    fail_def = make_tool_def("force_fail", "Always fails", {
-        "type": "object",
-        "properties": {"msg": {"type": "string"}},
-    })
+    fail_def = make_tool_def(
+        "force_fail",
+        "Always fails",
+        {
+            "type": "object",
+            "properties": {"msg": {"type": "string"}},
+        },
+    )
     tool_defs = [echo_def, fail_def]
 
     async def echo_fn(inp):
@@ -186,25 +203,30 @@ async def scenario_b_user_intent_persistence():
 
     original_intent = "Process data and verify results with validation"
 
-    plan_json = json.dumps({
-        "intent": "Process and validate",
-        "steps": [
-            {"id": "s1", "tool": "echo", "input": {"msg": "step1 output"}},
-            {"id": "s2", "tool": "force_fail", "input": {"msg": "should fail"}},
-        ],
-    })
-    revise_json = json.dumps({
-        "intent": "Retry with fallback approach",
-        "steps": [
-            {"id": "s3", "tool": "echo", "input": {"msg": "fallback result"}},
-        ],
-        "step_tasks": {"s1": "achieved", "s2": "not_achieved"},
-    })
+    plan_json = json.dumps(
+        {
+            "intent": "Process and validate",
+            "steps": [
+                {"id": "s1", "tool": "echo", "input": {"msg": "step1 output"}},
+                {"id": "s2", "tool": "force_fail", "input": {"msg": "should fail"}},
+            ],
+        }
+    )
+    revise_json = json.dumps(
+        {
+            "intent": "Retry with fallback approach",
+            "steps": [
+                {"id": "s3", "tool": "echo", "input": {"msg": "fallback result"}},
+            ],
+            "step_tasks": {"s1": "achieved", "s2": "not_achieved"},
+        }
+    )
 
     state, calls, store = await run_full_pipeline(
         original_intent,
         ["yes", plan_json, revise_json],
-        tool_defs, tool_fns,
+        tool_defs,
+        tool_fns,
     )
 
     events = await store.get_events(state.run_id)
@@ -213,8 +235,10 @@ async def scenario_b_user_intent_persistence():
     plan_revised_events = [e for e in events if e.event_type == EventType.PLAN_REVISED]
     plan_created_events = [e for e in events if e.event_type == EventType.PLAN_CREATED]
 
-    print(f"  INFO: status={state.status.value}, events={len(events)}, "
-          f"PLAN_CREATED={len(plan_created_events)}, PLAN_REVISED={len(plan_revised_events)}")
+    print(
+        f"  INFO: status={state.status.value}, events={len(events)}, "
+        f"PLAN_CREATED={len(plan_created_events)}, PLAN_REVISED={len(plan_revised_events)}"
+    )
 
     # Verify revision happened
     if len(plan_revised_events) > 0:
@@ -258,10 +282,14 @@ async def scenario_c_output_keys_in_status():
     """C-4: 验证 build_dag_status_text 展示输出键"""
     print("\n=== Scenario C: Output keys in status text (C-4) ===")
 
-    rich_def = make_tool_def("rich_output", "Returns structured data", {
-        "type": "object",
-        "properties": {"msg": {"type": "string"}},
-    })
+    rich_def = make_tool_def(
+        "rich_output",
+        "Returns structured data",
+        {
+            "type": "object",
+            "properties": {"msg": {"type": "string"}},
+        },
+    )
     tool_defs = [rich_def]
 
     async def rich_output_fn(inp):
@@ -274,26 +302,32 @@ async def scenario_c_output_keys_in_status():
 
     tool_fns = {"rich_output": rich_output_fn}
 
-    plan_json = json.dumps({
-        "intent": "Get structured data",
-        "steps": [
-            {"id": "s1", "tool": "rich_output", "input": {"msg": "go"}},
-        ],
-    })
+    plan_json = json.dumps(
+        {
+            "intent": "Get structured data",
+            "steps": [
+                {"id": "s1", "tool": "rich_output", "input": {"msg": "go"}},
+            ],
+        }
+    )
 
     state, calls, store = await run_full_pipeline(
         "Get structured data",
         ["yes", plan_json],
-        tool_defs, tool_fns,
+        tool_defs,
+        tool_fns,
     )
 
     assert state.status == RunStatus.COMPLETED, f"Expected COMPLETED, got {state.status}"
     print(f"{PASS} Pipeline completed")
 
     # Use build_dag_status_text directly to verify output keys
-    plan = DagPlan(intent="test", steps=[
-        DagStep(id="s1", tool="rich_output", input={"msg": "go"}),
-    ])
+    plan = DagPlan(
+        intent="test",
+        steps=[
+            DagStep(id="s1", tool="rich_output", input={"msg": "go"}),
+        ],
+    )
     result = StepResult(
         step_id="s1",
         exec_state=ExecState.COMPLETED,
@@ -324,23 +358,26 @@ async def scenario_d_chatresponse_compatibility():
     tool_defs = [echo_def]
     tool_fns = {"echo": lambda x: {"ok": True, "result": x.get("msg", "")}}
 
-    plan_json = json.dumps({
-        "intent": "Echo a greeting",
-        "steps": [
-            {"id": "s1", "tool": "echo", "input": {"msg": "Hello World"}},
-        ],
-    })
+    plan_json = json.dumps(
+        {
+            "intent": "Echo a greeting",
+            "steps": [
+                {"id": "s1", "tool": "echo", "input": {"msg": "Hello World"}},
+            ],
+        }
+    )
 
     # Use ChatResponse objects explicitly
     responses = [
-        ChatResponse(content="yes"),                                   # classify
-        ChatResponse(content=plan_json, finish_reason="stop"),         # plan
+        ChatResponse(content="yes"),  # classify
+        ChatResponse(content=plan_json, finish_reason="stop"),  # plan
     ]
 
     state, calls, store = await run_full_pipeline(
         "Say hello",
         responses,
-        tool_defs, tool_fns,
+        tool_defs,
+        tool_fns,
     )
 
     assert state.status == RunStatus.COMPLETED, f"Expected COMPLETED, got {state.status}"
@@ -349,8 +386,7 @@ async def scenario_d_chatresponse_compatibility():
     # Verify all responses were ChatResponse
     for i, call in enumerate(calls):
         messages_sent = call["messages"]
-        print(f"  INFO: call[{i}] messages={len(messages_sent)}, "
-              f"tools={len(call.get('tools', []) or [])}")
+        print(f"  INFO: call[{i}] messages={len(messages_sent)}, tools={len(call.get('tools', []) or [])}")
 
     print(f"{PASS} All {len(calls)} LLM calls processed as ChatResponse")
 
@@ -362,19 +398,39 @@ async def scenario_f_task_state_display():
     """Stage E.1: 5种 task_state 枚举值在 build_dag_status_text 中的展示"""
     print("\n=== Scenario F: task_state display — all 5 enum values (Stage E.1) ===")
 
-    plan = DagPlan(intent="TaskState display test", steps=[
-        DagStep(id="s_a", tool="CHECKED", input={}),
-        DagStep(id="s_p", tool="CHECKED", input={}),
-        DagStep(id="s_n", tool="CHECKED", input={}),
-        DagStep(id="s_w", tool="CHECKED", input={}),
-        DagStep(id="s_u", tool="CHECKED", input={}),
-    ])
+    plan = DagPlan(
+        intent="TaskState display test",
+        steps=[
+            DagStep(id="s_a", tool="CHECKED", input={}),
+            DagStep(id="s_p", tool="CHECKED", input={}),
+            DagStep(id="s_n", tool="CHECKED", input={}),
+            DagStep(id="s_w", tool="CHECKED", input={}),
+            DagStep(id="s_u", tool="CHECKED", input={}),
+        ],
+    )
 
     results = {
-        "s_a": StepResult(step_id="s_a", exec_state=ExecState.COMPLETED, task_state=TaskState.ACHIEVED, output={"ok": True, "result": "All good"}),
-        "s_p": StepResult(step_id="s_p", exec_state=ExecState.COMPLETED, task_state=TaskState.PARTIAL, output={"ok": True, "result": "Mostly done"}),
-        "s_n": StepResult(step_id="s_n", exec_state=ExecState.COMPLETED, task_state=TaskState.NOT_ACHIEVED, output={"ok": False, "result": "Missed target"}),
-        "s_w": StepResult(step_id="s_w", exec_state=ExecState.COMPLETED, task_state=TaskState.WAIVED, output={"delegated": True}),
+        "s_a": StepResult(
+            step_id="s_a",
+            exec_state=ExecState.COMPLETED,
+            task_state=TaskState.ACHIEVED,
+            output={"ok": True, "result": "All good"},
+        ),
+        "s_p": StepResult(
+            step_id="s_p",
+            exec_state=ExecState.COMPLETED,
+            task_state=TaskState.PARTIAL,
+            output={"ok": True, "result": "Mostly done"},
+        ),
+        "s_n": StepResult(
+            step_id="s_n",
+            exec_state=ExecState.COMPLETED,
+            task_state=TaskState.NOT_ACHIEVED,
+            output={"ok": False, "result": "Missed target"},
+        ),
+        "s_w": StepResult(
+            step_id="s_w", exec_state=ExecState.COMPLETED, task_state=TaskState.WAIVED, output={"delegated": True}
+        ),
         "s_u": StepResult(step_id="s_u", exec_state=ExecState.COMPLETED, task_state=TaskState.UNKNOWN),
     }
 
@@ -396,7 +452,7 @@ async def scenario_f_task_state_display():
             all_ok = False
 
     if TaskState.NOT_ACHIEVED.value in status_text:
-        not_achieved_line = [l for l in status_text.split("\n") if f"task={TaskState.NOT_ACHIEVED.value}" in l]
+        not_achieved_line = [line for line in status_text.split("\n") if f"task={TaskState.NOT_ACHIEVED.value}" in line]
         if not_achieved_line:
             print(f"  INFO: not_achieved line => {not_achieved_line[0].strip()}")
     print(f"  INFO: full status text:\n{status_text}")
@@ -408,10 +464,14 @@ async def scenario_g_task_state_pipeline():
     print("\n=== Scenario G: task_state pipeline — partial/waived/unknown/invalid (Stage E.2) ===")
 
     echo_def = make_tool_def("echo", "Echo back the input message")
-    fail_def = make_tool_def("force_fail", "Always fails", {
-        "type": "object",
-        "properties": {"msg": {"type": "string"}},
-    })
+    fail_def = make_tool_def(
+        "force_fail",
+        "Always fails",
+        {
+            "type": "object",
+            "properties": {"msg": {"type": "string"}},
+        },
+    )
     tool_defs = [echo_def, fail_def]
 
     async def echo_fn(inp):
@@ -422,35 +482,40 @@ async def scenario_g_task_state_pipeline():
 
     tool_fns = {"echo": echo_fn, "force_fail": fail_fn}
 
-    plan_json = json.dumps({
-        "intent": "Test varied task_state assessments",
-        "steps": [
-            {"id": "s1", "tool": "echo", "input": {"msg": "step1 bogus state"}},
-            {"id": "s2", "tool": "force_fail", "input": {"msg": "step2 fail"}},
-            {"id": "s3", "tool": "echo", "input": {"msg": "step3 waived"}},
-            {"id": "s4", "tool": "echo", "input": {"msg": "step4 partial"}},
-        ],
-    })
+    plan_json = json.dumps(
+        {
+            "intent": "Test varied task_state assessments",
+            "steps": [
+                {"id": "s1", "tool": "echo", "input": {"msg": "step1 bogus state"}},
+                {"id": "s2", "tool": "force_fail", "input": {"msg": "step2 fail"}},
+                {"id": "s3", "tool": "echo", "input": {"msg": "step3 waived"}},
+                {"id": "s4", "tool": "echo", "input": {"msg": "step4 partial"}},
+            ],
+        }
+    )
 
-    revise_json = json.dumps({
-        "intent": "Recover with mixed task_state assessment",
-        "steps": [
-            {"id": "s5", "tool": "echo", "input": {"msg": "recovery"}},
-        ],
-        "step_tasks": {
-            "s1": "BOGUS_VALUE",
-            "s2": "not_achieved",
-            "s3": "waived",
-            "s4": "partial",
-            "ghost_step": "achieved",
-            "s99": "AMAZING_STATE",
-        },
-    })
+    revise_json = json.dumps(
+        {
+            "intent": "Recover with mixed task_state assessment",
+            "steps": [
+                {"id": "s5", "tool": "echo", "input": {"msg": "recovery"}},
+            ],
+            "step_tasks": {
+                "s1": "BOGUS_VALUE",
+                "s2": "not_achieved",
+                "s3": "waived",
+                "s4": "partial",
+                "ghost_step": "achieved",
+                "s99": "AMAZING_STATE",
+            },
+        }
+    )
 
     state, calls, store = await run_full_pipeline(
         "Assess four steps with mixed results",
         ["yes", plan_json, revise_json],
-        tool_defs, tool_fns,
+        tool_defs,
+        tool_fns,
     )
 
     assert state.status == RunStatus.COMPLETED, f"Expected COMPLETED, got {state.status}"
@@ -459,8 +524,10 @@ async def scenario_g_task_state_pipeline():
     events = await store.get_events(state.run_id)
     plan_revised_events = [e for e in events if e.event_type == EventType.PLAN_REVISED]
     plan_created_events = [e for e in events if e.event_type == EventType.PLAN_CREATED]
-    print(f"  INFO: status={state.status.value}, events={len(events)}, "
-          f"PLAN_CREATED={len(plan_created_events)}, PLAN_REVISED={len(plan_revised_events)}")
+    print(
+        f"  INFO: status={state.status.value}, events={len(events)}, "
+        f"PLAN_CREATED={len(plan_created_events)}, PLAN_REVISED={len(plan_revised_events)}"
+    )
 
     if len(plan_revised_events) > 0:
         print(f"{PASS} Plan was revised after step failure")
@@ -469,11 +536,11 @@ async def scenario_g_task_state_pipeline():
         await store.close()
         return False
 
-    print(f"  INFO: Check harness.log for expected entries:")
-    print(f"        1. [WARNING] step_tasks: invalid state BOGUS_VALUE for s1 → defaults to unknown")
-    print(f"        2. [INFO] step_tasks from LLM: [('s1', 'unknown'), ('s3', 'waived'), ('s4', 'partial')]")
-    print(f"        3. [INFO] Merged 3 step_tasks from LLM assessment")
-    print(f"        4. s2(FAILED) filtered by should_not_rerun, ghost_step/s99 unknown steps ignored")
+    print("  INFO: Check harness.log for expected entries:")
+    print("        1. [WARNING] step_tasks: invalid state BOGUS_VALUE for s1 → defaults to unknown")
+    print("        2. [INFO] step_tasks from LLM: [('s1', 'unknown'), ('s3', 'waived'), ('s4', 'partial')]")
+    print("        3. [INFO] Merged 3 step_tasks from LLM assessment")
+    print("        4. s2(FAILED) filtered by should_not_rerun, ghost_step/s99 unknown steps ignored")
 
     await store.close()
     return True
@@ -497,8 +564,7 @@ async def scenario_e_abstract_placeholders():
 
     # Verify no concrete tool names in example sections
     # (these were the old concrete examples that should be gone)
-    concrete_keywords = ["web_search", "fetch_url", "save_to_file", "http_request",
-                         "file_op", "web_fetch"]
+    concrete_keywords = ["web_search", "fetch_url", "save_to_file", "http_request", "file_op", "web_fetch"]
     found_concrete = [kw for kw in concrete_keywords if kw.lower() in _PLAN_PROMPT.lower()]
     if not found_concrete:
         print(f"{PASS} No concrete tool names in PLAN prompt examples")
@@ -516,9 +582,9 @@ async def scenario_e_abstract_placeholders():
     else:
         print(f"{FAIL} REVISE prompt missing dual slots")
         if "{user_intent}" not in _REVISE_PROMPT:
-            print(f"  DEBUG: missing {{user_intent}}")
+            print("  DEBUG: missing {user_intent}")
         if "{intent}" not in _REVISE_PROMPT:
-            print(f"  DEBUG: missing {{intent}}")
+            print("  DEBUG: missing {intent}")
 
     return all(checks.values())
 
