@@ -9,14 +9,16 @@ from httpx import ASGITransport, AsyncClient
 
 import json
 
-from harness import RetryPolicy, SchedulerConfig, SideEffect, ToolDefinition
+from harness import RetryPolicy, SchedulerConfig, ToolDefinition
 from harness.api.app import HarnessAPI, app, get_hapi
 from harness.core.llm_client import MockLLMClient
 from harness.monitoring.run_monitor import RunMonitor
 from harness.models.events import (
     AgentThoughtPayload,
+    ConfirmationRequestedPayload,
     EventType,
     RunCompletedPayload,
+    RunPausedPayload,
     RunStartedPayload,
 )
 from harness.storage.event_store import EventStore
@@ -132,19 +134,41 @@ class TestConfirm:
     async def test_confirm_idempotent(self, client, api):
         _, store = api
         await store.append_event("r5", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event(
+            "r5",
+            EventType.CONFIRMATION_REQUESTED,
+            ConfirmationRequestedPayload(
+                confirmation_id="cid-1",
+                tool_call_id="tc-1",
+                tool_name="file_op",
+                input={"operation": "write", "path": "x.txt"},
+                idempotency_key="ik-1",
+            ).model_dump(),
+        )
+        await store.append_event(
+            "r5",
+            EventType.RUN_PAUSED,
+            RunPausedPayload(reason="waiting for confirmation").model_dump(),
+        )
 
-        resp = await client.post("/api/v1/runs/r5/confirm", json={
-            "confirmation_id": "cid-1",
-            "confirmed": True,
-            "operator_id": "op1",
-        })
+        resp = await client.post(
+            "/api/v1/runs/r5/confirm",
+            json={
+                "confirmation_id": "cid-1",
+                "confirmed": True,
+                "operator_id": "op1",
+            },
+        )
         assert resp.status_code == 200
 
-        resp2 = await client.post("/api/v1/runs/r5/confirm", json={
-            "confirmation_id": "cid-1",
-            "confirmed": True,
-            "operator_id": "op1",
-        })
+        resp2 = await client.post(
+            "/api/v1/runs/r5/confirm",
+            json={
+                "confirmation_id": "cid-1",
+                "confirmed": True,
+                "operator_id": "op1",
+            },
+        )
         assert resp2.status_code == 200
 
         events = await store.get_events("r5")
@@ -153,6 +177,36 @@ class TestConfirm:
             f"CT-9: idempotency_key should prevent duplicate CONFIRMATION_RECEIVED. "
             f"Got {len(confirmation_events)} events"
         )
+
+    async def test_confirm_unknown_id_is_rejected(self, client, api):
+        _, store = api
+        await store.append_event("r5-invalid", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event(
+            "r5-invalid",
+            EventType.RUN_PAUSED,
+            RunPausedPayload(reason="waiting for confirmation").model_dump(),
+        )
+        response = await client.post(
+            "/api/v1/runs/r5-invalid/confirm",
+            json={"confirmation_id": "does-not-exist", "confirmed": True, "operator_id": "op1"},
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "confirmation_not_pending"
+
+
+class TestOperatorFeedback:
+    async def test_expires_in_seqs_is_relative_to_current_seq(self, client, api):
+        _, store = api
+        await store.append_event("r-feedback", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r-feedback", EventType.AGENT_THOUGHT, AgentThoughtPayload(thought="x").model_dump())
+        current_seq = (await store.get_events("r-feedback"))[-1].seq
+        response = await client.post(
+            "/api/v1/runs/r-feedback/feedback",
+            json={"text": "use the safe path", "expires_in_seqs": 3},
+        )
+        assert response.status_code == 200
+        feedback = (await store.get_events("r-feedback"))[-1]
+        assert feedback.payload["expires_at_seq"] == current_seq + 3
 
     @pytest.mark.asyncio
     async def test_confirm_idempotent_database_level(self, client, api):
@@ -167,8 +221,11 @@ class TestConfirm:
 
         # Simulate two concurrent confirm writes with same idempotency_key
         from harness.models.events import ConfirmationReceivedPayload
+
         payload = ConfirmationReceivedPayload(
-            confirmation_id="cid-2", confirmed=True, operator_id="op1",
+            confirmation_id="cid-2",
+            confirmed=True,
+            operator_id="op1",
         ).model_dump()
 
         results = await asyncio.gather(
@@ -231,7 +288,9 @@ class TestWebSocket:
 
         _, store = sync_api
         asyncio.run(store.append_event("w1", EventType.RUN_STARTED, RunStartedPayload(intent="ws test").model_dump()))
-        asyncio.run(store.append_event("w1", EventType.AGENT_THOUGHT, AgentThoughtPayload(thought="hello").model_dump()))
+        asyncio.run(
+            store.append_event("w1", EventType.AGENT_THOUGHT, AgentThoughtPayload(thought="hello").model_dump())
+        )
 
         client = TestClient(app)
         with client.websocket_connect("/api/v1/runs/w1/events") as ws:
@@ -256,11 +315,13 @@ class TestWebSocket:
 
     def test_unknown_run_returns_empty(self, sync_api):
         from starlette.testclient import TestClient
+        from starlette.websockets import WebSocketDisconnect
 
         client = TestClient(app)
-        with client.websocket_connect("/api/v1/runs/unknown/events") as ws:
-            with pytest.raises(Exception):
-                ws.receive(timeout=1)
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect("/api/v1/runs/unknown/events"):
+                pass
+        assert exc_info.value.code == 4404
 
 
 # ── Extra API tests ──────────────────────────────────────────────
@@ -271,6 +332,7 @@ class TestPauseErrors:
         _, store = api
         await store.append_event("r8", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
         from harness.models.events import RunPausedPayload
+
         await store.append_event("r8", EventType.RUN_PAUSED, RunPausedPayload(reason="manual").model_dump())
 
         resp = await client.post("/api/v1/runs/r8/pause", json={"reason": "again"})
@@ -303,19 +365,25 @@ class TestHarnessAPIFullWiring:
         hapi = HarnessAPI(store=store, executor=executor)
 
         echo_def = ToolDefinition(
-            name="echo", description="echo",
-            input_schema={}, idempotency_key_fields=[],
-            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(),
+            name="echo",
+            description="echo",
+            input_schema={},
+            idempotency_key_fields=[],
+            side_effects=[],
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
         )
         hapi.tool_defs = [echo_def]
         hapi.tool_fns = {"echo": lambda x: {"ok": True}}
 
-        hapi.llm_client = MockLLMClient(responses=[
-            json.dumps({"steps": [{"id": "s1", "tool": "echo", "input": {}, "depends_on": []}]}),
-            json.dumps({"steps": []}),
-        ])
+        hapi.llm_client = MockLLMClient(
+            responses=[
+                json.dumps({"steps": [{"id": "s1", "tool": "echo", "input": {}, "depends_on": []}]}),
+                json.dumps({"steps": []}),
+            ]
+        )
         registry = ToolRegistry()
-        registry.register(echo_def, hapi.tool_fns["echo"])
+        registry._register(echo_def, hapi.tool_fns["echo"])
         hapi.registry = registry
         hapi.scheduler_config = SchedulerConfig(max_iterations=3)
         hapi.monitor = RunMonitor(store)
@@ -338,6 +406,7 @@ class TestHarnessAPIFullWiring:
         run_id = data["run_id"]
 
         import asyncio
+
         await asyncio.sleep(1.0)
 
         hapi, store = full_api
@@ -345,3 +414,40 @@ class TestHarnessAPIFullWiring:
         event_types = [e.event_type for e in events]
         assert EventType.RUN_STARTED in event_types
         assert EventType.RUN_COMPLETED in event_types
+
+    async def test_start_run_failure_writes_run_failed_not_orphan(self, full_client, full_api):
+        """Bug 6 回归（Run 017dc1f8）：start_run 内 backend 创建失败 →
+        必须写结构化 RunFailed，不留"RunStarted 已写但后台从未启动"的孤儿 Run。
+        """
+        hapi, store = full_api
+
+        async def _boom_backend(*args, **kwargs):
+            raise RuntimeError("sandbox backend unavailable")
+
+        import harness.execution.factory as factory_mod
+
+        original = factory_mod.create_backend
+        factory_mod.create_backend = _boom_backend
+        try:
+            with pytest.raises(RuntimeError):
+                # start_run 写 RunFailed 后重新抛出，API 返回 500；TestClient 默认
+                # raise_server_exceptions=True 会把服务端异常重新抛出到调用方。
+                await full_client.post("/api/v1/runs", json={"intent": "write file"})
+        finally:
+            factory_mod.create_backend = original
+
+        # 无论 API 返回什么，RunStarted 之后必须紧跟 RunFailed，不留孤儿 Run
+        run_rows = await store.list_runs(limit=10)
+        started_without_failed = []
+        failed_found = False
+        for row in run_rows:
+            rid = row.get("run_id")
+            evs = await store.get_events(rid)
+            types = [e.event_type for e in evs]
+            if EventType.RUN_STARTED in types:
+                if EventType.RUN_FAILED not in types:
+                    started_without_failed.append(rid)
+                else:
+                    failed_found = True
+        assert failed_found, "存在 RunStarted 后必须写 RunFailed 的 Run"
+        assert not started_without_failed, f"存在 RunStarted 后无 RunFailed 的孤儿 Run: {started_without_failed}"

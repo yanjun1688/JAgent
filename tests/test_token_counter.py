@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
-import pytest
 
 from harness.core.token_counter import (
     HeuristicTokenCounter,
     ProviderTokenCounter,
     TiktokenTokenCounter,
-    TokenCounter,
     create_token_counter,
 )
 
@@ -89,17 +87,20 @@ class TestProviderTokenCounter:
         )
 
         class FakeResp:
-            def json(self_inner):
+            def json(self):
                 return {"tokens": 42}
-            def raise_for_status(self_inner):
+
+            def raise_for_status(self):
                 pass
 
         class FakeClient:
-            async def post(self_inner, url, headers=None, json=None):
+            async def post(self, url, headers=None, json=None):
                 return FakeResp()
-            async def __aenter__(self_inner):
-                return self_inner
-            async def __aexit__(self_inner, *args):
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
                 pass
 
         with patch("httpx.AsyncClient", return_value=FakeClient()):

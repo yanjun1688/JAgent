@@ -144,41 +144,49 @@ class TestConversationIsolation:
 
         # Conversation A timeline
         await store.append_event(
-            conv_a, EventType.CONVERSATION_STARTED,
+            conv_a,
+            EventType.CONVERSATION_STARTED,
             ConversationStartedPayload(conversation_id=conv_a, title="A").model_dump(),
         )
         await store.append_event(
-            conv_a, EventType.CONVERSATION_MESSAGE,
+            conv_a,
+            EventType.CONVERSATION_MESSAGE,
             ConversationMessagePayload(
                 conversation_id=conv_a, run_id=run_a, role="user", content="A-user"
             ).model_dump(),
         )
         await store.append_event(
-            run_a, EventType.RUN_STARTED,
+            run_a,
+            EventType.RUN_STARTED,
             RunStartedPayload(intent="A", conversation_id=conv_a).model_dump(),
         )
         await store.append_event(
-            run_a, EventType.AGENT_THOUGHT,
+            run_a,
+            EventType.AGENT_THOUGHT,
             AgentThoughtPayload(thought="A-thinking", token_count=1).model_dump(),
         )
 
         # Conversation B timeline
         await store.append_event(
-            conv_b, EventType.CONVERSATION_STARTED,
+            conv_b,
+            EventType.CONVERSATION_STARTED,
             ConversationStartedPayload(conversation_id=conv_b, title="B").model_dump(),
         )
         await store.append_event(
-            conv_b, EventType.CONVERSATION_MESSAGE,
+            conv_b,
+            EventType.CONVERSATION_MESSAGE,
             ConversationMessagePayload(
                 conversation_id=conv_b, run_id=run_b, role="user", content="B-user"
             ).model_dump(),
         )
         await store.append_event(
-            run_b, EventType.RUN_STARTED,
+            run_b,
+            EventType.RUN_STARTED,
             RunStartedPayload(intent="B", conversation_id=conv_b).model_dump(),
         )
         await store.append_event(
-            run_b, EventType.AGENT_THOUGHT,
+            run_b,
+            EventType.AGENT_THOUGHT,
             AgentThoughtPayload(thought="B-thinking", token_count=1).model_dump(),
         )
 
@@ -216,27 +224,26 @@ class TestListRunsExcludesConversations:
 
         # Conversation events: run_id == conversation_id, column set
         await store.append_event(
-            conv_id, EventType.CONVERSATION_STARTED,
+            conv_id,
+            EventType.CONVERSATION_STARTED,
             ConversationStartedPayload(conversation_id=conv_id, title="T").model_dump(),
         )
         await store.append_event(
-            conv_id, EventType.CONVERSATION_MESSAGE,
-            ConversationMessagePayload(
-                conversation_id=conv_id, run_id=run_id, role="user", content="hi"
-            ).model_dump(),
+            conv_id,
+            EventType.CONVERSATION_MESSAGE,
+            ConversationMessagePayload(conversation_id=conv_id, run_id=run_id, role="user", content="hi").model_dump(),
         )
 
         # Run event: run_id != conversation_id, column set
         await store.append_event(
-            run_id, EventType.RUN_STARTED,
+            run_id,
+            EventType.RUN_STARTED,
             RunStartedPayload(intent="i", conversation_id=conv_id).model_dump(),
         )
 
         rows = await store.list_runs()
         run_ids = [r["run_id"] for r in rows]
-        assert run_ids == [run_id], (
-            f"list_runs must exclude conversation-level events; got {run_ids}"
-        )
+        assert run_ids == [run_id], f"list_runs must exclude conversation-level events; got {run_ids}"
 
         total = await store.total_run_count()
         assert total == 1
@@ -245,7 +252,8 @@ class TestListRunsExcludesConversations:
         """A run not associated with any conversation still appears."""
         run_id = "run-standalone"
         await store.append_event(
-            run_id, EventType.RUN_STARTED,
+            run_id,
+            EventType.RUN_STARTED,
             RunStartedPayload(intent="solo").model_dump(),
         )
         rows = await store.list_runs()
@@ -269,12 +277,17 @@ class TestLegacyPersistenceCompat:
         # Inject a row that bypasses payload-driven column writing,
         # forcing conversation_id = NULL (simulating legacy data).
         import time as _t
+
         await store.conn.execute(
             "INSERT INTO events (run_id, seq, event_type, payload, idempotency_key, "
             "created_at, conversation_id) VALUES (?, ?, ?, ?, NULL, ?, NULL)",
-            (conv_id, 1, EventType.CONVERSATION_STARTED.value,
-             ConversationStartedPayload(conversation_id=conv_id, title="L").model_dump_json(),
-             _t.time()),
+            (
+                conv_id,
+                1,
+                EventType.CONVERSATION_STARTED.value,
+                ConversationStartedPayload(conversation_id=conv_id, title="L").model_dump_json(),
+                _t.time(),
+            ),
         )
         await store.conn.commit()
 

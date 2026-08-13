@@ -8,7 +8,6 @@ C-E3: Conversation list recovery
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 import time
 
@@ -68,10 +67,10 @@ async def test_three_round_conversation():
         for i, msg in enumerate(["查天气", "用中文总结", "那明天呢"]):
             send_resp = await send_message(client, cid, msg)
             run_id = send_resp["run_id"]
-            print(f"  Round {i+1}: sent '{msg}', run_id={run_id}")
+            print(f"  Round {i + 1}: sent '{msg}', run_id={run_id}")
             state = await wait_for_run_completion(client, run_id)
             results.append(state)
-            print(f"  Round {i+1}: status={state['status']}")
+            print(f"  Round {i + 1}: status={state['status']}")
 
         conv_detail = await get_conversation(client, cid)
         messages = conv_detail.get("messages", [])
@@ -111,7 +110,7 @@ async def test_conversation_list_recovery():
     async with httpx.AsyncClient() as client:
         ids = []
         for i in range(3):
-            conv = await create_conversation(client, f"Chat {i+1}")
+            conv = await create_conversation(client, f"Chat {i + 1}")
             ids.append(conv["conversation_id"])
             await asyncio.sleep(0.1)
 

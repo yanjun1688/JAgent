@@ -13,9 +13,7 @@ import re
 
 HARNESS_ROOT = pathlib.Path(__file__).resolve().parents[1] / "harness"
 
-_PAT = re.compile(
-    r'_log_\w+\.(?:info|debug|warning|error)\(\s*"([^"]*%s[^"]*)",\s*fmtkv\('
-)
+_PAT = re.compile(r'_log_\w+\.(?:info|debug|warning|error)\(\s*"([^"]*%s[^"]*)",\s*fmtkv\(')
 
 
 def _fmtkv_log_calls():
@@ -31,7 +29,6 @@ def test_fmtkv_log_calls_single_placeholder():
     for f, line, msg in _fmtkv_log_calls():
         if msg.count("%s") != 1:
             offenders.append(f"{f}:{line}: {msg.count('%s')} placeholders -> {msg!r}")
-    assert not offenders, (
-        "fmtkv() returns a single string; format strings must use exactly one %s:\n"
-        + "\n".join(offenders)
+    assert not offenders, "fmtkv() returns a single string; format strings must use exactly one %s:\n" + "\n".join(
+        offenders
     )

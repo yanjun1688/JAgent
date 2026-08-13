@@ -7,7 +7,6 @@ rebuilt per OpenAI convention (assistant.tool_calls + role=tool pairs).
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from harness.core.fold import RunState, ToolResult
@@ -31,7 +30,7 @@ def _extract_answer(text: str) -> str | None:
     idx = text.find("ANSWER:")
     if idx < 0:
         return None
-    after = text[idx + len("ANSWER:"):].strip()
+    after = text[idx + len("ANSWER:") :].strip()
     if not after:
         return None
     end = after.find("\n")
@@ -86,14 +85,24 @@ class LLMAgentKernel(AgentKernel):
     def __init__(self, client: LLMClient) -> None:
         self.client = client
 
-    async def _generate_stop_summary(
-        self, messages: list[dict[str, Any]], response_text: str
-    ) -> str | None:
+    async def _generate_stop_summary(self, messages: list[dict[str, Any]], response_text: str) -> str | None:
         summary_messages = [
-            {"role": "system", "content": "You are a helpful assistant. Summarize the completed task for the user in plain text. Do not use any special format prefixes like ANSWER: or THOUGHT:. Just write naturally."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful assistant. Summarize the completed task for the user in plain text. "
+                    "Do not use any special format prefixes like ANSWER: or THOUGHT:. Just write naturally."
+                ),
+            },
             *messages[1:],
             {"role": "assistant", "content": response_text},
-            {"role": "user", "content": "The task is now complete. Based on everything done above, provide a brief final response to the user summarizing what was accomplished. Be concise and helpful. Do not use any tools."},
+            {
+                "role": "user",
+                "content": (
+                    "The task is now complete. Based on everything done above, provide a brief final response "
+                    "to the user summarizing what was accomplished. Be concise and helpful. Do not use any tools."
+                ),
+            },
         ]
         try:
             resp = await self.client.chat(summary_messages, max_tokens=512)
@@ -148,16 +157,18 @@ class LLMAgentKernel(AgentKernel):
                 _flush()
                 current_assistant = {"role": "assistant", "content": item.thought}
             else:
-                tr: ToolResult = item
+                tool_result: ToolResult = item
                 if current_assistant is None:
                     current_assistant = {"role": "assistant", "content": ""}
                 tool_calls_list = current_assistant.setdefault("tool_calls", [])
-                tool_calls_list.append({
-                    "id": tr.tool_call_id,
-                    "type": "function",
-                    "function": {"name": tr.tool_name, "arguments": "{}"},
-                })
-                pending_tool_call_ids.append(tr.tool_call_id)
+                tool_calls_list.append(
+                    {
+                        "id": tool_result.tool_call_id,
+                        "type": "function",
+                        "function": {"name": tool_result.tool_name, "arguments": "{}"},
+                    }
+                )
+                pending_tool_call_ids.append(tool_result.tool_call_id)
         _flush()
         return messages
 
@@ -178,14 +189,22 @@ class LLMAgentKernel(AgentKernel):
         schemas = build_tool_schemas(tool_defs) if tool_defs else None
         use_fn = schemas is not None
         phase = AgentPhase.SERIAL_THINK_FN if use_fn else AgentPhase.SERIAL_THINK_TEXT
-        tool_list = "\n".join(
-            f"- **{td.name}**: {td.description}"
-            + (" (dangerous — requires confirmation)" if td.requires_confirmation else "")
-            for td in tool_defs
-        ) or "(no tools available)"
+        tool_list = (
+            "\n".join(
+                f"- **{td.name}**: {td.description}"
+                + (" (dangerous — requires confirmation)" if td.requires_confirmation else "")
+                for td in tool_defs
+            )
+            or "(no tools available)"
+        )
         system_prompt = get_prompt(phase, intent=intent, tool_list=tool_list)
-        _logger.info("[think] phase=%s len=%d chars intent=%s tools=%d",
-                     phase.value, len(system_prompt), intent[:80], len(tool_defs))
+        _logger.info(
+            "[think] phase=%s len=%d chars intent=%s tools=%d",
+            phase.value,
+            len(system_prompt),
+            intent[:80],
+            len(tool_defs),
+        )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
@@ -216,8 +235,12 @@ class LLMAgentKernel(AgentKernel):
 
         messages.extend(self._build_history_messages(state))
 
-        _logger.info("[think] %s: %d messages, %d chars total",
-                     phase.value, len(messages), sum(len(m.get("content", "")) for m in messages))
+        _logger.info(
+            "[think] %s: %d messages, %d chars total",
+            phase.value,
+            len(messages),
+            sum(len(m.get("content", "")) for m in messages),
+        )
 
         resp = await self.client.chat(messages, tools=schemas) if schemas else await self.client.chat(messages)
         return await self._consume_response(resp, messages)
@@ -227,12 +250,14 @@ class LLMAgentKernel(AgentKernel):
         if resp.tool_calls:
             thought = resp.content or ""
             for tc in resp.tool_calls:
-                results.append(ThinkResult(
-                    thought=thought,
-                    tool_name=tc.name,
-                    tool_input=tc.arguments,
-                    tool_call_id=tc.id,
-                ))
+                results.append(
+                    ThinkResult(
+                        thought=thought,
+                        tool_name=tc.name,
+                        tool_input=tc.arguments,
+                        tool_call_id=tc.id,
+                    )
+                )
             tc_names = [r.tool_name for r in results if r.tool_name]
             if tc_names:
                 _logger.info("[PARSE] → %d tool(s): %s", len(tc_names), ", ".join(tc_names))
@@ -256,13 +281,13 @@ class LLMAgentKernel(AgentKernel):
                 if _STOP_MARKER in thought:
                     thought = thought.split(_STOP_MARKER)[0]
                 if thought.startswith("THOUGHT:"):
-                    thought = thought[len("THOUGHT:"):].strip()
+                    thought = thought[len("THOUGHT:") :].strip()
                 return [ThinkResult(thought=thought[:200], tool_name=None, direct_answer=summary)]
             if _STOP_MARKER in content:
                 stop_idx = content.find(_STOP_MARKER)
                 thought = content[:stop_idx].strip()
                 if thought.startswith("THOUGHT:"):
-                    thought = thought[len("THOUGHT:"):].strip()
+                    thought = thought[len("THOUGHT:") :].strip()
                 return [ThinkResult(thought=thought, tool_name=None)]
             return [ThinkResult(thought=content.strip(), tool_name=None)]
 

@@ -1,6 +1,19 @@
 repos:
   - repo: local
     hooks:
+      - id: ruff
+        name: ruff check
+        entry: uv run ruff check harness tests scripts
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
+      - id: bug-summary
+        name: validate Bug summary
+        entry: uv run pytest tests/test_bug_summary.py -q
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: pytest
         name: run tests
         entry: uv run pytest

@@ -4,7 +4,7 @@ import pytest
 
 from harness.core.fold import RunStatus, fold_events
 from harness.core.lifecycle import mark_orphans
-from harness.models.events import Event, EventType, RunOrphanedPayload
+from harness.models.events import Event, EventType
 from harness.storage.event_store import EventStore
 
 
@@ -80,7 +80,8 @@ class TestFoldOrphaned:
 class TestMarkOrphans:
     async def test_marks_running_run(self, store: EventStore):
         await store.append_event(
-            "r1", EventType.RUN_STARTED,
+            "r1",
+            EventType.RUN_STARTED,
             {"intent": "test", "context_snapshot": {}},
         )
         marked = await mark_orphans(store)
@@ -92,11 +93,13 @@ class TestMarkOrphans:
 
     async def test_marks_paused_run(self, store: EventStore):
         await store.append_event(
-            "r1", EventType.RUN_STARTED,
+            "r1",
+            EventType.RUN_STARTED,
             {"intent": "test", "context_snapshot": {}},
         )
         await store.append_event(
-            "r1", EventType.RUN_PAUSED,
+            "r1",
+            EventType.RUN_PAUSED,
             {"reason": "user_requested"},
         )
         marked = await mark_orphans(store)
@@ -104,11 +107,13 @@ class TestMarkOrphans:
 
     async def test_does_not_mark_completed(self, store: EventStore):
         await store.append_event(
-            "r1", EventType.RUN_STARTED,
+            "r1",
+            EventType.RUN_STARTED,
             {"intent": "test", "context_snapshot": {}},
         )
         await store.append_event(
-            "r1", EventType.RUN_COMPLETED,
+            "r1",
+            EventType.RUN_COMPLETED,
             {"result_summary": "done"},
         )
         marked = await mark_orphans(store)
@@ -120,11 +125,13 @@ class TestMarkOrphans:
 
     async def test_does_not_mark_failed(self, store: EventStore):
         await store.append_event(
-            "r1", EventType.RUN_STARTED,
+            "r1",
+            EventType.RUN_STARTED,
             {"intent": "test", "context_snapshot": {}},
         )
         await store.append_event(
-            "r1", EventType.RUN_FAILED,
+            "r1",
+            EventType.RUN_FAILED,
             {"final_error": "boom", "event_count": 2},
         )
         marked = await mark_orphans(store)
@@ -132,7 +139,8 @@ class TestMarkOrphans:
 
     async def test_idempotent_no_double_mark(self, store: EventStore):
         await store.append_event(
-            "r1", EventType.RUN_STARTED,
+            "r1",
+            EventType.RUN_STARTED,
             {"intent": "test", "context_snapshot": {}},
         )
         marked1 = await mark_orphans(store)
@@ -147,23 +155,28 @@ class TestMarkOrphans:
 
     async def test_multiple_runs_mixed(self, store: EventStore):
         await store.append_event(
-            "r1", EventType.RUN_STARTED,
+            "r1",
+            EventType.RUN_STARTED,
             {"intent": "running task", "context_snapshot": {}},
         )
         await store.append_event(
-            "r2", EventType.RUN_STARTED,
+            "r2",
+            EventType.RUN_STARTED,
             {"intent": "completed task", "context_snapshot": {}},
         )
         await store.append_event(
-            "r2", EventType.RUN_COMPLETED,
+            "r2",
+            EventType.RUN_COMPLETED,
             {"result_summary": "done"},
         )
         await store.append_event(
-            "r3", EventType.RUN_STARTED,
+            "r3",
+            EventType.RUN_STARTED,
             {"intent": "paused task", "context_snapshot": {}},
         )
         await store.append_event(
-            "r3", EventType.RUN_PAUSED,
+            "r3",
+            EventType.RUN_PAUSED,
             {"reason": "user_requested"},
         )
 
@@ -188,7 +201,8 @@ class TestMarkOrphans:
 
     async def test_fold_after_mark_shows_orphaned(self, store: EventStore):
         await store.append_event(
-            "r1", EventType.RUN_STARTED,
+            "r1",
+            EventType.RUN_STARTED,
             {"intent": "test", "context_snapshot": {}},
         )
         await mark_orphans(store)

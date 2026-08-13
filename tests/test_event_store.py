@@ -332,7 +332,10 @@ class TestAll15EventTypes:
             (EventType.RUN_RESUMED, {"resume_from_seq": 5}),
             (EventType.RUN_COMPLETED, {"result_summary": "all done"}),
             (EventType.RUN_FAILED, {"final_error": "max retries exceeded", "event_count": 10}),
-            (EventType.PLAN_CREATED, {"plan_id": "p-1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1}),
+            (
+                EventType.PLAN_CREATED,
+                {"plan_id": "p-1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1},
+            ),
             (
                 EventType.DAG_STEP_COMPLETED,
                 {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"},
@@ -364,32 +367,36 @@ class TestConcurrentSeqAllocation:
     """Verify seq allocation is atomic under concurrent writes."""
 
     async def test_concurrent_appends_produce_unique_seqs(self, store: EventStore):
-        N = 20
+        n = 20
+
         async def writer(idx: int) -> int:
             event = await store.append_event(
-                "run-con", EventType.RUN_STARTED,
+                "run-con",
+                EventType.RUN_STARTED,
                 {"intent": f"task-{idx}", "context_snapshot": {}},
             )
             return event.seq
 
-        results = await asyncio.gather(*[writer(i) for i in range(N)])
+        results = await asyncio.gather(*[writer(i) for i in range(n)])
         seqs = sorted(results)
         # Must be exactly 1..N, no gaps, no duplicates
-        assert seqs == list(range(1, N + 1)), f"Seqs not contiguous: {seqs}"
+        assert seqs == list(range(1, n + 1)), f"Seqs not contiguous: {seqs}"
         # Event store should have N events
         events = await store.get_events("run-con")
-        assert len(events) == N
+        assert len(events) == n
 
     async def test_concurrent_appends_different_runs_independent(self, store: EventStore):
-        N = 10
+        n = 10
+
         async def writer(run_id: str, idx: int) -> tuple[str, int]:
             event = await store.append_event(
-                run_id, EventType.RUN_STARTED,
+                run_id,
+                EventType.RUN_STARTED,
                 {"intent": f"task-{idx}", "context_snapshot": {}},
             )
             return (run_id, event.seq)
 
-        results = await asyncio.gather(*[writer(f"run-{i % 3}", i) for i in range(N)])
+        results = await asyncio.gather(*[writer(f"run-{i % 3}", i) for i in range(n)])
         # Group by run_id
         seqs_by_run: dict[str, list[int]] = {}
         for rid, seq in results:

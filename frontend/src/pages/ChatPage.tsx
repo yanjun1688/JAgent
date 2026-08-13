@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'motion/react'
 import { Sparkles } from 'lucide-react'
 import {
   createConversation,
+  createClientRequestId,
   getConversation,
   persistCurrentConversationId,
   restoreCurrentConversationId,
@@ -10,6 +12,7 @@ import {
   type ConversationMessageItem,
 } from '../api/conversation-client'
 import { getRunTimeline } from '../api/analysis-client'
+import { listWorkspaces } from '../api/client'
 import { useConversations } from '../hooks/useConversation'
 import { useRunControl } from '../hooks/useRunControl'
 import { useRunWebSocket, type WsEvent } from '../hooks/useRunWebSocket'
@@ -34,9 +37,13 @@ interface DisplayMessage {
   status: string
 }
 
+// P0-07: 网络失败时用同一 client_request_id 重试的次数（后端按 id 幂等去重）。
+const MAX_SEND_RETRIES = 3
+
 interface QueuedMessage {
   id: number
   text: string
+  requestId: string
 }
 
 let queueIdCounter = 0
@@ -69,9 +76,13 @@ export default function ChatPage() {
   const [thoughtOpen, setThoughtOpen] = useState(true)
   const [queue, setQueue] = useState<QueuedMessage[]>([])
   const [isExecuting, setIsExecuting] = useState(false)
+  const [workspaceId, setWorkspaceId] = useState('default')
+  const { data: workspaceData } = useQuery({ queryKey: ['workspaces'], queryFn: listWorkspaces })
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const initializedRef = useRef(false)
+  // 追踪最近一次请求加载的会话，防止异步 re-attach 串到已切换的会话
+  const activeConvRef = useRef<string | null>(null)
 
   const { events: wsEvents, runStatus: wsRunStatus, isConnected } =
     useRunWebSocket(activeRunId)
@@ -178,30 +189,60 @@ export default function ChatPage() {
     return cards
   }, [allEvents])
 
+  // P0-07: 切回会话时，若该会话最后一条用户消息的 run 仍非终态（running/paused），
+  // 重新挂载其实时订阅（WS 重新连接 + 回填已有 timeline），恢复执行中状态展示。
+  const resumeActiveRun = useCallback(async (lastRunId: string, convId: string) => {
+    try {
+      const timeline = await getRunTimeline(lastRunId, 200, 0)
+      if (activeConvRef.current !== convId) return
+      const events = timeline.timeline as WsEvent[]
+      const last = events[events.length - 1]
+      if (last && (last.event_type === 'RunCompleted' || last.event_type === 'RunFailed')) return
+      setActiveRunId(lastRunId)
+      setActiveRunStatus(last?.event_type === 'RunPaused' ? 'paused' : 'running')
+      setTimelineEvents(events)
+      setThoughtOpen(true)
+      setIsExecuting(true)
+    } catch {
+      // timeline 查询失败不阻断会话加载
+    }
+  }, [])
+
   const loadConversation = useCallback(async (convId: string) => {
+    activeConvRef.current = convId
     setActiveConvId(convId)
     setActiveConversation(convId)
     persistCurrentConversationId(convId)
     setLoading(true)
     setError(null)
+    // P0-07: 切换会话必须原子重置上一会话的 run 状态，防止跨会话串线
+    setActiveRunId(null)
+    setActiveRunStatus('')
+    setTimelineEvents([])
+    setIsExecuting(false)
+    setQueue([])
+    setThoughtOpen(false)
     try {
       const detail = await getConversation(convId)
       setConversationTitle(detail.conversation.title || '新对话')
       const msgs: DisplayMessage[] = detail.messages.map((m: ConversationMessageItem) => ({
         id: `${m.run_id}-${m.seq}`,
-        role: m.role,
+        role: m.role as DisplayMessage['role'],
         content: m.content,
         created_at: m.created_at,
         run_id: m.run_id,
         status: m.status,
       }))
       setMessages(msgs)
+      // P0-07: 切回会话时自动恢复仍执行中的 run（若最后一条是用户消息且 run 未终态）
+      const lastUser = [...msgs].reverse().find((m) => m.role === 'user')
+      if (lastUser) void resumeActiveRun(lastUser.run_id, convId)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
     }
-  }, [setActiveConversation])
+  }, [setActiveConversation, resumeActiveRun])
 
   // 初始化加载持久化的对话
   useEffect(() => {
@@ -230,7 +271,9 @@ export default function ChatPage() {
             allEvents.find((e) => e.event_type === 'RunCompleted')?.payload.result_summary || '',
           )
         : String(
-            allEvents.find((e) => e.event_type === 'RunFailed')?.payload.final_error || '',
+            // P0-07: 失败消息只使用 user_facing_message，不得把内部 final_error 暴露给用户
+            allEvents.find((e) => e.event_type === 'RunFailed')?.payload.user_facing_message ||
+              '任务未能完成，请检查任务要求或稍后重试。',
           )
 
     setMessages((prev) => {
@@ -271,36 +314,58 @@ export default function ChatPage() {
   async function executeQueuedMessage(qm: QueuedMessage): Promise<void> {
     if (!activeConvId) return
     try {
-      await submitMessage(activeConvId, qm.text)
+      // P0-07: 复用入队时生成的 client_request_id，重试不会产生重复 Run
+      await submitMessage(activeConvId, qm.text, qm.requestId)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setIsExecuting(false)
     }
   }
 
-  async function submitMessage(convId: string, text: string): Promise<void> {
+  async function submitMessage(convId: string, text: string, requestId?: string): Promise<void> {
     setTimelineEvents([])
     setLoading(true)
     setIsExecuting(true)
     setThoughtOpen(true)
     setError(null)
 
+    // P0-07: client_request_id 在消息编组时一次性生成；网络失败重试必须复用
+    // 同一个 id，后端按 (conversation, id) 幂等去重，避免重复 Run。
+    const clientRequestId = requestId ?? createClientRequestId()
+
     try {
-      const { run_id } = await sendMessage(convId, text)
+      let runId: string | null = null
+      let lastErr: unknown = null
+      for (let attempt = 0; attempt < MAX_SEND_RETRIES; attempt++) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 300 * attempt))
+        try {
+          const resp = await sendMessage(convId, text, clientRequestId, workspaceId)
+          runId = resp.run_id
+          break
+        } catch (err) {
+          lastErr = err
+        }
+      }
+      if (runId === null) throw lastErr ?? new Error('Failed to send message')
+      const run_id = runId
       setActiveRunId(run_id)
       setActiveRunStatus('running')
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `${run_id}-user`,
-          role: 'user',
-          content: text,
-          created_at: Date.now() / 1000,
-          run_id,
-          status: 'running',
-        },
-      ])
+      // 幂等重试（claimed=false 复用已有 run）时避免追加重复的用户气泡
+      setMessages((prev) => {
+        if (prev.some((m) => m.run_id === run_id && m.role === 'user')) return prev
+        return [
+          ...prev,
+          {
+            id: `${run_id}-user`,
+            role: 'user',
+            content: text,
+            created_at: Date.now() / 1000,
+            run_id,
+            status: 'running',
+          },
+        ]
+      })
 
       const timeline = await getRunTimeline(run_id, 200, 0)
       setTimelineEvents(timeline.timeline as WsEvent[])
@@ -332,7 +397,7 @@ export default function ChatPage() {
         persistCurrentConversationId(convId)
         setConversationTitle('新对话')
         setMessages([])
-        await submitMessage(convId, text)
+        await submitMessage(convId, text, createClientRequestId())
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
       }
@@ -341,11 +406,12 @@ export default function ChatPage() {
 
     if (isExecuting) {
       queueIdCounter += 1
-      setQueue((prev) => [...prev, { id: queueIdCounter, text }])
+      // 入队时即生成幂等 id，执行队列时复用（P0-07）
+      setQueue((prev) => [...prev, { id: queueIdCounter, text, requestId: createClientRequestId() }])
       return
     }
 
-    await submitMessage(activeConvId, text)
+    await submitMessage(activeConvId, text, createClientRequestId())
   }
 
   async function handleConfirmResume(confirmationId: string, confirmed: boolean): Promise<void> {
@@ -568,6 +634,12 @@ export default function ChatPage() {
         </div>
 
         {/* 输入栏 */}
+        <div className="flex items-center gap-2 px-5 pb-2 text-xs text-text-tertiary">
+          <label htmlFor="workspace-select">执行 Workspace</label>
+          <select id="workspace-select" value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} className="rounded-lg border border-border-soft bg-surface-1 px-2 py-1.5 text-text-secondary">
+            {(workspaceData?.workspaces ?? []).map((workspace) => <option key={workspace.workspace_id} value={workspace.workspace_id}>{workspace.name}</option>)}
+          </select>
+        </div>
         <InputBar
           value={input}
           onChange={setInput}

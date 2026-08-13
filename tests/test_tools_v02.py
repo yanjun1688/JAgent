@@ -12,7 +12,7 @@ from harness.tools import (
     FILE_OP_DEF,
     HTTP_REQUEST_DEF,
     ToolRegistry,
-    file_op_fn,
+    file_op_fn as _file_op_fn,
     http_request_fn,
     set_sandbox_root,
 )
@@ -20,6 +20,13 @@ from harness.tools.skill import Skill
 from harness.tools.executor import ToolExecutor, current_run_id
 from harness.storage.event_store import EventStore
 from harness.models.events import EventType
+from harness.execution.local import LocalDirectoryBackend
+
+_TEST_BACKEND = None
+
+async def file_op_fn(input: dict[str, Any]):
+    """Route direct tests through an explicit sandbox backend."""
+    return await _file_op_fn(input, backend=_TEST_BACKEND)
 
 # ── ToolRegistry ──────────────────────────────────────────────────
 
@@ -37,7 +44,7 @@ class TestToolRegistry:
             timeout_ms=5000,
         )
         fn = lambda input: {"y": input["x"] * 2}  # noqa: E731
-        registry.register(td, fn)
+        registry._register(td, fn)
         assert registry.get_tool_def("test_tool") is td
         assert registry.get_tool_fn("test_tool") is fn
         assert "test_tool" in registry
@@ -45,26 +52,18 @@ class TestToolRegistry:
 
     def test_register_duplicate_raises(self):
         registry = ToolRegistry()
-        td = ToolDefinition(
-            name="dup", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE]
-        )
-        registry.register(td, lambda i: {})
-        td2 = ToolDefinition(
-            name="dup", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE]
-        )
+        td = ToolDefinition(name="dup", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE])
+        registry._register(td, lambda i: {})
+        td2 = ToolDefinition(name="dup", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE])
         with pytest.raises(ValueError, match="already registered"):
-            registry.register(td2, lambda i: {})
+            registry._register(td2, lambda i: {})
 
     def test_list_tool_defs(self):
         registry = ToolRegistry()
-        td1 = ToolDefinition(
-            name="a", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE]
-        )
-        td2 = ToolDefinition(
-            name="b", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE]
-        )
-        registry.register(td1, lambda i: {})
-        registry.register(td2, lambda i: {})
+        td1 = ToolDefinition(name="a", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE])
+        td2 = ToolDefinition(name="b", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE])
+        registry._register(td1, lambda i: {})
+        registry._register(td2, lambda i: {})
         defs = registry.list_tool_defs()
         assert len(defs) == 2
         names = {d.name for d in defs}
@@ -74,11 +73,11 @@ class TestToolRegistry:
         registry = ToolRegistry()
         fn_a = lambda i: {"x": 1}  # noqa: E731
         fn_b = lambda i: {"y": 2}  # noqa: E731
-        registry.register(
+        registry._register(
             ToolDefinition(name="a", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE]),
             fn_a,
         )
-        registry.register(
+        registry._register(
             ToolDefinition(name="b", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE]),
             fn_b,
         )
@@ -88,10 +87,8 @@ class TestToolRegistry:
 
     def test_remove_tool(self):
         registry = ToolRegistry()
-        td = ToolDefinition(
-            name="temp", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE]
-        )
-        registry.register(td, lambda i: {})
+        td = ToolDefinition(name="temp", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE])
+        registry._register(td, lambda i: {})
         assert "temp" in registry
         registry.remove("temp")
         assert "temp" not in registry
@@ -99,11 +96,11 @@ class TestToolRegistry:
 
     def test_tool_names_property(self):
         registry = ToolRegistry()
-        registry.register(
+        registry._register(
             ToolDefinition(name="x", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE]),
             lambda i: {},
         )
-        registry.register(
+        registry._register(
             ToolDefinition(name="y", description="", idempotency_key_fields=[], side_effects=[SideEffect.WRITE]),
             lambda i: {},
         )
@@ -123,7 +120,7 @@ class TestToolRegistry:
             idempotency_key_fields=["name"],
             side_effects=[],
         )
-        registry.register(td, lambda i: {"greeting": f"Hello, {i['name']}!"})
+        registry._register(td, lambda i: {"greeting": f"Hello, {i['name']}!"})
         schemas = registry.build_llm_schemas()
         assert len(schemas) == 1
         assert schemas[0]["function"]["name"] == "greet"
@@ -155,7 +152,7 @@ class TestHttpRequestClientLifecycle:
 
     async def test_client_reuse(self):
         from harness.tools.http_request import _get_client, close_client
-        from harness.tools.http_request import _client
+
         try:
             c1 = await _get_client()
             c2 = await _get_client()
@@ -166,12 +163,14 @@ class TestHttpRequestClientLifecycle:
     async def test_close_client_nullifies(self):
         from harness.tools.http_request import _get_client, close_client
         from harness.tools.http_request import _client
+
         await _get_client()
         await close_client()
         assert _client is None
 
     async def test_get_client_after_close_creates_new(self):
         from harness.tools.http_request import _get_client, close_client
+
         try:
             c1 = await _get_client()
             await close_client()
@@ -183,6 +182,7 @@ class TestHttpRequestClientLifecycle:
     async def test_concurrent_init_produces_same_client(self):
         import asyncio
         from harness.tools.http_request import _get_client, close_client
+
         try:
             c1, c2 = await asyncio.gather(_get_client(), _get_client())
             assert c1 is c2, "concurrent init should yield the same client"
@@ -198,7 +198,7 @@ class TestHttpRequestFn:
         import datetime as dt
         from unittest.mock import AsyncMock, patch
         import httpx
-        from harness.tools.http_request import http_request_fn, close_client
+        from harness.tools.http_request import http_request_fn
 
         long_text = "x" * 2000
 
@@ -210,11 +210,13 @@ class TestHttpRequestFn:
 
         with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
             mock_req.return_value = mock_resp
-            result = await http_request_fn({
-                "url": "https://test.local/data",
-                "method": "GET",
-                "max_response_bytes": 100,
-            })
+            result = await http_request_fn(
+                {
+                    "url": "https://test.local/data",
+                    "method": "GET",
+                    "max_response_bytes": 100,
+                }
+            )
 
         assert result["status_code"] == 200
         assert "truncated" in result["body"]
@@ -226,7 +228,7 @@ class TestHttpRequestFn:
         import datetime as dt
         from unittest.mock import AsyncMock, patch
         import httpx
-        from harness.tools.http_request import http_request_fn, close_client
+        from harness.tools.http_request import http_request_fn
 
         text = "short response"
 
@@ -238,10 +240,12 @@ class TestHttpRequestFn:
 
         with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
             mock_req.return_value = mock_resp
-            result = await http_request_fn({
-                "url": "https://test.local/data",
-                "max_response_bytes": 1000,
-            })
+            result = await http_request_fn(
+                {
+                    "url": "https://test.local/data",
+                    "max_response_bytes": 1000,
+                }
+            )
 
         assert result["body"] == text
         assert "truncated" not in result["body"]
@@ -251,7 +255,7 @@ class TestHttpRequestFn:
         import datetime as dt
         from unittest.mock import AsyncMock, patch
         import httpx
-        from harness.tools.http_request import http_request_fn, close_client
+        from harness.tools.http_request import http_request_fn
 
         text = "a" * 100000
 
@@ -263,10 +267,12 @@ class TestHttpRequestFn:
 
         with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
             mock_req.return_value = mock_resp
-            result = await http_request_fn({
-                "url": "https://test.local/big",
-                "max_response_bytes": 0,
-            })
+            result = await http_request_fn(
+                {
+                    "url": "https://test.local/big",
+                    "max_response_bytes": 0,
+                }
+            )
 
         assert result["body"] == text
 
@@ -275,7 +281,7 @@ class TestHttpRequestFn:
         import datetime as dt
         from unittest.mock import AsyncMock, patch
         import httpx
-        from harness.tools.http_request import http_request_fn, close_client
+        from harness.tools.http_request import http_request_fn
 
         mock_resp = AsyncMock()
         mock_resp.text = '{"ok":true}'
@@ -285,11 +291,13 @@ class TestHttpRequestFn:
 
         with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
             mock_req.return_value = mock_resp
-            result = await http_request_fn({
-                "url": "https://test.local/api",
-                "method": "POST",
-                "body": {"key": "value"},
-            })
+            result = await http_request_fn(
+                {
+                    "url": "https://test.local/api",
+                    "method": "POST",
+                    "body": {"key": "value"},
+                }
+            )
 
         call_kwargs = mock_req.call_args.kwargs
         assert call_kwargs["json"] == {"key": "value"}
@@ -301,7 +309,7 @@ class TestHttpRequestFn:
         import datetime as dt
         from unittest.mock import AsyncMock, patch
         import httpx
-        from harness.tools.http_request import http_request_fn, close_client
+        from harness.tools.http_request import http_request_fn
 
         mock_resp = AsyncMock()
         mock_resp.text = "ok"
@@ -321,7 +329,7 @@ class TestHttpRequestFn:
         import datetime as dt
         from unittest.mock import AsyncMock, patch
         import httpx
-        from harness.tools.http_request import http_request_fn, close_client
+        from harness.tools.http_request import http_request_fn
 
         resp_headers = httpx.Headers({"content-type": "application/json", "x-req-id": "abc123"})
         mock_resp = AsyncMock()
@@ -332,10 +340,12 @@ class TestHttpRequestFn:
 
         with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
             mock_req.return_value = mock_resp
-            result = await http_request_fn({
-                "url": "https://test.local/v1",
-                "method": "DELETE",
-            })
+            result = await http_request_fn(
+                {
+                    "url": "https://test.local/v1",
+                    "method": "DELETE",
+                }
+            )
 
         assert result["url"] == "https://test.local/v1"
         assert result["method"] == "DELETE"
@@ -352,7 +362,7 @@ class TestHttpRequestConcurrency:
         import datetime as dt
         from unittest.mock import AsyncMock, patch
         import httpx
-        from harness.tools.http_request import http_request_fn, close_client
+        from harness.tools.http_request import http_request_fn
 
         async def delayed_response(request, *args, **kwargs):
             await asyncio.sleep(0.01)
@@ -364,10 +374,7 @@ class TestHttpRequestConcurrency:
             return mock
 
         with patch.object(httpx.AsyncClient, "request", side_effect=delayed_response) as mock_req:
-            tasks = [
-                http_request_fn({"url": f"https://test.local/{i}", "method": "GET"})
-                for i in range(20)
-            ]
+            tasks = [http_request_fn({"url": f"https://test.local/{i}", "method": "GET"}) for i in range(20)]
             results = await asyncio.gather(*tasks)
 
         assert len(results) == 20
@@ -380,7 +387,7 @@ class TestHttpRequestConcurrency:
         import datetime as dt
         from unittest.mock import AsyncMock, patch
         import httpx
-        from harness.tools.http_request import http_request_fn, _client, close_client
+        from harness.tools.http_request import http_request_fn
 
         mock_resp = AsyncMock()
         mock_resp.text = "ok"
@@ -390,10 +397,7 @@ class TestHttpRequestConcurrency:
 
         with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_req:
             mock_req.return_value = mock_resp
-            tasks = [
-                http_request_fn({"url": f"https://test.local/page/{i}"})
-                for i in range(5)
-            ]
+            tasks = [http_request_fn({"url": f"https://test.local/page/{i}"}) for i in range(5)]
             await asyncio.gather(*tasks)
 
         assert mock_req.call_count == 5
@@ -424,9 +428,12 @@ class TestFileOpDefinition:
 class TestFileOpIntegration:
     @pytest.fixture(autouse=True)
     def _sandbox(self):
+        global _TEST_BACKEND
         with tempfile.TemporaryDirectory() as tmp:
             set_sandbox_root(tmp)
+            _TEST_BACKEND = LocalDirectoryBackend(tmp)
             yield tmp
+        _TEST_BACKEND = None
 
     async def test_write_and_read(self):
         result = await file_op_fn({"operation": "write", "path": "hello.txt", "content": "world"})
@@ -435,6 +442,12 @@ class TestFileOpIntegration:
         result = await file_op_fn({"operation": "read", "path": "hello.txt"})
         assert result["success"] is True
         assert result["content"] == "world"
+
+    async def test_direct_file_op_requires_backend(self):
+        from harness.tools.file_op import file_op_fn as trusted_file_op_fn
+
+        with pytest.raises(RuntimeError, match="Execution backend is required"):
+            await trusted_file_op_fn({"operation": "write", "path": "unsafe.txt", "content": "x"})
 
     async def test_append(self):
         await file_op_fn({"operation": "write", "path": "log.txt", "content": "line1\n"})
@@ -475,9 +488,12 @@ class TestToolResultEnrichmentBug6:
 
     @pytest.fixture(autouse=True)
     def _sandbox(self):
+        global _TEST_BACKEND
         with tempfile.TemporaryDirectory() as tmp:
             set_sandbox_root(tmp)
+            _TEST_BACKEND = LocalDirectoryBackend(tmp)
             yield tmp
+        _TEST_BACKEND = None
 
     async def test_file_op_write_includes_path(self):
         result = await file_op_fn({"operation": "write", "path": "output.txt", "content": "hello"})
@@ -505,6 +521,7 @@ class TestToolResultEnrichmentBug6:
     async def test_http_request_schema_includes_url_and_method(self):
         """HTTP output_schema should include url and method for answer LLM context."""
         from harness.tools.http_request import HTTP_REQUEST_DEF
+
         props = HTTP_REQUEST_DEF.output_schema.get("properties", {})
         assert "url" in props, f"output_schema should include url, got: {list(props.keys())}"
         assert "method" in props, f"output_schema should include method, got: {list(props.keys())}"
@@ -512,6 +529,7 @@ class TestToolResultEnrichmentBug6:
     def test_browser_schema_includes_action_and_url(self):
         """Browser output_schema should include action and url."""
         from harness.tools.browser_tool import BROWSER_DEF
+
         props = BROWSER_DEF.output_schema.get("properties", {})
         assert "action" in props, f"output_schema should include action, got: {list(props.keys())}"
         assert "url" in props, f"output_schema should include url, got: {list(props.keys())}"
@@ -519,6 +537,7 @@ class TestToolResultEnrichmentBug6:
     def test_file_op_schema_includes_path(self):
         """File op output_schema should include path."""
         from harness.tools.file_op import FILE_OP_DEF
+
         props = FILE_OP_DEF.output_schema.get("properties", {})
         assert "path" in props, f"output_schema should include path, got: {list(props.keys())}"
 
@@ -566,6 +585,7 @@ class TestSkill:
         tool_fns: dict[str, Any] = {}
         fn = skill.build_fn(lambda: tool_fns)
         import asyncio
+
         result = asyncio.run(fn({"text": "hello"}))
         assert result["result"]["reversed"] == "olleh"
         assert result["result"]["count"] == 5
@@ -592,6 +612,7 @@ class TestSkill:
         search_fn = lambda i: {"data": f"Found: {i['q']}"}  # noqa: E731
         fn = skill.build_fn(lambda: {"search": search_fn})
         import asyncio
+
         result = asyncio.run(fn({"query": "opencode"}))
         assert result["result"]["data"] == "Found: opencode"
 
@@ -617,7 +638,8 @@ class TestSkillWithExecutor:
 
         executor = ToolExecutor(store)
         search_td = ToolDefinition(
-            name="search", description="Search",
+            name="search",
+            description="Search",
             idempotency_key_fields=["q"],
             side_effects=[],
             input_schema={"type": "object", "properties": {"q": {"type": "string"}}},
@@ -659,6 +681,7 @@ class TestSkillWithExecutor:
     @pytest.mark.asyncio
     async def test_executor_wired_skill_fallback_no_run_id(self):
         """Without a run_id context, executor-wired skill calls tool_fn directly."""
+
         def noop_step(ctx, tool_fns):
             fn = tool_fns.get("echo")
             return fn({"msg": "hello"}) if fn else {}
@@ -674,7 +697,8 @@ class TestSkillWithExecutor:
         await store.initialize()
         executor = ToolExecutor(store)
         echo_td = ToolDefinition(
-            name="echo", description="Echo",
+            name="echo",
+            description="Echo",
             idempotency_key_fields=["msg"],
             side_effects=[],
         )
@@ -700,25 +724,26 @@ class TestSkillWithExecutor:
 
 # ── ToolRegistry + real tool defs integration ─────────────────────
 
+
 class TestToolRegistryWithBuiltinDefs:
     def test_register_http_request(self):
         registry = ToolRegistry()
-        registry.register(HTTP_REQUEST_DEF, http_request_fn)
+        registry._register(HTTP_REQUEST_DEF, http_request_fn)
         assert registry.get_tool_def("http_request") is HTTP_REQUEST_DEF
         assert registry.get_tool_fn("http_request") is http_request_fn
 
     def test_register_file_op(self):
         registry = ToolRegistry()
-        registry.register(FILE_OP_DEF, file_op_fn)
+        registry._register(FILE_OP_DEF, file_op_fn)
         assert registry.get_tool_def("file_op") is FILE_OP_DEF
 
     def test_build_llm_schemas_multiple(self):
         registry = ToolRegistry()
-        registry.register(
+        registry._register(
             ToolDefinition(name="a", description="", idempotency_key_fields=[], side_effects=[]),
             lambda i: {},
         )
-        registry.register(
+        registry._register(
             ToolDefinition(name="b", description="", idempotency_key_fields=[], side_effects=[]),
             lambda i: {},
         )
@@ -732,4 +757,10 @@ class TestToolRegistryWithBuiltinDefs:
             set_sandbox_root(tmp)
             with pytest.raises(PermissionError, match="outside the sandbox"):
                 import asyncio
-                asyncio.run(file_op_fn({"operation": "read", "path": "..\\..\\secret.txt"}))
+
+                asyncio.run(
+                    _file_op_fn(
+                        {"operation": "read", "path": "..\\..\\secret.txt"},
+                        backend=LocalDirectoryBackend(tmp),
+                    )
+                )

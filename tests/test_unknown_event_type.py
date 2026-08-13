@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from harness.models.events import Event, EventType
+from harness.models.events import EventType
 from harness.storage.event_store import EventStore
 
 
@@ -59,8 +59,10 @@ class TestUnknownEventTypeTolerance:
     async def test_get_events_skips_legacy_row(self, store: EventStore):
         # One valid run event + one row with a removed enum member
         from harness.models.events import RunStartedPayload
+
         await store.append_event(
-            "run-X", EventType.RUN_STARTED,
+            "run-X",
+            EventType.RUN_STARTED,
             RunStartedPayload(intent="i").model_dump(),
         )
         await _inject_row(store, "run-X", 2, "QualityCheckCompleted", '{"k":"v"}')
@@ -72,13 +74,16 @@ class TestUnknownEventTypeTolerance:
 
     async def test_get_event_range_skips_legacy_row(self, store: EventStore):
         from harness.models.events import AgentThoughtPayload
+
         await store.append_event(
-            "run-Y", EventType.RUN_STARTED,
+            "run-Y",
+            EventType.RUN_STARTED,
             {"intent": "i", "context_snapshot": {}},
         )
         await _inject_row(store, "run-Y", 2, "QualityCheckCompleted")
         await store.append_event(
-            "run-Y", EventType.AGENT_THOUGHT,
+            "run-Y",
+            EventType.AGENT_THOUGHT,
             AgentThoughtPayload(thought="t", token_count=1).model_dump(),
         )
 
@@ -91,8 +96,10 @@ class TestUnknownEventTypeTolerance:
 
     async def test_get_events_for_runs_skips_legacy_row(self, store: EventStore):
         from harness.models.events import RunStartedPayload
+
         await store.append_event(
-            "run-Z", EventType.RUN_STARTED,
+            "run-Z",
+            EventType.RUN_STARTED,
             RunStartedPayload(intent="i").model_dump(),
         )
         await _inject_row(store, "run-Z", 2, "SomethingRemoved")
@@ -113,9 +120,7 @@ class TestUnknownEventTypeTolerance:
         )
         await store.conn.commit()
         # Looking up by a known current EventType should not find the legacy row
-        result = await store.find_by_idempotency_key(
-            "run-W", EventType.RUN_STARTED, "ik-1"
-        )
+        result = await store.find_by_idempotency_key("run-W", EventType.RUN_STARTED, "ik-1")
         # No hit because event_type doesn't match EventType.RUN_STARTED.value
         assert result is None
 
@@ -123,15 +128,15 @@ class TestUnknownEventTypeTolerance:
         from harness.models.events import (
             ConfirmationReceivedPayload,
         )
+
         # Plant an unrelated legacy row on the same run first
         await _inject_row(store, "run-C", 1, "QualityCheckCompleted")
 
         # Then append a valid CONFIRMATION_RECEIVED for the same run
         await store.append_event(
-            "run-C", EventType.CONFIRMATION_RECEIVED,
-            ConfirmationReceivedPayload(
-                confirmation_id="c1", confirmed=True, operator_id="op"
-            ).model_dump(),
+            "run-C",
+            EventType.CONFIRMATION_RECEIVED,
+            ConfirmationReceivedPayload(confirmation_id="c1", confirmed=True, operator_id="op").model_dump(),
             idempotency_key="confirm_c1",
         )
 
@@ -141,11 +146,9 @@ class TestUnknownEventTypeTolerance:
 
 
 class TestUnknownEventLegacyPersistence:
-    """A legacy persistent DB (pre-date the column / new enum members) must
-    still load via initialize + get_events without crashing.
-    """
+    """v3.3 deliberately rejects databases created before the new Schema."""
 
-    async def test_legacy_persistent_db_loads(self):
+    async def test_legacy_persistent_db_requires_rebuild(self):
         tmp = Path(tempfile.gettempdir()) / "opencode" / "legacy_quality.db"
         tmp.parent.mkdir(parents=True, exist_ok=True)
         if tmp.exists():
@@ -159,18 +162,13 @@ class TestUnknownEventLegacyPersistence:
             "CREATE UNIQUE INDEX idx_idem ON events(run_id, event_type, idempotency_key) "
             "WHERE idempotency_key IS NOT NULL;"
         )
-        c.execute(
-            "INSERT INTO events VALUES "
-            "('run-L', 1, 'QualityCheckCompleted', '{}', NULL, 1.0)"
-        )
+        c.execute("INSERT INTO events VALUES ('run-L', 1, 'QualityCheckCompleted', '{}', NULL, 1.0)")
         c.commit()
         c.close()
 
         s = EventStore(str(tmp))
-        await s.initialize()  # must not crash
-        events = await s.get_events("run-L")
-        # Legacy row skipped, empty list returned, no exception
-        assert events == []
+        with pytest.raises(RuntimeError, match="delete the database and restart"):
+            await s.initialize()
         await s.close()
         tmp.unlink(missing_ok=True)
 
@@ -180,17 +178,27 @@ class TestQueryPathUnknownEventType:
 
     async def test_api_query_row_to_event_returns_none_for_legacy(self, store: EventStore):
         from harness.api.query import _row_to_event
+
         row = {
-            "run_id": "r1", "seq": 1, "event_type": "QualityCheckCompleted",
-            "payload": "{}", "idempotency_key": None, "created_at": 1.0,
+            "run_id": "r1",
+            "seq": 1,
+            "event_type": "QualityCheckCompleted",
+            "payload": "{}",
+            "idempotency_key": None,
+            "created_at": 1.0,
         }
         assert _row_to_event(row) is None
 
     async def test_analysis_service_row_to_event_returns_none_for_legacy(self, store: EventStore):
         from harness.analysis.service import AnalysisService
+
         row = {
-            "run_id": "r1", "seq": 1, "event_type": "QualityCheckCompleted",
-            "payload": "{}", "idempotency_key": None, "created_at": 1.0,
+            "run_id": "r1",
+            "seq": 1,
+            "event_type": "QualityCheckCompleted",
+            "payload": "{}",
+            "idempotency_key": None,
+            "created_at": 1.0,
         }
         assert AnalysisService._row_to_event(row) is None
 
@@ -205,8 +213,10 @@ class TestRunToConvCacheEviction:
 
     async def test_evict_drops_cache_entry(self, store: EventStore):
         from harness.models.events import RunStartedPayload
+
         await store.append_event(
-            "run-E", EventType.RUN_STARTED,
+            "run-E",
+            EventType.RUN_STARTED,
             RunStartedPayload(intent="i", conversation_id="conv-E").model_dump(),
         )
         assert store._run_to_conv.get("run-E") == "conv-E"
@@ -217,14 +227,17 @@ class TestRunToConvCacheEviction:
         """After eviction, appending another event on the same run_id without
         conversation_id in payload should not crash; column will be NULL."""
         from harness.models.events import AgentThoughtPayload
+
         await store.append_event(
-            "run-F", EventType.RUN_STARTED,
+            "run-F",
+            EventType.RUN_STARTED,
             {"intent": "i", "context_snapshot": {}, "conversation_id": "conv-F"},
         )
         store.evict_run_to_conv("run-F")
         # Subsequent append: no cache, payload has no conversation_id
         await store.append_event(
-            "run-F", EventType.AGENT_THOUGHT,
+            "run-F",
+            EventType.AGENT_THOUGHT,
             AgentThoughtPayload(thought="t", token_count=1).model_dump(),
         )
         # The AGENT_THOUGHT row should have NULL conversation_id column

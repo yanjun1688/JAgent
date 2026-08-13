@@ -19,7 +19,6 @@ from harness.models.events import (
     ConversationMessagePayload,
     ConversationStartedPayload,
     EventType,
-    RunStartedPayload,
 )
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ToolExecutor
@@ -37,7 +36,9 @@ class TestConversationModels:
 
     def test_conversation_message_item(self):
         now = time.time()
-        m = ConversationMessageItem(seq=1, run_id="r1", role="user", content="hello", created_at=now, status="completed")
+        m = ConversationMessageItem(
+            seq=1, run_id="r1", role="user", content="hello", created_at=now, status="completed"
+        )
         assert m.run_id == "r1"
         assert m.role == "user"
         assert m.content == "hello"
@@ -132,7 +133,9 @@ class TestConversationStore:
         await store.append_event(
             "conv-1",
             EventType.CONVERSATION_MESSAGE,
-            ConversationMessagePayload(conversation_id="conv-1", run_id="r1", role="user", content="hello").model_dump(),
+            ConversationMessagePayload(
+                conversation_id="conv-1", run_id="r1", role="user", content="hello"
+            ).model_dump(),
         )
         events = await store.get_events_for_conversation("conv-1")
         assert len(events) == 2
@@ -163,7 +166,9 @@ class TestConversationContextBuilder:
         await store.append_event(
             "conv-1",
             EventType.CONVERSATION_MESSAGE,
-            ConversationMessagePayload(conversation_id="conv-1", run_id="r1", role="user", content="Hello").model_dump(),
+            ConversationMessagePayload(
+                conversation_id="conv-1", run_id="r1", role="user", content="Hello"
+            ).model_dump(),
         )
         await store.append_event(
             "conv-1",

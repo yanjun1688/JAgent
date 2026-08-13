@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
-import { MessageSquare, LayoutGrid, History, type LucideIcon } from 'lucide-react'
+import { MessageSquare, LayoutGrid, History, Boxes, type LucideIcon } from 'lucide-react'
 import { cn } from '../design-system/utils/cn'
 import { ThemeToggle } from './ui/ThemeToggle'
 
@@ -13,6 +13,7 @@ const navItems: NavItem[] = [
   { to: '/', label: '对话', icon: MessageSquare },
   { to: '/overview', label: '概览', icon: LayoutGrid },
   { to: '/history', label: '历史', icon: History },
+  { to: '/workspaces', label: 'Workspace', icon: Boxes },
 ]
 
 function isActive(pathname: string, to: string): boolean {

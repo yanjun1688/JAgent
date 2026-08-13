@@ -3,7 +3,7 @@
 > **审计来源**: `data/logs/harness.log` (Run: `9f4c5fce`, 用户意图: "帮我下载昨天腾讯、阿里、字节三家公司的财报")
 > **审查范围**: Planner → DAG Executor → Tool Layer → Monitor → Answer 全链路
 > **审计方法**: 日志回放 + 源码逐行对照
-> **状态**: **部分修复** — P0-02 / P0-01(短期) / P1-01 已完成；P0-01(长期) / P0-03 / P0-04 / P1-02 未做
+> **状态**: **部分修复** — P0-02 / P0-01(短期) / P1-01 已完成；P0-03 已设计并分阶段实施中（见下方）；P0-01(长期) / P0-04 / P1-02 未做
 
 ---
 
@@ -13,7 +13,7 @@
 |----|---------|------|------|
 | P0-01 | P0 | Planner 未使用 MCP Runtime Discovery 的工具 Schema 做规划 | 🟡 短期已做 / 🔴 长期未做 |
 | P0-02 | P0 | Soft Error 被当成 Success 继续传播（Transport 层与 Business 层耦合） | 🟢 已修复 |
-| P0-03 | P0 | DAG 未利用失败信息阻断依赖链（SOFT_ERROR 被当 "done" 传递） | 🔴 未做 |
+| P0-03 | P0 | DAG 未利用失败信息阻断依赖链（SOFT_ERROR 被当 "done" 传递） | 🟡 已设计，分阶段实施中（门控 `step_normal`，见方案） |
 | P0-04 | P0 | Revise 太晚 — 当前是 Batch Workflow 而非 Agent Loop | 🔴 未做 |
 | P1-01 | P1 | Monitor Feedback 利用率低 — 有 Self-Healing 骨架但未闭环 | 🟢 已修复 |
 | P1-02 | P1 | Answer Prompt 与 Runtime 耦合过重 — 全量 Tool Result 注入 | 🔴 未做 |
@@ -218,6 +218,20 @@ _execute_layer → 检查上游依赖的 business 状态 → 若依赖全部 SOF
 1. 在 `_execute_step()` 增加依赖健康检查: 若 `depends_on` 的步骤全部 `is_done` 但 `is_completed=False`（即全是 SOFT_ERROR/FAILED），返回 `ExecState.SKIPPED`
 2. 在 `_execute_layer()` 中增加快速失败路径: 当 layer 内步骤出现 SOFT_ERROR 时，检查是否应触发即时 Revise 而非继续下一层
 3. `all_results` 增加 SKIPPED / BLOCKED 传播机制
+
+### 解决方案（2026-08-07 拍板，分阶段实施）
+
+> 依据 `Handover/completion_semantics_chain_redesign_handover_20260807.md` D3/D7/D9，本项已设计并纳入阶段 B/C 实施。
+
+- **门控判据**：`step_normal`（纯函数 `(exec_state, probe) → bool`），**取代** `is_done`/`should_not_rerun`
+  作为依赖健康检查的唯一依据。UNSUCCESSFUL（非 probe）与 FAILED 均算 `step_normal=False`。
+- **阻断行为**：`_execute_step` 依赖健康检查——存在依赖 `step_normal=False` → 本步 `SKIPPED`，
+  **不再向下游传递坏数据**（修复"Layer 1 全挂 → Layer 2 仍执行"）。
+- **SKIPPED 落记录**：门控产生的 SKIPPED 写 `DagStepSkipped` 事件（D9），可观测可审计。
+- **fail-safe 兜底**：probe 否定答案不阻断下游（D7）——下游消费不了会自身 UNSUCCESSFUL → 完成门拦截 → revise。
+- **完成口径同步**：完成计数改用 `step_normal` 聚合（D5/D8），彻底消灭"Completed 3/3"假绿。
+
+**验收**：Layer 1 全 UNSUCCESSFUL/FAILED → Layer 2 全部 SKIPPED，run 不完成，revise 修复。
 
 ---
 
@@ -445,7 +459,7 @@ ConversationStarted → RunStarted → AgentThought → PlanCreated
 |--------|----------|----------|-----------|
 | ~~**P0-立即**~~ | ~~P0-02~~ | ~~无~~ | ✅ 已完成 — `mcp_call_fn` 增加 `isError` 检查 |
 | ~~**P0-立即**~~ | ~~P0-01 (短期)~~ | ~~无~~ | ✅ 已完成 — tool name 前置校验 + 前缀补全 |
-| **P0-本周** | P0-03 | 无 | 4-6h — `DagExecutor` 增加依赖健康检查 |
+| **P0-本周** | P0-03 | 无 | 🟡 已设计 + 阶段 B/C 实施中 — `DagExecutor` 依赖健康检查（门控 `step_normal`） |
 | **P0-本周** | P0-04 | P0-03 | 4-6h — Scheduler 增加逐层中断检查 |
 | ~~**P1-下周**~~ | ~~P1-01~~ | ~~P0-04~~ | ✅ 已完成 — REVISE prompt 强化 |
 | **P1-下周** | P1-02 | 无 | 2-3h — 增加 ExecutionSummary 抽象层 |

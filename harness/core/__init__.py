@@ -5,7 +5,13 @@ from harness.core.dag_vars import deep_resolve, resolve_variables_in_input, subs
 from harness.core.fold import RunState, RunStatus, ThoughtEntry, ToolResult, ToolResultStatus, fold_events
 from harness.core.llm_client import LLMClient, MockLLMClient
 from harness.core.planner import PlanGuardrail, Planner
-from harness.core.scheduler import AgentKernel, AgentLoopScheduler, PlanningExecutorScheduler, SchedulerConfig, ThinkResult
+from harness.core.scheduler import (
+    AgentKernel,
+    AgentLoopScheduler,
+    PlanningExecutorScheduler,
+    SchedulerConfig,
+    ThinkResult,
+)
 from harness.core.system_prompt import AgentPhase, build_tool_schemas, get_prompt
 from harness.models.plan import DagPlan, DagStep
 

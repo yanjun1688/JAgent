@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from harness.core.system_prompt import build_tool_schemas
 from harness.models.tools import ToolDefinition
+
+if TYPE_CHECKING:
+    from harness.tools.base import BaseTool
 
 
 class ToolRegistry:
@@ -14,7 +17,7 @@ class ToolRegistry:
 
     Usage:
         registry = ToolRegistry()
-        registry.register(tool_def, tool_fn)
+        registry.register_tool(FileOpTool())          # canonical entry (D-07)
 
         tool_defs = registry.list_tool_defs()
         tool_fns = registry.list_tool_fns()
@@ -25,11 +28,20 @@ class ToolRegistry:
         self._tools: dict[str, ToolDefinition] = {}
         self._fns: dict[str, Callable[[dict[str, Any]], Any]] = {}
 
-    def register(
+    def register_tool(self, tool: "BaseTool") -> str:
+        """Register a ``BaseTool`` (ADR-010 D-03/D-07) — unique public entry."""
+        td = tool.to_definition()
+        from harness.tools.base import make_invoker
+
+        self._register(td, make_invoker(tool))
+        return td.name
+
+    def _register(
         self,
         tool_def: ToolDefinition,
         fn: Callable[[dict[str, Any]], Any],
     ) -> str:
+        """Private storage primitive — not a public registration API (ADR-010)."""
         if tool_def.name in self._tools:
             raise ValueError(f"Tool '{tool_def.name}' is already registered")
         self._tools[tool_def.name] = tool_def

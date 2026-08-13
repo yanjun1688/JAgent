@@ -16,13 +16,14 @@ from pathlib import Path
 import pytest
 
 from harness.core.dag_executor import DagExecutor
+from harness.execution.local import LocalDirectoryBackend
 from harness.core.llm_client import MockLLMClient
 from harness.core.planner import Planner
 from harness.core.scheduler.base import SchedulerConfig
 from harness.core.scheduler.plan import PlanningExecutorScheduler
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ToolExecutor
-from harness.tools.file_op import FILE_OP_DEF, file_op_fn, reset_sandbox_root, set_sandbox_root
+from harness.tools.file_op import FileOpTool, reset_sandbox_root, set_sandbox_root
 from harness.tools.registry import ToolRegistry
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -65,31 +66,43 @@ async def test_self_heal_does_not_re_execute_completed_step():
     try:
         set_sandbox_root(str(ROOT))
         ex = ToolExecutor(store)
+        backend = LocalDirectoryBackend(str(ROOT))
         reg = ToolRegistry()
-        reg.register(FILE_OP_DEF, file_op_fn)
+        reg.register_tool(FileOpTool())
         defs, fns = reg.list_tool_defs(), reg.list_tool_fns()
 
-        plan1 = json.dumps({
-            "intent": "t",
-            "steps": [
-                {"id": "s1", "tool": "file_op", "input": {"operation": "read", "path": "README.md"}},
-                {"id": "s2", "tool": "file_op", "input": {"operation": "read", "path": "nonexistent_file.xyz"}},
-            ],
-        })
-        plan2 = json.dumps({
-            "intent": "t",
-            "steps": [
-                {"id": "s1", "tool": "file_op", "input": {"operation": "read", "path": "README.md"}},
-                {"id": "s3", "tool": "file_op", "input": {"operation": "read", "path": "pyproject.toml"}},
-            ],
-        })
+        plan1 = json.dumps(
+            {
+                "intent": "t",
+                "steps": [
+                    {"id": "s1", "tool": "file_op", "input": {"operation": "read", "path": "README.md"}},
+                    {"id": "s2", "tool": "file_op", "input": {"operation": "read", "path": "nonexistent_file.xyz"}},
+                ],
+            }
+        )
+        plan2 = json.dumps(
+            {
+                "intent": "t",
+                "steps": [
+                    {"id": "s1", "tool": "file_op", "input": {"operation": "read", "path": "README.md"}},
+                    {"id": "s3", "tool": "file_op", "input": {"operation": "read", "path": "pyproject.toml"}},
+                ],
+            }
+        )
         planner = Planner(
             MockLLMClient(responses=["yes", plan1, plan2, "answer"]),
-            reg, store, max_plan_retries=2,
+            reg,
+            store,
+            max_plan_retries=2,
         )
-        dag = DagExecutor(ex, store, reg)
+        dag = DagExecutor(ex, store, reg, backend=backend)
         sched = PlanningExecutorScheduler(
-            store, ex, planner, dag, defs, fns,
+            store,
+            ex,
+            planner,
+            dag,
+            defs,
+            fns,
             config=SchedulerConfig(max_iterations=10),
         )
         state = await sched.run("self_heal_test", "复现")
@@ -119,8 +132,8 @@ async def test_self_heal_reuses_ids_skips_in_plan_completed():
 
 
 @pytest.mark.asyncio
-async def test_soft_error_self_heal_reruns_only_failed_step():
-    """场景3: 5步中第3步 soft_error，revise 标 not_achieved 后仅重跑 s3。
+async def test_unsuccessful_self_heal_reruns_only_failed_step():
+    """场景3: 5步中第3步 unsuccessful，revise 标 not_achieved 后仅重跑 s3。
 
     修复前：s3 被 should_not_rerun 标记为完成 → 第二轮 topological_sort
     报 Cycle detected 或 layers=0 → 修正步骤永不执行。
@@ -130,40 +143,82 @@ async def test_soft_error_self_heal_reruns_only_failed_step():
     try:
         set_sandbox_root(str(ROOT))
         ex = ToolExecutor(store)
+        backend = LocalDirectoryBackend(str(ROOT))
         reg = ToolRegistry()
-        reg.register(FILE_OP_DEF, file_op_fn)
+        reg.register_tool(FileOpTool())
         defs, fns = reg.list_tool_defs(), reg.list_tool_fns()
 
-        plan1 = json.dumps({
-            "intent": "t",
-            "steps": [
-                {"id": "s1", "tool": "file_op", "input": {"operation": "read", "path": "README.md"}},
-                {"id": "s2", "tool": "file_op", "input": {"operation": "read", "path": "pyproject.toml"}, "depends_on": ["s1"]},
-                {"id": "s3", "tool": "file_op", "input": {"operation": "read", "path": "nonexistent_file.xyz"}, "depends_on": ["s2"]},
-                {"id": "s4", "tool": "file_op", "input": {"operation": "read", "path": "AGENTS.md"}, "depends_on": ["s3"]},
-                {"id": "s5", "tool": "file_op", "input": {"operation": "read", "path": "README.md"}, "depends_on": ["s4"]},
-            ],
-        })
-        plan2 = json.dumps({
-            "intent": "t",
-            "steps": [
-                {"id": "s3", "tool": "file_op", "input": {"operation": "read", "path": "AGENTS.md"}},
-                {"id": "s4", "tool": "file_op", "input": {"operation": "read", "path": "AGENTS.md"}, "depends_on": ["s3"]},
-                {"id": "s5", "tool": "file_op", "input": {"operation": "read", "path": "README.md"}, "depends_on": ["s4"]},
-            ],
-            "step_tasks": {"s3": "not_achieved"},
-        })
+        plan1 = json.dumps(
+            {
+                "intent": "t",
+                "steps": [
+                    {"id": "s1", "tool": "file_op", "input": {"operation": "read", "path": "README.md"}},
+                    {
+                        "id": "s2",
+                        "tool": "file_op",
+                        "input": {"operation": "read", "path": "pyproject.toml"},
+                        "depends_on": ["s1"],
+                    },
+                    {
+                        "id": "s3",
+                        "tool": "file_op",
+                        "input": {"operation": "read", "path": "nonexistent_file.xyz"},
+                        "depends_on": ["s2"],
+                    },
+                    {
+                        "id": "s4",
+                        "tool": "file_op",
+                        "input": {"operation": "read", "path": "AGENTS.md"},
+                        "depends_on": ["s3"],
+                    },
+                    {
+                        "id": "s5",
+                        "tool": "file_op",
+                        "input": {"operation": "read", "path": "README.md"},
+                        "depends_on": ["s4"],
+                    },
+                ],
+            }
+        )
+        plan2 = json.dumps(
+            {
+                "intent": "t",
+                "steps": [
+                    {"id": "s3", "tool": "file_op", "input": {"operation": "read", "path": "AGENTS.md"}},
+                    {
+                        "id": "s4",
+                        "tool": "file_op",
+                        "input": {"operation": "read", "path": "AGENTS.md"},
+                        "depends_on": ["s3"],
+                    },
+                    {
+                        "id": "s5",
+                        "tool": "file_op",
+                        "input": {"operation": "read", "path": "README.md"},
+                        "depends_on": ["s4"],
+                    },
+                ],
+                "step_tasks": {"s3": "not_achieved"},
+            }
+        )
         planner = Planner(
             MockLLMClient(responses=["yes", plan1, plan2, "answer"]),
-            reg, store, max_plan_retries=2,
+            reg,
+            store,
+            max_plan_retries=2,
         )
-        dag = DagExecutor(ex, store, reg)
+        dag = DagExecutor(ex, store, reg, backend=backend)
         sched = PlanningExecutorScheduler(
-            store, ex, planner, dag, defs, fns,
+            store,
+            ex,
+            planner,
+            dag,
+            defs,
+            fns,
             config=SchedulerConfig(max_iterations=10),
         )
-        state = await sched.run("soft_error_heal", "复现")
-        counts = await _count_step_starts(store, "soft_error_heal")
+        state = await sched.run("unsuccessful_heal", "复现")
+        counts = await _count_step_starts(store, "unsuccessful_heal")
         assert state.status.value == "completed"
         assert counts["s1"] == 1, f"s1 re-executed: {dict(counts)}"
         assert counts["s2"] == 1, f"s2 re-executed: {dict(counts)}"

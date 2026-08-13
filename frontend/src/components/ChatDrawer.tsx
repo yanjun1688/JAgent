@@ -38,7 +38,7 @@ export default function ChatDrawer({ style, initialRunId, onRunChange }: Props) 
     const completed = allEvents.find((e) => e.event_type === 'RunCompleted')
     if (completed) return String(completed.payload.result_summary || '')
     const failed = allEvents.find((e) => e.event_type === 'RunFailed')
-    if (failed) return String(failed.payload.final_error || '')
+    if (failed) return String(failed.payload.user_facing_message || '任务未能完成，请检查任务要求或稍后重试。')
     return null
   }, [allEvents])
 

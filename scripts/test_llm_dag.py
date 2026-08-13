@@ -6,10 +6,13 @@ Tests:
   3. Verify DAG parallelism (independent steps in same layer)
 
 Usage:
-  cd D:\Project\JAgent
-  .\.venv\Scripts\Activate.ps1
+  cd D:\\Project\\JAgent
+  .\\.venv\\Scripts\\Activate.ps1
   python scripts\test_llm_dag.py
 """
+
+# Imports follow the local source-path and dotenv bootstrap below.
+# ruff: noqa: E402
 
 import asyncio
 import json
@@ -31,14 +34,14 @@ logging.basicConfig(
 logging.getLogger("harness.agent").setLevel(logging.WARNING)
 logging.getLogger("harness.guard").setLevel(logging.WARNING)
 
-from harness.core.scheduler import PlanningExecutorScheduler, SchedulerConfig
-from harness.core.planner import Planner
-from harness.core.dag_executor import DagExecutor
 from harness.core.context_manager import ContextManager
+from harness.core.dag_executor import DagExecutor
+from harness.core.fold import RunStatus, fold_events
 from harness.core.llm_client import OpenAILLMClient
-from harness.core.fold import fold_events, RunStatus
+from harness.core.planner import Planner
+from harness.core.scheduler import PlanningExecutorScheduler, SchedulerConfig
 from harness.models.events import EventType
-from harness.models.tools import ToolDefinition, SideEffect, RetryPolicy
+from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ToolExecutor
 from harness.tools.registry import ToolRegistry
@@ -54,8 +57,10 @@ ECHO_DEF = ToolDefinition(
     output_schema={"type": "object"},
     idempotency_key_fields=["msg"],
     side_effects=[SideEffect.WRITE],
-    timeout_ms=10000, retry_policy=RetryPolicy(),
-    dangerous_with=[], max_parallel=5,
+    timeout_ms=10000,
+    retry_policy=RetryPolicy(),
+    dangerous_with=[],
+    max_parallel=5,
 )
 
 SEARCH_DEF = ToolDefinition(
@@ -65,8 +70,10 @@ SEARCH_DEF = ToolDefinition(
     output_schema={"type": "object"},
     idempotency_key_fields=["q"],
     side_effects=[SideEffect.WRITE],
-    timeout_ms=5000, retry_policy=RetryPolicy(),
-    dangerous_with=[], max_parallel=5,
+    timeout_ms=5000,
+    retry_policy=RetryPolicy(),
+    dangerous_with=[],
+    max_parallel=5,
 )
 
 ALL_DEFS = [ECHO_DEF, SEARCH_DEF]
@@ -101,11 +108,10 @@ def _event_label(e) -> str:
 
 def _parse_layer_info(events: list) -> str:
     """Extract DAG layer structure from events."""
-    layers: dict[int, list[str]] = {}
     for e in events:
         if e.event_type == EventType.DAG_STEP_STARTED:
-            layer = e.payload.get("dag_layer", e.payload.get("depends_on", "?"))
-            sid = e.payload.get("step_id", "?")
+            e.payload.get("dag_layer", e.payload.get("depends_on", "?"))
+            e.payload.get("step_id", "?")
     # Build layer visualization from PlanCreated
     for e in events:
         if e.event_type == EventType.PLAN_CREATED:
@@ -117,21 +123,42 @@ def _parse_layer_info(events: list) -> str:
 
 def dump_events(label: str, events: list, elapsed: float) -> None:
     state = fold_events(events)
-    plan_events = [e for e in events if e.event_type in (
-        EventType.PLAN_CREATED, EventType.PLAN_COMPLETED,
-        EventType.PLAN_REVISED, EventType.PLAN_FAILED,
-    )]
-    dag_events = [e for e in events if e.event_type in (
-        EventType.DAG_STEP_STARTED, EventType.DAG_STEP_COMPLETED, EventType.DAG_STEP_FAILED,
-    )]
-    tool_events = [e for e in events if e.event_type in (
-        EventType.TOOL_CALLED, EventType.TOOL_COMPLETED, EventType.TOOL_FAILED,
-    )]
+    plan_events = [
+        e
+        for e in events
+        if e.event_type
+        in (
+            EventType.PLAN_CREATED,
+            EventType.PLAN_COMPLETED,
+            EventType.PLAN_REVISED,
+            EventType.PLAN_FAILED,
+        )
+    ]
+    dag_events = [
+        e
+        for e in events
+        if e.event_type
+        in (
+            EventType.DAG_STEP_STARTED,
+            EventType.DAG_STEP_COMPLETED,
+            EventType.DAG_STEP_FAILED,
+        )
+    ]
+    tool_events = [
+        e
+        for e in events
+        if e.event_type
+        in (
+            EventType.TOOL_CALLED,
+            EventType.TOOL_COMPLETED,
+            EventType.TOOL_FAILED,
+        )
+    ]
     completed_steps = [e for e in dag_events if e.event_type == EventType.DAG_STEP_COMPLETED]
 
-    print(f"\n  {'='*56}")
+    print(f"\n  {'=' * 56}")
     print(f"  {label}")
-    print(f"  {'='*56}")
+    print(f"  {'=' * 56}")
     print(f"  Time: {elapsed:.2f}s  |  Status: {state.status.value}")
     print(f"  Events: {len(events)} total")
     print(f"    Plan events: {len(plan_events)}")
@@ -145,7 +172,7 @@ def dump_events(label: str, events: list, elapsed: float) -> None:
 
     # DAG visualization
     if plan_events:
-        print(f"\n  ── DAG Structure ──")
+        print("\n  ── DAG Structure ──")
         for e in events:
             if e.event_type == EventType.PLAN_CREATED:
                 pe = e.payload
@@ -167,10 +194,10 @@ def dump_events(label: str, events: list, elapsed: float) -> None:
 
 
 async def run_scenario(name: str, intent: str, api_key: str, model: str, base_url: str) -> dict:
-    print(f"\n{'#'*58}")
+    print(f"\n{'#' * 58}")
     print(f"#  SCENARIO: {name}")
     print(f"#  {intent[:80]}")
-    print(f"{'#'*58}")
+    print(f"{'#' * 58}")
 
     store = EventStore(":memory:")
     await store.initialize()
@@ -183,8 +210,12 @@ async def run_scenario(name: str, intent: str, api_key: str, model: str, base_ur
     cm = ContextManager(store, token_limit=5000, compression_threshold_ratio=0.5, checkpoint_interval=20)
 
     p_sched = PlanningExecutorScheduler(
-        store=store, executor=executor, planner=planner, dag_executor=dag,
-        tool_defs=ALL_DEFS, tool_fns=ALL_FNS,
+        store=store,
+        executor=executor,
+        planner=planner,
+        dag_executor=dag,
+        tool_defs=ALL_DEFS,
+        tool_fns=ALL_FNS,
         config=SchedulerConfig(max_iterations=10),
         context_manager=cm,
     )
@@ -200,12 +231,9 @@ async def run_scenario(name: str, intent: str, api_key: str, model: str, base_ur
     # Verify
     has_plan_created = any(e.event_type == EventType.PLAN_CREATED for e in events)
     has_run_completed = state.status == RunStatus.COMPLETED
-    parallel_steps = any(
-        e.event_type == EventType.DAG_STEP_STARTED and not e.payload.get("depends_on")
-        for e in events
-    )
+    parallel_steps = any(e.event_type == EventType.DAG_STEP_STARTED and not e.payload.get("depends_on") for e in events)
 
-    print(f"  Verification:")
+    print("  Verification:")
     print(f"    PlanCreated:     {'PASS' if has_plan_created else 'FAIL'}")
     print(f"    RunCompleted:    {'PASS' if has_run_completed else 'FAIL'}")
     print(f"    Parallel steps:  {'PASS' if parallel_steps else 'SKIP (serial only)'}")
@@ -244,16 +272,19 @@ async def main() -> None:
         "parallel-echo",
         "Echo the word 'hello' and echo the word 'world'. "
         "These are two independent echo operations that can be done in parallel.",
-        api_key, model, base_url,
+        api_key,
+        model,
+        base_url,
     )
     results.append(r)
 
     # Scenario 2: Search two topics (parallel search + DAG)
     r = await run_scenario(
         "parallel-search",
-        "Search for information about 'AI' and about 'robotics' at the same time, "
-        "they are independent of each other.",
-        api_key, model, base_url,
+        "Search for information about 'AI' and about 'robotics' at the same time, they are independent of each other.",
+        api_key,
+        model,
+        base_url,
     )
     results.append(r)
 
@@ -261,7 +292,9 @@ async def main() -> None:
     r = await run_scenario(
         "dependent-chain",
         "First echo the word 'start'. After that echo is done, echo the word 'end'.",
-        api_key, model, base_url,
+        api_key,
+        model,
+        base_url,
     )
     results.append(r)
 

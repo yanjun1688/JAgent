@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from harness.core.logger import agent_logger
 from harness.models.tools import Guardrail, SideEffect, SuccessIndicator, ToolDefinition
+from harness.tools.base import BaseTool
 
 if TYPE_CHECKING:
     from harness.tools.mcp_manager import MCPServerManager
@@ -60,12 +61,12 @@ def get_manager() -> MCPServerManager | None:
     return _manager
 
 
-async def mcp_call_fn(input: dict[str, Any]) -> dict[str, Any]:
+async def mcp_call_fn(input: dict[str, Any], *, manager: Any = None) -> dict[str, Any]:
     server_name = input.get("server_name")
     tool_name = input["tool_name"]
     arguments = input.get("arguments", {})
 
-    manager = get_manager()
+    manager = manager or get_manager()
     if manager is None:
         _logger.warning("mcp_call failed: no manager")
         return {"success": False, "error": "MCP Manager not initialized. No MCP servers configured."}
@@ -96,12 +97,16 @@ async def mcp_call_fn(input: dict[str, Any]) -> dict[str, Any]:
                 _logger.info("mcp_call corrected tool_name '%s' -> '%s'", tool_name, prefixed)
                 tool_name = prefixed
             else:
-                _logger.warning("mcp_call unknown tool '%s' on server '%s', available: %s",
-                                tool_name, server_name, ", ".join(available_tools[:10]))
+                _logger.warning(
+                    "mcp_call unknown tool '%s' on server '%s', available: %s",
+                    tool_name,
+                    server_name,
+                    ", ".join(available_tools[:10]),
+                )
                 return {
                     "success": False,
                     "error": f"MCP tool '{tool_name}' not found on server '{server_name}'. "
-                             f"Available: {', '.join(available_tools[:20])}",
+                    f"Available: {', '.join(available_tools[:20])}",
                 }
 
         result = await session.call_tool(tool_name, arguments)
@@ -157,3 +162,69 @@ async def disconnect_mcp_server(server_name: str) -> dict[str, Any]:
     if manager is None:
         return {"success": False, "error": "MCP Manager not initialized"}
     return await manager.disconnect_server(server_name)
+
+
+class McpCallTool(BaseTool):
+    """mcp_call 声明式实现（ADR-010 D-01/D-03）— 取代 MCP_CALL_DEF + fn。
+
+    ``needs_mcp_manager=True``：装配器经 invoker 注入全局 MCPServerManager。
+    无 per-operation 契约（工具级行为），业务复用 ``mcp_call_fn``。
+    """
+
+    name = "mcp_call"
+    description = "Call a tool exposed by a connected MCP server to invoke external tools."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "server_name": {"type": "string", "description": "Name of the MCP server"},
+            "tool_name": {"type": "string", "description": "Name of the MCP tool to call"},
+            "arguments": {"type": "object", "default": {}},
+        },
+        "required": ["tool_name"],
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {"success": {"type": "boolean"}, "content": {"type": "array"}, "error": {"type": "string"}},
+    }
+    side_effects = [SideEffect.EXTERNAL]
+    idempotency_key_fields = ["server_name", "tool_name", "arguments"]
+    guardrails = [Guardrail(guardrail_type="scope", config={})]
+    timeout_ms = 60000
+    success_indicator = SuccessIndicator(field="success", op="eq", value=True)
+    needs_mcp_manager = True
+
+    async def run(self, input: dict) -> dict:
+        return await mcp_call_fn(input, manager=self.mcp_manager)
+
+
+class McpDynamicTool(BaseTool):
+    """MCP 动态工具（ADR-010 D-05）— 动态注册走 register_tool，invoker 永不 None。
+
+    由 ``MCPServerManager._register_tools`` 为每个 MCP 暴露的工具构造；
+    ``run`` 委托给 ``mcp_call_fn``（携带 server_name / tool_name / arguments）。
+    """
+
+    side_effects = [SideEffect.EXTERNAL]
+    guardrails = [Guardrail(guardrail_type="scope", config={})]
+    timeout_ms = 60000
+    needs_mcp_manager = True
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        input_schema: dict[str, Any],
+        server_name: str,
+    ) -> None:
+        self.name = name
+        self.description = description
+        self.input_schema = input_schema
+        self.output_schema = {}
+        self.server_name = server_name
+        self.idempotency_key_fields: list[str] = []
+
+    async def run(self, input: dict) -> dict:
+        return await mcp_call_fn(
+            {"server_name": self.server_name, "tool_name": self.name, "arguments": input},
+            manager=self.mcp_manager,
+        )

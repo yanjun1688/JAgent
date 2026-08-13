@@ -12,7 +12,6 @@ Coverage targets:
 
 from __future__ import annotations
 
-import json
 import time
 
 import pytest
@@ -20,7 +19,6 @@ import pytest
 from harness.analysis.service import AnalysisService
 from harness.models.events import (
     AgentThoughtPayload,
-    Event,
     EventType,
     GuardrailTriggeredPayload,
     RunStartedPayload,
@@ -68,20 +66,46 @@ async def _seed_run(
     token_counts = token_counts or []
 
     for i, tc in enumerate(token_counts):
-        await store.append_event(run_id, EventType.AGENT_THOUGHT, AgentThoughtPayload(thought=f"t{i}", token_count=tc).model_dump())
+        await store.append_event(
+            run_id, EventType.AGENT_THOUGHT, AgentThoughtPayload(thought=f"t{i}", token_count=tc).model_dump()
+        )
 
     for idx, (tn, status) in enumerate(tool_results):
         tid = f"call_{idx}"
-        await store.append_event(run_id, EventType.TOOL_CALLED, ToolCalledPayload(tool_call_id=tid, tool_name=tn, input={"i": idx}).model_dump())
+        await store.append_event(
+            run_id,
+            EventType.TOOL_CALLED,
+            ToolCalledPayload(tool_call_id=tid, tool_name=tn, input={"i": idx}).model_dump(),
+        )
         if status == "completed":
-            await store.append_event(run_id, EventType.TOOL_COMPLETED, ToolCompletedPayload(tool_call_id=tid, tool_name=tn, output={"ok": True}, duration_ms=100 * (idx + 1)).model_dump())
+            await store.append_event(
+                run_id,
+                EventType.TOOL_COMPLETED,
+                ToolCompletedPayload(
+                    tool_call_id=tid, tool_name=tn, output={"ok": True}, duration_ms=100 * (idx + 1)
+                ).model_dump(),
+            )
         elif status == "failed":
-            await store.append_event(run_id, EventType.TOOL_FAILED, ToolFailedPayload(tool_call_id=tid, tool_name=tn, error="err", retryable=True).model_dump())
+            await store.append_event(
+                run_id,
+                EventType.TOOL_FAILED,
+                ToolFailedPayload(tool_call_id=tid, tool_name=tn, error="err", retryable=True).model_dump(),
+            )
         elif status == "timeout":
-            await store.append_event(run_id, EventType.TOOL_TIMEOUT, ToolTimeoutPayload(tool_call_id=tid, tool_name=tn, timeout_ms=5000).model_dump())
+            await store.append_event(
+                run_id,
+                EventType.TOOL_TIMEOUT,
+                ToolTimeoutPayload(tool_call_id=tid, tool_name=tn, timeout_ms=5000).model_dump(),
+            )
 
     for tn, gid, reason in guardrails:
-        await store.append_event(run_id, EventType.GUARDRAIL_TRIGGERED, GuardrailTriggeredPayload(tool_call_id="call_0", tool_name=tn, guardrail_id=gid, reason=reason).model_dump())
+        await store.append_event(
+            run_id,
+            EventType.GUARDRAIL_TRIGGERED,
+            GuardrailTriggeredPayload(
+                tool_call_id="call_0", tool_name=tn, guardrail_id=gid, reason=reason
+            ).model_dump(),
+        )
 
     if tool_results:
         await store.append_event(run_id, EventType.RUN_COMPLETED, {"result_summary": "done"})
@@ -105,7 +129,13 @@ class TestDashboard:
         assert o.avg_tool_success_rate == 0.0
 
     async def test_single_completed_run(self, store: EventStore, svc: AnalysisService):
-        await _seed_run(store, "r1", intent="test", tool_results=[("http", "completed"), ("http", "completed")], token_counts=[100, 200])
+        await _seed_run(
+            store,
+            "r1",
+            intent="test",
+            tool_results=[("http", "completed"), ("http", "completed")],
+            token_counts=[100, 200],
+        )
         d = await svc.get_dashboard()
         o = d.overview
         assert o.total_runs == 1
@@ -117,7 +147,9 @@ class TestDashboard:
         assert o.avg_tool_success_rate == 1.0
 
     async def test_multi_run_aggregation(self, store: EventStore, svc: AnalysisService):
-        await _seed_run(store, "r1", intent="a", tool_results=[("http", "completed"), ("http", "failed")], token_counts=[50])
+        await _seed_run(
+            store, "r1", intent="a", tool_results=[("http", "completed"), ("http", "failed")], token_counts=[50]
+        )
         await _seed_run(store, "r2", intent="b", tool_results=[("file_op", "completed")], token_counts=[30])
         await _seed_run(store, "r3", intent="c")  # failed (no tools)
 
@@ -133,7 +165,7 @@ class TestDashboard:
 
     async def test_time_window_excludes_old_events(self, store: EventStore, svc: AnalysisService):
         now = time.time()
-        old_ts = now - 100000
+        now - 100000
 
         await _seed_run(store, "new", intent="new", tool_results=[("http", "completed")], token_counts=[20])
 
@@ -156,10 +188,17 @@ class TestToolStats:
         assert ts.tools == []
 
     async def test_groups_by_tool_name(self, store: EventStore, svc: AnalysisService):
-        await _seed_run(store, "r1", tool_results=[
-            ("http", "completed"), ("http", "completed"), ("http", "failed"),
-            ("file_op", "completed"), ("file_op", "timeout"),
-        ])
+        await _seed_run(
+            store,
+            "r1",
+            tool_results=[
+                ("http", "completed"),
+                ("http", "completed"),
+                ("http", "failed"),
+                ("file_op", "completed"),
+                ("file_op", "timeout"),
+            ],
+        )
         ts = await svc.get_tool_stats()
         tools = {t.tool_name: t for t in ts.tools}
 
@@ -175,14 +214,21 @@ class TestToolStats:
         assert tools["file_op"].timeout_count == 1
 
     async def test_guardrail_blocked_count(self, store: EventStore, svc: AnalysisService):
-        await _seed_run(store, "r1", tool_results=[("http", "completed")], guardrails=[("http", "rate_limit", "too fast")])
+        await _seed_run(
+            store, "r1", tool_results=[("http", "completed")], guardrails=[("http", "rate_limit", "too fast")]
+        )
         ts = await svc.get_tool_stats()
         assert ts.tools[0].guardrail_blocked_count == 1
 
     async def test_avg_duration(self, store: EventStore, svc: AnalysisService):
-        await _seed_run(store, "r1", tool_results=[
-            ("http", "completed"), ("http", "completed"),
-        ])
+        await _seed_run(
+            store,
+            "r1",
+            tool_results=[
+                ("http", "completed"),
+                ("http", "completed"),
+            ],
+        )
         ts = await svc.get_tool_stats()
         # durations: 100ms (idx 0), 200ms (idx 1)
         assert ts.tools[0].avg_duration_ms == 150.0
@@ -197,10 +243,15 @@ class TestGuardrailStats:
         assert gs.guardrails == []
 
     async def test_groups_by_guardrail_id(self, store: EventStore, svc: AnalysisService):
-        await _seed_run(store, "r1", tool_results=[("http", "completed")],
-                        guardrails=[("http", "rate_limit", "too fast"), ("http", "destructive_op", "delete detected")])
-        await _seed_run(store, "r2", tool_results=[("http", "completed")],
-                        guardrails=[("http", "rate_limit", "still fast")])
+        await _seed_run(
+            store,
+            "r1",
+            tool_results=[("http", "completed")],
+            guardrails=[("http", "rate_limit", "too fast"), ("http", "destructive_op", "delete detected")],
+        )
+        await _seed_run(
+            store, "r2", tool_results=[("http", "completed")], guardrails=[("http", "rate_limit", "still fast")]
+        )
 
         gs = await svc.get_guardrail_stats()
         by_id = {g.guardrail_id: g for g in gs.guardrails}
@@ -250,8 +301,7 @@ class TestToolTraces:
         assert tt.tool_traces[0].retryable.suggested_backoff_ms == 5000
 
     async def test_guardrail_merges_retryable(self, store: EventStore, svc: AnalysisService):
-        await _seed_run(store, "r1", tool_results=[("http", "failed")],
-                        guardrails=[("http", "rate_limit", "too fast")])
+        await _seed_run(store, "r1", tool_results=[("http", "failed")], guardrails=[("http", "rate_limit", "too fast")])
         tt = await svc.get_run_tool_traces("r1")
         t = tt.tool_traces[0]
         assert t.status == "failed"
@@ -261,8 +311,9 @@ class TestToolTraces:
         assert t.retryable.requires_input_modification is True
 
     async def test_guardrail_only_status(self, store: EventStore, svc: AnalysisService):
-        await _seed_run(store, "r1", tool_results=[("http", "completed")],
-                        guardrails=[("http", "destructive_op", "blocked")])
+        await _seed_run(
+            store, "r1", tool_results=[("http", "completed")], guardrails=[("http", "destructive_op", "blocked")]
+        )
         tt = await svc.get_run_tool_traces("r1")
         t = tt.tool_traces[0]
         assert t.status == "completed"  # not overwritten by guardrail
@@ -271,7 +322,11 @@ class TestToolTraces:
 
     async def test_partial_trace_no_result_event(self, store: EventStore, svc: AnalysisService):
         await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="x").model_dump())
-        await store.append_event("r1", EventType.TOOL_CALLED, ToolCalledPayload(tool_call_id="orphan", tool_name="http", input={}).model_dump())
+        await store.append_event(
+            "r1",
+            EventType.TOOL_CALLED,
+            ToolCalledPayload(tool_call_id="orphan", tool_name="http", input={}).model_dump(),
+        )
         tt = await svc.get_run_tool_traces("r1")
         assert len(tt.tool_traces) == 1
         assert tt.tool_traces[0].status == "unknown"
@@ -328,8 +383,14 @@ class TestRunAnalysis:
         assert await svc.get_run_analysis("xxx") is None
 
     async def test_summary_fields(self, store: EventStore, svc: AnalysisService):
-        await _seed_run(store, "r1", intent="hello", tool_results=[("http", "completed"), ("file_op", "failed")],
-                        token_counts=[100, 200], guardrails=[("http", "rate_limit", "too fast")])
+        await _seed_run(
+            store,
+            "r1",
+            intent="hello",
+            tool_results=[("http", "completed"), ("file_op", "failed")],
+            token_counts=[100, 200],
+            guardrails=[("http", "rate_limit", "too fast")],
+        )
         summary = await svc.get_run_analysis("r1")
         assert summary is not None
         assert summary.run_id == "r1"
@@ -367,9 +428,15 @@ class TestEdgeCases:
         assert tt.tool_traces == []
 
     async def test_retryable_info_all_statuses(self, store: EventStore, svc: AnalysisService):
-        await _seed_run(store, "r1", tool_results=[
-            ("t1", "completed"), ("t2", "failed"), ("t3", "timeout"),
-        ])
+        await _seed_run(
+            store,
+            "r1",
+            tool_results=[
+                ("t1", "completed"),
+                ("t2", "failed"),
+                ("t3", "timeout"),
+            ],
+        )
         tt = await svc.get_run_tool_traces("r1")
         status_map = {t.tool_name: t for t in tt.tool_traces}
         assert status_map["t1"].retryable.eligible is False

@@ -1,10 +1,14 @@
 """Comprehensive data-flow test: Normal / Error / Monitor flows with real LLM + real tools.
 
 Usage:
-  cd D:\Project\JAgent
-  .\.venv\Scripts\Activate.ps1
+  cd D:\\Project\\JAgent
+  .\\.venv\\Scripts\\Activate.ps1
   python scripts\test_all_flows.py
 """
+
+# Imports follow the local source-path and dotenv bootstrap below.
+# ruff: noqa: E402
+
 import asyncio
 import json
 import logging
@@ -23,22 +27,21 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-from harness.core.scheduler import AgentLoopScheduler, SchedulerConfig, ThinkResult
 from harness.core.agent_kernel import LLMAgentKernel, MockAgentKernel
 from harness.core.context_manager import ContextManager
+from harness.core.scheduler import AgentLoopScheduler, SchedulerConfig, ThinkResult
+from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
 from harness.monitoring.run_monitor import RunMonitor
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ToolExecutor
-from harness.models.tools import ToolDefinition, SideEffect, RetryPolicy
-from harness.core.fold import fold_events
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
+
 def _dump(label: str, state, events):
-    print(f"\n  {'='*56}")
+    print(f"\n  {'=' * 56}")
     print(f"  {label}")
-    print(f"  {'='*56}")
+    print(f"  {'=' * 56}")
     print(f"  Status       : {state.status.value}")
     print(f"  Events       : {len(events)} total (seq 1 → {state.seq})")
     print(f"  Thoughts     : {len(state.thought_history)}")
@@ -52,10 +55,11 @@ def _dump(label: str, state, events):
 
 # ── Scenario 1: Normal Flow ──────────────────────────────────────────────
 
+
 async def scenario_normal(api_key: str, model: str, base_url: str):
-    print("\n" + "█"*58)
+    print("\n" + "█" * 58)
     print("█" + "  SCENARIO 1: Normal Flow (real LLM + successful tool)".center(56) + "█")
-    print("█"*58)
+    print("█" * 58)
 
     store = EventStore(":memory:")
     await store.initialize()
@@ -65,26 +69,36 @@ async def scenario_normal(api_key: str, model: str, base_url: str):
     monitor.attach()
 
     from harness.core.llm_client import OpenAILLMClient
+
     client = OpenAILLMClient(api_key=api_key, model=model, base_url=base_url)
     kernel = LLMAgentKernel(client)
 
     echo_def = ToolDefinition(
-        name="echo", description="Echo back whatever message you send. Use this to send messages and confirm outputs.",
-        input_schema={"type": "object", "properties": {"msg": {"type": "string", "description": "Message to echo back"}}},
+        name="echo",
+        description="Echo back whatever message you send. Use this to send messages and confirm outputs.",
+        input_schema={
+            "type": "object",
+            "properties": {"msg": {"type": "string", "description": "Message to echo back"}},
+        },
         output_schema={"type": "object"},
         idempotency_key_fields=["msg"],
         side_effects=[SideEffect.WRITE],
-        timeout_ms=10000, retry_policy=RetryPolicy(),
+        timeout_ms=10000,
+        retry_policy=RetryPolicy(),
     )
 
     async def echo_fn(input_: dict) -> dict:
         return {"echo": input_, "status": "ok"}
 
     scheduler = AgentLoopScheduler(
-        store=store, executor=executor, kernel=kernel,
-        tool_defs=[echo_def], tool_fns={"echo": echo_fn},
+        store=store,
+        executor=executor,
+        kernel=kernel,
+        tool_defs=[echo_def],
+        tool_fns={"echo": echo_fn},
         config=SchedulerConfig(max_iterations=5),
-        context_manager=cm, monitor=monitor,
+        context_manager=cm,
+        monitor=monitor,
     )
 
     state = await scheduler.run("normal-flow", "Echo the phrase 'hello world' back to me")
@@ -94,16 +108,17 @@ async def scenario_normal(api_key: str, model: str, base_url: str):
     assert state.status.value == "completed", f"Expected completed, got {state.status.value}"
     has_tool = any(e.event_type.value == "ToolCompleted" for e in events)
     assert has_tool, "Normal flow: expected at least one ToolCompleted event"
-    print(f"  └─ ✅ Normal flow PASSED (completed + tool executed)")
+    print("  └─ ✅ Normal flow PASSED (completed + tool executed)")
     return state, events
 
 
 # ── Scenario 2: Error Flow ───────────────────────────────────────────────
 
+
 async def scenario_error(api_key: str, model: str, base_url: str):
-    print("\n" + "█"*58)
+    print("\n" + "█" * 58)
     print("█" + "  SCENARIO 2: Error Flow (real LLM + failing tool)".center(56) + "█")
-    print("█"*58)
+    print("█" * 58)
 
     store = EventStore(":memory:")
     await store.initialize()
@@ -113,27 +128,36 @@ async def scenario_error(api_key: str, model: str, base_url: str):
     monitor.attach()
 
     from harness.core.llm_client import OpenAILLMClient
+
     client = OpenAILLMClient(api_key=api_key, model=model, base_url=base_url)
     kernel = LLMAgentKernel(client)
 
     fail_def = ToolDefinition(
         name="fail_on_demand",
         description="ALWAYS fails when called. Use this tool to test error handling — it never succeeds.",
-        input_schema={"type": "object", "properties": {"reason": {"type": "string", "description": "Reason for failure"}}},
+        input_schema={
+            "type": "object",
+            "properties": {"reason": {"type": "string", "description": "Reason for failure"}},
+        },
         output_schema={"type": "object"},
         idempotency_key_fields=["reason"],
         side_effects=[SideEffect.WRITE],
-        timeout_ms=5000, retry_policy=RetryPolicy(),
+        timeout_ms=5000,
+        retry_policy=RetryPolicy(),
     )
 
     async def fail_fn(input_: dict) -> dict:
         raise RuntimeError(f"Intentional failure: {input_.get('reason', 'no reason')}")
 
     scheduler = AgentLoopScheduler(
-        store=store, executor=executor, kernel=kernel,
-        tool_defs=[fail_def], tool_fns={"fail_on_demand": fail_fn},
+        store=store,
+        executor=executor,
+        kernel=kernel,
+        tool_defs=[fail_def],
+        tool_fns={"fail_on_demand": fail_fn},
         config=SchedulerConfig(max_iterations=5, max_consecutive_failures=3),
-        context_manager=cm, monitor=monitor,
+        context_manager=cm,
+        monitor=monitor,
     )
 
     state = await scheduler.run("error-flow", "Call the fail_on_demand tool to test error handling")
@@ -142,16 +166,17 @@ async def scenario_error(api_key: str, model: str, base_url: str):
 
     has_failed = any(e.event_type.value == "ToolFailed" for e in events)
     assert has_failed, "Error flow: expected at least one ToolFailed event"
-    print(f"  └─ ✅ Error flow PASSED (ToolFailed event present)")
+    print("  └─ ✅ Error flow PASSED (ToolFailed event present)")
     return state, events
 
 
 # ── Scenario 3: Monitor Flow ─────────────────────────────────────────────
 
+
 async def scenario_monitor():
-    print("\n" + "█"*58)
+    print("\n" + "█" * 58)
     print("█" + "  SCENARIO 3: Monitor Flow (sequential failures → feedback)".center(56) + "█")
-    print("█"*58)
+    print("█" * 58)
 
     store = EventStore(":memory:")
     await store.initialize()
@@ -167,7 +192,8 @@ async def scenario_monitor():
         output_schema={"type": "object"},
         idempotency_key_fields=["msg"],
         side_effects=[SideEffect.WRITE],
-        timeout_ms=5000, retry_policy=RetryPolicy(),
+        timeout_ms=5000,
+        retry_policy=RetryPolicy(),
     )
 
     async def always_fail_fn(input_: dict) -> dict:
@@ -175,7 +201,9 @@ async def scenario_monitor():
 
     # Mock kernel pre-programmed: 3 consecutive failures → stop
     responses = [
-        ThinkResult(thought="Let me test the failing tool", token_count=5, tool_name="always_fail", tool_input={"msg": "test1"}),
+        ThinkResult(
+            thought="Let me test the failing tool", token_count=5, tool_name="always_fail", tool_input={"msg": "test1"}
+        ),
         ThinkResult(thought="Let me try again", token_count=5, tool_name="always_fail", tool_input={"msg": "test2"}),
         ThinkResult(thought="One more attempt", token_count=5, tool_name="always_fail", tool_input={"msg": "test3"}),
         ThinkResult(thought="Too many failures, stopping now", token_count=5),
@@ -183,10 +211,14 @@ async def scenario_monitor():
     kernel = MockAgentKernel(responses)
 
     scheduler = AgentLoopScheduler(
-        store=store, executor=executor, kernel=kernel,
-        tool_defs=[fail_def], tool_fns={"always_fail": always_fail_fn},
+        store=store,
+        executor=executor,
+        kernel=kernel,
+        tool_defs=[fail_def],
+        tool_fns={"always_fail": always_fail_fn},
         config=SchedulerConfig(max_iterations=10, max_consecutive_failures=5),
-        context_manager=cm, monitor=monitor,
+        context_manager=cm,
+        monitor=monitor,
     )
 
     state = await scheduler.run("monitor-flow", "Test monitoring feedback injection")
@@ -194,14 +226,13 @@ async def scenario_monitor():
     _dump("MONITOR FLOW — RESULT", state, events)
 
     feedback_events = [e for e in events if e.event_type.value == "FeedbackInjected"]
-    assert len(feedback_events) >= 1, (
-        f"Monitor flow: expected ≥1 FeedbackInjected event, got {len(feedback_events)}"
-    )
+    assert len(feedback_events) >= 1, f"Monitor flow: expected ≥1 FeedbackInjected event, got {len(feedback_events)}"
     print(f"  └─ ✅ Monitor flow PASSED ({len(feedback_events)} FeedbackInjected event(s))")
     return state, events
 
 
 # ── Main ─────────────────────────────────────────────────────────────────
+
 
 async def main():
     api_key = os.getenv("LLM_API_KEY", "")
@@ -209,10 +240,10 @@ async def main():
     base_url = os.getenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
     if not api_key:
-        env_path = os.path.join(os.path.dirname(__file__), os.pardir, ".env")
+        os.path.join(os.path.dirname(__file__), os.pardir, ".env")
         print("❌ LLM_API_KEY not set in .env — create .env with:")
-        print(f"   LLM_API_KEY=sk-xxx")
-        print(f"   LLM_MODEL_NAME=qwen3.7-max-preview")
+        print("   LLM_API_KEY=sk-xxx")
+        print("   LLM_MODEL_NAME=qwen3.7-max-preview")
         sys.exit(1)
 
     print(f"  LLM: {model} @ {base_url}")
@@ -243,9 +274,9 @@ async def main():
         traceback.print_exc()
         results["monitor"] = None
 
-    print("\n" + "="*58)
+    print("\n" + "=" * 58)
     print("  SUMMARY")
-    print("="*58)
+    print("=" * 58)
     for name, result in results.items():
         status = "✅ PASSED" if result else "❌ FAILED"
         r = result[1] if result else []

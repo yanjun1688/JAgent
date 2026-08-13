@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
 
 import pytest
 
 from harness.core.llm_client import ChatResponse
 from harness.core.planner import Planner, PlanGuardrail
 from harness.core.fold import RunState
-from harness.models.plan import DagPlan, DagStep
+from harness.models.plan import DagPlan, DagStep, RequiredOperation
 from harness.models.tools import RetryPolicy, ToolDefinition
 from harness.storage.event_store import EventStore
 from harness.tools.registry import ToolRegistry
@@ -15,6 +14,7 @@ from harness.tools.registry import ToolRegistry
 
 class _MockLLM:
     """Minimal LLM double that records what messages it received."""
+
     def __init__(self):
         self.last_messages = None
 
@@ -31,13 +31,16 @@ def store():
 @pytest.fixture
 def registry():
     r = ToolRegistry()
-    r.register(
+    r._register(
         ToolDefinition(
-            name="echo", description="Echo",
+            name="echo",
+            description="Echo",
             input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
             output_schema={"type": "object"},
             idempotency_key_fields=[],
-            side_effects=[], timeout_ms=5000, retry_policy=RetryPolicy(),
+            side_effects=[],
+            timeout_ms=5000,
+            retry_policy=RetryPolicy(),
         ),
         lambda x: {"ok": True},
     )
@@ -97,6 +100,29 @@ class TestPlannerParsePlan:
         assert plan is not None, err
         assert len(plan.steps) == 1
 
+    def test_parse_plan_declared_operations(self):
+        """Q-02: LLM 输出的 declared_operations 被解析为 DagPlan.declared_operations。"""
+        response = (
+            '{"intent":"t","steps":[{"id":"s1","tool":"echo","input":{"msg":"hi"}}],'
+            '"declared_operations":[{"tool":"echo","input":{"msg":"hi"}},{"tool":"echo","input":{"msg":"other"}}]}'
+        )
+        plan, err = Planner._parse_plan(response)
+        assert plan is not None, err
+        assert len(plan.declared_operations) == 2
+        assert plan.declared_operations[0].tool == "echo"
+        assert plan.declared_operations[0].input == {"msg": "hi"}
+
+    def test_parse_plan_declared_operations_invalid_items_skipped(self):
+        """Q-02: 非法 declared_operations 项被跳过（非对象 / 缺 tool / input 非 dict）。"""
+        response = (
+            '{"steps": [], "declared_operations": ["bad", {"tool": ""}, {"input": {}}, '
+            '{"tool": "echo", "input": {"msg": "hi"}}]}'
+        )
+        plan, err = Planner._parse_plan(response)
+        assert plan is not None, err
+        assert len(plan.declared_operations) == 1
+        assert plan.declared_operations[0].input == {"msg": "hi"}
+
 
 class TestPlanGuardrail:
     def test_validate_valid_plan(self, registry):
@@ -113,27 +139,36 @@ class TestPlanGuardrail:
 
     def test_validate_duplicate_step_id(self, registry):
         guardrail = PlanGuardrail(registry)
-        plan = DagPlan(intent="test", steps=[
-            DagStep(id="s1", tool="echo", input={}),
-            DagStep(id="s1", tool="echo", input={}),
-        ])
+        plan = DagPlan(
+            intent="test",
+            steps=[
+                DagStep(id="s1", tool="echo", input={}),
+                DagStep(id="s1", tool="echo", input={}),
+            ],
+        )
         errors = guardrail.validate(plan)
         assert any("Duplicate" in e for e in errors)
 
     def test_validate_cyclic_dependency(self, registry):
         guardrail = PlanGuardrail(registry)
-        plan = DagPlan(intent="test", steps=[
-            DagStep(id="s1", tool="echo", input={}, depends_on=["s2"]),
-            DagStep(id="s2", tool="echo", input={}, depends_on=["s1"]),
-        ])
+        plan = DagPlan(
+            intent="test",
+            steps=[
+                DagStep(id="s1", tool="echo", input={}, depends_on=["s2"]),
+                DagStep(id="s2", tool="echo", input={}, depends_on=["s1"]),
+            ],
+        )
         errors = guardrail.validate(plan)
         assert any("Cycle" in e for e in errors)
 
     def test_validate_depends_on_unknown(self, registry):
         guardrail = PlanGuardrail(registry)
-        plan = DagPlan(intent="test", steps=[
-            DagStep(id="s1", tool="echo", input={}, depends_on=["ghost"]),
-        ])
+        plan = DagPlan(
+            intent="test",
+            steps=[
+                DagStep(id="s1", tool="echo", input={}, depends_on=["ghost"]),
+            ],
+        )
         errors = guardrail.validate(plan)
         assert any("depends on unknown" in e for e in errors)
 
@@ -146,14 +181,39 @@ class TestPlanGuardrail:
     def test_validate_max_parallel_is_warning_now(self, registry):
         """_check_max_parallel should no longer produce hard errors."""
         guardrail = PlanGuardrail(registry)
-        plan = DagPlan(intent="test", steps=[
-            DagStep(id="s1", tool="echo", input={}),
-            DagStep(id="s2", tool="echo", input={}),
-            DagStep(id="s3", tool="echo", input={}),
-            DagStep(id="s4", tool="echo", input={}),  # 4 echoes in same layer, max_parallel=3
-        ])
+        plan = DagPlan(
+            intent="test",
+            steps=[
+                DagStep(id="s1", tool="echo", input={}),
+                DagStep(id="s2", tool="echo", input={}),
+                DagStep(id="s3", tool="echo", input={}),
+                DagStep(id="s4", tool="echo", input={}),  # 4 echoes in same layer, max_parallel=3
+            ],
+        )
         errors = guardrail.validate(plan)
         # Should pass without errors (semaphore handles enforcement)
+        assert errors == []
+
+    def test_validate_declared_operations_self_consistency_rejected(self, registry):
+        """Q-02: declared_operations 自洽检查仍生效 —— 自报操作无匹配 step → 拒绝（结构检查）。"""
+        guardrail = PlanGuardrail(registry)
+        plan = DagPlan(
+            intent="test",
+            steps=[DagStep(id="s1", tool="echo", input={"msg": "hi"})],
+            declared_operations=[RequiredOperation(tool="echo", input={"msg": "other"})],
+        )
+        errors = guardrail.validate(plan)
+        assert any("Declared operation" in e for e in errors)
+
+    def test_validate_declared_operations_matching_passes(self, registry):
+        """Q-02: declared_operations 与步骤自洽 → 通过（仅结构检查，不承载交付验收）。"""
+        guardrail = PlanGuardrail(registry)
+        plan = DagPlan(
+            intent="test",
+            steps=[DagStep(id="s1", tool="echo", input={"msg": "hi"})],
+            declared_operations=[RequiredOperation(tool="echo", input={"msg": "hi"})],
+        )
+        errors = guardrail.validate(plan)
         assert errors == []
 
 
@@ -165,30 +225,36 @@ class TestPlanPromptBug1:
         from harness.core.system_prompt import AgentPhase, get_prompt
 
         prompt = get_prompt(AgentPhase.PLAN, step_schema="", tool_descriptions="", intent="test")
-        assert "conversational responses are handled" in prompt.lower() or \
-               "answer phase" in prompt.lower(), \
-               "Prompt should tell Planner NOT to plan conversation/answer tool calls"
+        assert "conversational responses are handled" in prompt.lower() or "answer phase" in prompt.lower(), (
+            "Prompt should tell Planner NOT to plan conversation/answer tool calls"
+        )
 
     async def test_planner_does_not_plan_conversation_tool(self, registry):
         """Planner receives a composite intent (tools + conversation) and should NOT output a fake 'answer' step."""
         from harness.core.llm_client import MockLLMClient
 
-        registry.register(
+        registry._register(
             ToolDefinition(
-                name="file_op", description="File operations",
+                name="file_op",
+                description="File operations",
                 input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
                 output_schema={"type": "object"},
-                idempotency_key_fields=[], side_effects=[], timeout_ms=5000,
+                idempotency_key_fields=[],
+                side_effects=[],
+                timeout_ms=5000,
                 retry_policy=RetryPolicy(),
             ),
             lambda x: {"success": True},
         )
-        registry.register(
+        registry._register(
             ToolDefinition(
-                name="browser", description="Browser control",
+                name="browser",
+                description="Browser control",
                 input_schema={"type": "object", "properties": {"url": {"type": "string"}}},
                 output_schema={"type": "object"},
-                idempotency_key_fields=[], side_effects=[], timeout_ms=5000,
+                idempotency_key_fields=[],
+                side_effects=[],
+                timeout_ms=5000,
                 retry_policy=RetryPolicy(),
             ),
             lambda x: {"success": True},
@@ -199,7 +265,7 @@ class TestPlanPromptBug1:
             '"steps": ['
             '{"id": "s1", "tool": "file_op", "input": {"path": "answer.txt"}},'
             '{"id": "s2", "tool": "browser", "input": {"url": "https://baidu.com"}, "depends_on": ["s1"]}'
-            ']}'
+            "]}"
         )
         llm = MockLLMClient(responses=[plan_json])
         planner = Planner(llm_client=llm, registry=registry)
@@ -222,9 +288,9 @@ class TestPlanPromptBug2:
         from harness.core.system_prompt import AgentPhase, get_prompt
 
         prompt = get_prompt(AgentPhase.PLAN, step_schema="", tool_descriptions="", intent="test")
-        assert "never compute" in prompt.lower() or \
-               "do not hardcode" in prompt.lower(), \
-               "Prompt should forbid Planner from computing/hardcoding values"
+        assert "never compute" in prompt.lower() or "do not hardcode" in prompt.lower(), (
+            "Prompt should forbid Planner from computing/hardcoding values"
+        )
 
     async def test_plan_accepts_data_flow_references(self, registry):
         """Verify _parse_plan correctly handles step inputs with $step_id.field references.
@@ -235,28 +301,41 @@ class TestPlanPromptBug2:
         """
         from harness.core.llm_client import MockLLMClient
 
-        registry.register(
+        registry._register(
             ToolDefinition(
-                name="file_op", description="File ops",
-                input_schema={"type": "object", "properties": {
-                    "operation": {"type": "string"},
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
-                }},
+                name="file_op",
+                description="File ops",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "operation": {"type": "string"},
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
                 output_schema={"type": "object"},
-                idempotency_key_fields=[], side_effects=[], timeout_ms=5000,
+                idempotency_key_fields=[],
+                side_effects=[],
+                timeout_ms=5000,
                 retry_policy=RetryPolicy(),
             ),
             lambda x: {"success": True},
         )
-        registry.register(
+        registry._register(
             ToolDefinition(
-                name="browser", description="Browser",
-                input_schema={"type": "object", "properties": {
-                    "action": {"type": "string"}, "url": {"type": "string"},
-                }},
+                name="browser",
+                description="Browser",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string"},
+                        "url": {"type": "string"},
+                    },
+                },
                 output_schema={"type": "object"},
-                idempotency_key_fields=[], side_effects=[], timeout_ms=5000,
+                idempotency_key_fields=[],
+                side_effects=[],
+                timeout_ms=5000,
                 retry_policy=RetryPolicy(),
             ),
             lambda x: {"success": True},
@@ -267,7 +346,7 @@ class TestPlanPromptBug2:
             '"steps": ['
             '{"id": "s1", "tool": "browser", "input": {"action": "navigate", "url": "https://baidu.com"}},'
             '{"id": "s2", "tool": "file_op", "input": {"operation": "write", "path": "result.txt", "content": "$s1.answer"}, "depends_on": ["s1"]}'
-            ']}'
+            "]}"
         )
         llm = MockLLMClient(responses=[plan_json])
         planner = Planner(llm_client=llm, registry=registry)
@@ -289,12 +368,8 @@ class TestPlanPromptBug3:
         from harness.core.system_prompt import AgentPhase, get_prompt
 
         prompt = get_prompt(AgentPhase.PLAN, step_schema="", tool_descriptions="", intent="test")
-        assert '"content": "done"' not in prompt, (
-            "Bug 3: Example 2 should NOT hardcode 'done' — use $s1.result instead"
-        )
-        assert "$s1.result" in prompt, (
-            "Bug 3: Example 2 should demonstrate $s1.result data flow reference"
-        )
+        assert '"content": "done"' not in prompt, "Bug 3: Example 2 should NOT hardcode 'done' — use $s1.result instead"
+        assert "$s1.result" in prompt, "Bug 3: Example 2 should demonstrate $s1.result data flow reference"
 
     def test_data_flow_section_has_syntax_examples(self):
         """The Data Flow section must include syntax examples like $s1.result, $s1.body."""
@@ -304,21 +379,15 @@ class TestPlanPromptBug3:
         assert "Syntax:" in prompt or "$s1.result" in prompt, (
             "Bug 3: Data Flow section should explain $step_id.field syntax with examples"
         )
-        assert "never hardcode" in prompt.lower(), (
-            "Bug 3: Data Flow section should forbid hardcoding upstream values"
-        )
+        assert "never hardcode" in prompt.lower(), "Bug 3: Data Flow section should forbid hardcoding upstream values"
 
     def test_example3_exists_with_data_flow(self):
         """Example 3 must demonstrate $step_id.field usage between dependent steps."""
         from harness.core.system_prompt import AgentPhase, get_prompt
 
         prompt = get_prompt(AgentPhase.PLAN, step_schema="", tool_descriptions="", intent="test")
-        assert "Example 3" in prompt, (
-            "Bug 3: Should have an Example 3 demonstrating data flow with $ references"
-        )
-        assert "$s1.body" in prompt, (
-            "Bug 3: Example 3 should use $s1.body to show data flow between steps"
-        )
+        assert "Example 3" in prompt, "Bug 3: Should have an Example 3 demonstrating data flow with $ references"
+        assert "$s1.body" in prompt, "Bug 3: Example 3 should use $s1.body to show data flow between steps"
 
 
 class TestPlannerGenerateAnswerFeedback:
@@ -340,7 +409,7 @@ class TestPlannerGenerateAnswerFeedback:
                 _Feedback(seq=2, feedback_text="Use the fast tool instead"),
             ],
         )
-        result = await planner.generate_answer("test intent", state, feedback=None)
+        await planner.generate_answer("test intent", state, feedback=None)
         assert llm.last_messages is not None
         user_msg = next(m for m in llm.last_messages if m["role"] == "user")
         content = user_msg["content"]
@@ -361,7 +430,7 @@ class TestPlannerGenerateAnswerOutcome:
             intent="test",
             latest_plan={
                 "plan_id": "plan_r1",
-                "revision_reason": "soft_error_revised",
+                "revision_reason": "unsuccessful_revised",
                 "remaining_steps_summary": "task complete",
                 "status": "completed",
             },
@@ -371,7 +440,7 @@ class TestPlannerGenerateAnswerOutcome:
         user_msg = next(m for m in llm.last_messages if m["role"] == "user")
         content = user_msg["content"]
         assert "[Run outcome" in content
-        assert "soft_error_revised" in content
+        assert "unsuccessful_revised" in content
         assert "task complete" in content
 
     async def test_generate_answer_omits_outcome_without_plan(self):
@@ -387,6 +456,7 @@ class TestPlannerGenerateAnswerOutcome:
 
 class _Feedback:
     """Minimal FeedbackInjectedPayload stand-in."""
+
     def __init__(self, seq, feedback_text):
         self.seq = seq
         self.feedback_text = feedback_text
@@ -394,6 +464,7 @@ class _Feedback:
 
 class _ToolCall:
     """Minimal ToolCalledPayload stand-in."""
+
     def __init__(self, tool_call_id, tool_name, input):
         self.tool_call_id = tool_call_id
         self.tool_name = tool_name
@@ -418,11 +489,24 @@ class TestAnswerContextBug5:
                 _ToolCall("tc2", "browser", {"action": "navigate", "url": "https://example.com"}),
             ],
             tool_results=[
-                ToolResult("tc1", "file_op", ToolResultStatus.COMPLETED, output={"success": True, "path": "/tmp/test.txt", "size": 11}, duration_ms=150),
-                ToolResult("tc2", "browser", ToolResultStatus.SOFT_ERROR, output=None, error="Connection timeout", duration_ms=5000),
+                ToolResult(
+                    "tc1",
+                    "file_op",
+                    ToolResultStatus.COMPLETED,
+                    output={"success": True, "path": "/tmp/test.txt", "size": 11},
+                    duration_ms=150,
+                ),
+                ToolResult(
+                    "tc2",
+                    "browser",
+                    ToolResultStatus.UNSUCCESSFUL,
+                    output=None,
+                    error="Connection timeout",
+                    duration_ms=5000,
+                ),
             ],
         )
-        result = await planner.generate_answer("write file and browse", state, feedback=None)
+        await planner.generate_answer("write file and browse", state, feedback=None)
         assert llm.last_messages is not None
         user_msg = next(m for m in llm.last_messages if m["role"] == "user")
         content = user_msg["content"]
@@ -435,7 +519,7 @@ class TestAnswerContextBug5:
 
         assert "Step 2" in content, f"Missing step number for step 2:\n{content[:500]}"
         assert "browser" in content, f"Missing tool name for step 2:\n{content[:500]}"
-        assert "soft_error" in content, f"Missing status for step 2:\n{content[:500]}"
+        assert "unsuccessful" in content, f"Missing status for step 2:\n{content[:500]}"
         assert "Connection timeout" in content, f"Missing error message:\n{content[:500]}"
         assert "https://example.com" in content, f"Missing input URL:\n{content[:500]}"
 
@@ -456,7 +540,7 @@ class TestAnswerContextBug5:
                 ToolResult("tc1", "http", ToolResultStatus.COMPLETED, output={"status": 200}, duration_ms=320),
             ],
         )
-        result = await planner.generate_answer("simple", state, feedback=None)
+        await planner.generate_answer("simple", state, feedback=None)
         assert llm.last_messages is not None
         user_msg = next(m for m in llm.last_messages if m["role"] == "user")
         content = user_msg["content"]
@@ -467,12 +551,24 @@ class TestAnswerContextBug5:
         llm = _MockLLM()
         planner = Planner(llm_client=llm, registry=None, store=None)
         state = RunState(run_id="r1", intent="simple chat")
-        result = await planner.generate_answer("simple chat", state, feedback=None)
+        await planner.generate_answer("simple chat", state, feedback=None)
         assert llm.last_messages is not None
         user_msg = next(m for m in llm.last_messages if m["role"] == "user")
         content = user_msg["content"]
         assert "simple chat" in content
         assert "Tool execution results" not in content, "Should not have tool section when no results"
+
+    async def test_answer_no_tools_injects_no_tools_executed_marker(self):
+        """Bug 4 回归（Run 325b42c5）：无工具结果时注入 [NO TOOLS EXECUTED] 权威信号。"""
+        llm = _MockLLM()
+        planner = Planner(llm_client=llm, registry=None, store=None)
+        state = RunState(run_id="r1", intent="测试路径边界")
+        await planner.generate_answer("尝试写入 ../blackbox-escape.txt", state, feedback=None)
+        assert llm.last_messages is not None
+        user_msg = next(m for m in llm.last_messages if m["role"] == "user")
+        content = user_msg["content"]
+        assert "[NO TOOLS EXECUTED]" in content, "无工具执行时必须注入权威标记"
+        assert "Do not describe or imply any" in content
 
 
 class TestToolFilteringBug8:
@@ -483,30 +579,39 @@ class TestToolFilteringBug8:
         from harness.models.tools import SideEffect, ToolDefinition
 
         registry = ToolRegistry()
-        registry.register(
+        registry._register(
             ToolDefinition(
-                name="echo", description="Echo",
+                name="echo",
+                description="Echo",
                 input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
                 output_schema={"type": "object"},
-                idempotency_key_fields=[], side_effects=[], timeout_ms=5000,
+                idempotency_key_fields=[],
+                side_effects=[],
+                timeout_ms=5000,
             ),
             lambda x: {"ok": True},
         )
-        registry.register(
+        registry._register(
             ToolDefinition(
-                name="browser", description="Browse web pages and take screenshots",
+                name="browser",
+                description="Browse web pages and take screenshots",
                 input_schema={"type": "object", "properties": {}},
                 output_schema={"type": "object"},
-                idempotency_key_fields=[], side_effects=[SideEffect.EXTERNAL], timeout_ms=5000,
+                idempotency_key_fields=[],
+                side_effects=[SideEffect.EXTERNAL],
+                timeout_ms=5000,
             ),
             lambda x: {"ok": True},
         )
-        registry.register(
+        registry._register(
             ToolDefinition(
-                name="mcp_call", description="Call MCP server tools",
+                name="mcp_call",
+                description="Call MCP server tools",
                 input_schema={"type": "object", "properties": {}},
                 output_schema={"type": "object"},
-                idempotency_key_fields=[], side_effects=[], timeout_ms=5000,
+                idempotency_key_fields=[],
+                side_effects=[],
+                timeout_ms=5000,
             ),
             lambda x: {"ok": True},
         )

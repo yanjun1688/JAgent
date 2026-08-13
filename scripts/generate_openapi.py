@@ -13,19 +13,18 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FRONTEND_PUBLIC = PROJECT_ROOT / "frontend" / "public"
 FRONTEND_SRC_API = PROJECT_ROOT / "frontend" / "src" / "api"
 
 # Build schema from the FastAPI app without running a server
-from harness.api.app import app
+from harness.api.app import app  # noqa: E402
 
 schema = app.openapi()
 FRONTEND_PUBLIC.mkdir(parents=True, exist_ok=True)
 schema_path = FRONTEND_PUBLIC / "openapi.json"
-schema_path.write_text(json.dumps(schema, indent=2, ensure_ascii=False))
+schema_path.write_text(json.dumps(schema, indent=2, ensure_ascii=False), encoding="utf-8")
 print(f"[OK] OpenAPI schema written to {schema_path}")
 
 
@@ -34,12 +33,21 @@ print(f"[OK] OpenAPI schema written to {schema_path}")
 
 def _to_ts_type(s: str) -> str:
     """Map OpenAPI format/type to TypeScript."""
-    if s == "int32" or s == "int64":
+    if s in {"integer", "int32", "int64", "number"}:
         return "number"
+    if s == "boolean":
+        return "boolean"
+    if s == "string":
+        return "string"
     return s
 
 
 def _render_prop(name: str, prop: dict, required: bool) -> str:
+    variants = prop.get("anyOf") or prop.get("oneOf")
+    if variants:
+        non_null = [variant for variant in variants if variant.get("type") != "null"]
+        if len(non_null) == 1:
+            prop = non_null[0]
     ref = prop.get("$ref", "")
     if ref:
         ts_type = ref.rsplit("/", 1)[-1]
@@ -55,8 +63,8 @@ def _render_prop(name: str, prop: dict, required: bool) -> str:
         ts_type = "Record<string, unknown>"
     else:
         ts_type = _to_ts_type(prop.get("type", "unknown"))
-    suffix = "" if required else " | undefined"
-    return f"  {name}: {ts_type}{suffix}"
+    suffix = "" if required else "?"
+    return f"  {name}{suffix}: {ts_type}"
 
 
 def _generate_interfaces(components: dict) -> str:
@@ -67,12 +75,22 @@ def _generate_interfaces(components: dict) -> str:
         "",
     ]
     for name, definition in schemas.items():
+        if definition.get("enum"):
+            values = " | ".join(json.dumps(value) for value in definition["enum"])
+            lines.append(f"export type {name} = {values}")
+            lines.append("")
+            continue
         if definition.get("type") == "object":
             props = definition.get("properties", {})
             required_set = set(definition.get("required", []))
             lines.append(f"export interface {name} {{")
             for pname, pdef in props.items():
-                lines.append(_render_prop(pname, pdef, pname in required_set))
+                # Fields carrying a Pydantic default are always present in
+                # serialized responses, so keep them non-optional in TS to
+                # avoid "possibly undefined" errors in consumers (M5).
+                is_nullable = bool(pdef.get("anyOf") or pdef.get("oneOf"))
+                is_required = pname in required_set or ("default" in pdef and not is_nullable)
+                lines.append(_render_prop(pname, pdef, is_required))
             lines.append("}")
             lines.append("")
     return "\n".join(lines)

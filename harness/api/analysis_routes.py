@@ -5,7 +5,6 @@ import time
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
-from harness.analysis.service import AnalysisService
 from harness.analysis.schemas import (
     DashboardResponse,
     GuardrailStatsResponse,
@@ -14,6 +13,7 @@ from harness.analysis.schemas import (
     ToolStatsResponse,
     ToolTracesResponse,
 )
+from harness.analysis.service import AnalysisService
 from harness.api.deps import HarnessAPI, get_hapi
 from harness.core.logger import guard_logger
 
@@ -89,12 +89,16 @@ async def analysis_run_timeline(
     cursor: int = Query(0, ge=0, description="Starting seq offset, 0 = beginning of time"),
     api: HarnessAPI = Depends(get_hapi),
 ):
+    if not await api.store.get_events(run_id):
+        return JSONResponse(status_code=404, content={"error": "Run not found"})
     s = _service(api)
     return await s.get_run_timeline(run_id, limit=limit, cursor=cursor)
 
 
 @router.get("/api/v1/analysis/runs/{run_id}/tool-traces", response_model=ToolTracesResponse)
 async def analysis_run_tool_traces(run_id: str, api: HarnessAPI = Depends(get_hapi)):
+    if not await api.store.get_events(run_id):
+        return JSONResponse(status_code=404, content={"error": "Run not found"})
     s = _service(api)
     return await s.get_run_tool_traces(run_id)
 

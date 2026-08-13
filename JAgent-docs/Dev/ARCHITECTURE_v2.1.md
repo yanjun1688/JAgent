@@ -241,7 +241,7 @@ V0.6.2 引入对话级概念：多个 Run 可归属于同一 `conversation_id`�
 
 > **缺口 ID**: `S1` · **优先级**: **P1** · **状态**: ✅ **已完成** (V0.7.1) · **来源**: `Reviews/planner_protocol_gaps_review_20260722.md` 缺口 B/E
 > **设计文档**: ADR-007 / PRD_S1 · **测试**: TestPlan_S1
-> **最后更新**: 2026-08-04（含 v2.1 受信边界修正，见 7.6）
+> **最后更新**: 2026-08-07（v2.2 完成门 + step_normal + probe + 可溯源，见 7.7）
 
 #### 7.1 问题背景（已解决）
 
@@ -258,10 +258,12 @@ V0.7 将 **"工具完成状态"与"任务完成语义"混为一谈**：
 
 | 概念 | 枚举 | 职责 | 值 |
 |------|------|------|----|
-| **执行态** | `ExecState` (8值) | 工具的纯执行结果，系统强制 | `pending,running,completed,soft_error,failed,skipped,idempotent,cancelled` |
-| **任务态** | `TaskState` (5值) | LLM 判定的任务达成度，非受信 | `unknown,achieved,partial,not_achieved,waived` |
-| **决策属性** | `should_not_rerun` | 由 `exec_state` 推导的纯函数，决定是否跳过重排（v2.1 起**不含 SOFT_ERROR**） | `COMPLETED/IDEMPOTENT/SKIPPED/CANCELLED` → True；`SOFT_ERROR/PENDING/RUNNING/FAILED` → False |
-| **收尾判定** | `is_done` | 由 `exec_state` 推导，含 SOFT_ERROR（v2.1 起与 `should_not_rerun` 解耦） | `COMPLETED/SOFT_ERROR/IDEMPOTENT/SKIPPED/CANCELLED` → True |
+| **执行态** | `ExecState` (8值) | 工具的纯执行结果，系统强制 | `pending,running,completed,unsuccessful,failed,skipped,idempotent,cancelled`（v2.2 起 `soft_error`→`unsuccessful`） |
+| **任务态** | `TaskState` (5值) | LLM 判定的任务达成度，非受信，**纯审计便签（v2.2 D11）** | `unknown,achieved,partial,not_achieved,waived` |
+| **决策属性** | `should_not_rerun` | 由 `exec_state` 推导的纯函数，决定是否跳过重排（v2.1 起**不含 UNSUCCESSFUL**；v2.2 D9 移除 SKIPPED） | `COMPLETED/IDEMPOTENT/CANCELLED` → True；`UNSUCCESSFUL/SKIPPED/PENDING/RUNNING/FAILED` → False |
+| **正常判定** | `step_normal`（v2.2 D3） | 完成门的原子判据，纯函数 `(exec_state, probe) → bool`，不读 `task_state`（约束 4） | `COMPLETED/IDEMPOTENT` → True；`UNSUCCESSFUL and probe` → True；其余 → False |
+| **输出可用** | `output_available`（v2.2 由 `is_done` 改名收窄） | 仅用于 planner `available_step_ids`（`$var.field` 可用集），不用于完成计数/门控 | `COMPLETED/UNSUCCESSFUL/IDEMPOTENT` → True；`SKIPPED/CANCELLED` → False |
+| **完成门** | 系统聚合（v2.2 D5） | 最终计划所有步骤 `step_normal` 的聚合 = 任务完成 | 全 normal → 完成；否则列出未达成 |
 
 #### 7.3 核心改动（全部完成）
 
@@ -276,8 +278,8 @@ V0.7 将 **"工具完成状态"与"任务完成语义"混为一谈**：
 
 1. **工具成功 ≠ 任务完成**：系统只能告知"工具返回了什么"，不推导任务达成度
 2. **工具失败 ≠ 任务失败**：FAILED step 仍可由 LLM 决策重试
-3. **完成的判定权归 Agent，执行态归系统**
-4. **不**在受信组件层用启发式规则推导任务完成
+3. ~~**完成的判定权归 Agent，执行态归系统**~~ → **v2.2 失效（见 7.7）**：完成判定为系统机械聚合 `step_normal`
+4. ~~**不**在受信组件层用启发式规则推导任务完成~~ → **v2.2 起**：完成判定为机械聚合（非启发式），由受信组件强制
 
 #### 7.5 验收状态
 
@@ -302,9 +304,58 @@ V0.7 将 **"工具完成状态"与"任务完成语义"混为一谈**：
 | revise prompt 增加 RERUN RULES | `harness/core/system_prompt.py` | COMPLETED 重做须新 id；task_state 标注为 advisory |
 
 **边界语义（v2.1）**：
-- 系统定边界（permission）：SOFT_ERROR/FAILED 可被 revise 保留重跑；COMPLETED/IDEMPOTENT/SKIPPED/CANCELLED 不可原地重跑。
+- 系统定边界（permission）：SOFT_ERROR/FAILED 可被 revise 保留重跑；v2.2 D9 起 SKIPPED 也可重跑（它表示工具从未执行）；COMPLETED/IDEMPOTENT/CANCELLED 不可原地重跑。
 - Agent 在边界内决策：revised plan 保留/移除哪些步骤、用什么输入。
 - **强制权归系统，决策权归 Agent**：系统不信任 LLM 的重跑意愿，只提供"允许重跑"的边界；LLM 在边界内自由选择。
+
+#### 7.7 v2.2 完成门 + step_normal + probe + 可溯源（2026-08-07）
+
+> **来源**: `Handover/completion_semantics_chain_redesign_handover_20260807.md` D1–D11
+> **目标**: U1（自愈不收敛）/ U2（完成脱钩）根治，修复审计 P0-03（SOFT_ERROR 被当 done 传递）。
+
+**背景**：溯源调研发现 5 个链路缺口——
+1. `step ↔ tool_call` 在事件流无法 JOIN（工具事件无 `step_id`，DAG 事件无 `tool_call_id`）
+2. 计划结构不落事件（只有 `steps_summary: "N steps in M layers"`），事后无法重建 DAG 蓝图
+3. 完成口径用 `is_done`（含 SOFT_ERROR），SOFT_ERROR 被算进 "Completed 3/3"
+4. `task_state` 不落事件（LLM 便签双重无用：不可审计）
+5. run 终态无证据（`RUN_COMPLETED` 只有 LLM 自由文本 `result_summary`）
+
+**核心设计**：
+
+```
+任务完成（完成门）= 最终计划所有步骤 step_normal 的聚合        ← D5（替代 LLM"空 steps"判定）
+  step_normal = (exec_state ∈ {COMPLETED, IDEMPOTENT})
+                or (exec_state == UNSUCCESSFUL and step.probe)  ← D3（纯系统计算）
+  probe        = 探测型步骤声明，仅无副作用工具可标             ← D4/D10（PlanGuardrail 强制）
+  下游门控      = 依赖非 normal → 下游 SKIP 并落记录            ← D7/D9（P0-03 修复）
+```
+
+**改动一览**：
+
+| 阶段 | 内容 | 关键文件 |
+|------|------|----------|
+| A | 改名 `SOFT_ERROR`→`UNSUCCESSFUL`（全库零残留） | 14 源码文件、107 测试、前端/分析 API |
+| B | `step_normal` 口径：完成计数/门控改用 normal；`is_done`→`output_available`（仅 `available_step_ids` 用）；门控产生 SKIPPED 落记录 | `scheduler/plan.py`、`dag_executor.py`、`dag_types.py`、`planner.py` |
+| C | 可溯源：工具事件带 `step_id`、计划结构落事件 | `events.py`、`executor.py`、`dag_executor.py`、`fold.py` |
+| D | 完成判定机械化：全 normal → 完成，否则列未达成；`task_state` 落事件（`PlanRevisedPayload` 补 `step_tasks`） | `scheduler/plan.py`、`events.py`、`fold.py`、`routes.py` |
+| E | `probe` 声明 + 退化修订守卫（U1 收敛） | `models/plan.py`、`planner.py`、`guardrails.py` |
+
+**受信边界（v2.2）**：
+- `step_normal` / 完成门 / 下游门控 **不读 `task_state`**、不依赖 LLM 配合（约束 4）
+- `probe` 是 LLM 的 step 级声明，但**必须**由 PlanGuardrail（受信）校验仅无副作用工具可标（D10）
+- 门控条件**唯一** = `step_normal`，系统不猜下游能否消费 probe 否定答案（D7，fail-safe 自动成立）
+- `task_state` 落事件供审计；未来计划展示 **"LLM 自评 vs 系统机械判定"差异对比**（D11）——
+  该功能**暂不实现**，仅在代码注释中标注定位。**永不参与受信判定。**
+- 完成判定为机械聚合（非启发式），属系统强制，不违反"受信组件不含 LLM 推理"。
+- 修订计划不得缩小 Run 的目标集合：Scheduler 保留原始步骤全集；替代步骤只能通过受信别名替代失败步骤，已被依赖门控为 `SKIPPED` 的下游步骤在前驱恢复后必须重新激活。最终完成门必须针对原始步骤全集聚合，不能只检查当前 LLM 修订计划（D12）。
+
+### 3.8 用户输出与会话上下文边界（P0-06，已完成）
+
+- `RunStartedPayload.intent/current_request` 只保存本次用户请求；会话历史不得拼接进事件 intent。
+- 会话历史作为独立的 `conversation_context` 参数按需注入 Planner/Kernels，classify 和 revise 不重复携带完整历史。
+- `RunFailedPayload.result_summary` 是内部遥测；`user_facing_message` 是唯一允许写入对话 assistant 消息的失败文本。
+- LLM 请求必须支持 `run_id` 追踪；共享客户端复用连接池并通过并发信号量隔离请求。
+- `step_id` 是工具调用、超时、Guardrail、确认和 DAG 事件之间的受信 JOIN 键。
 
 ---
 
@@ -337,32 +388,33 @@ class EventStore:
 
 | 事件类型 | 写入方 | 关键 payload 字段 |
 |----------|--------|-------------------|
-| `RunStarted` | Scheduler | `intent, context_snapshot, conversation_id` |
+| `RunStarted` | Scheduler | `intent, current_request, context_snapshot, conversation_id` |
 | `AgentThought` | Scheduler | `thought, tool_choice, token_count, tool_calls` |
 | `ToolCalled` | Tool Layer | `tool_call_id, tool_name, input, idempotency_key` |
 | `ToolCompleted` | Tool Layer | `tool_call_id, tool_name, output, duration_ms` |
 | `ToolFailed` | Tool Layer | `tool_call_id, tool_name, error, retryable` |
-| `ToolTimeout` | Tool Layer | `tool_call_id, tool_name, timeout_ms` |
-| `GuardrailTriggered` | Tool Layer | `tool_call_id, tool_name, guardrail_id, reason` |
-| `ConfirmationRequested` | Tool Layer | `confirmation_id, tool_call_id, tool_name, input, risk_level` |
-| `ConfirmationReceived` | 外部接口 | `confirmation_id, confirmed, operator_id` |
+| `ToolTimeout` | Tool Layer | `tool_call_id, tool_name, timeout_ms, step_id` |
+| `GuardrailTriggered` | Tool Layer | `tool_call_id, tool_name, guardrail_id, reason, step_id` |
+| `ConfirmationRequested` | Tool Layer | `confirmation_id, tool_call_id, tool_name, input, risk_level, step_id` |
+| `ConfirmationReceived` | 外部接口 | `confirmation_id, confirmed, operator_id, step_id` |
 | `ContextCompressed` | Context Mgr | `original_tokens, compressed_tokens, summary_ref` |
 | `ContextCheckpointed` | Context Mgr | `checkpoint_seq, snapshot_ref, token_count` |
 | `RunPaused` | Scheduler | `reason` |
 | `RunResumed` | Scheduler | `resume_from_seq` |
-| `RunCompleted` | Scheduler | `result_summary` |
-| `RunFailed` | Scheduler/Tool | `final_error, event_count, result_summary` |
+| `RunCompleted` | Scheduler | `result_summary`（v2.2 D 阶段补机械达成证据：`all_normal, unmet_step_ids`） |
+| `RunFailed` | Scheduler/Tool | `final_error, event_count, result_summary, user_facing_message` |
 | **`RunCommand`** | **V0.6.2** | **`command(hard_abort\|soft_abort\|pause\|resume\|skip_tool), reason, issued_by`** |
 | **`RunOrphaned`** | **V0.9 Lifecycle** | `reason, last_seq, timestamp` |
 | `FeedbackInjected` | RunMonitor / Operator API | `feedback_text, priority, source(monitor\|operator), category, affected_tool, error_type, error_detail, suggestion, expires_at_seq, resolves_feedback_id` |
 | **`ConversationStarted`** | **V0.6.2 API** | `conversation_id, title, user_id` |
 | **`ConversationMessage`** | **V0.6.2 API** | `conversation_id, run_id, role, content` |
 | **`ConversationEnded`** | **V0.6.2 API** | `conversation_id, summary` |
-| **`PlanCreated`** | **V0.7** | `plan_id, intent, steps_summary, layer_count` |
+| **`PlanCreated`** | **V0.7** | `plan_id, intent, steps_summary, layer_count`（v2.2 C 阶段补 `steps: [{step_id, tool_name, input, depends_on, description, probe}]`） |
 | **`DagStepStarted`** | **V0.7** | `plan_id, step_id, tool_name, depends_on` |
-| **`DagStepCompleted`** | **V0.7** | `plan_id, step_id, output_summary` |
-| **`DagStepFailed`** | **V0.7** | `plan_id, step_id, error, retryable` |
-| **`PlanRevised`** | **V0.7** | `plan_id, revision_reason, remaining_steps_summary` |
+| **`DagStepCompleted`** | **V0.7** | `plan_id, step_id, output_summary`（v2.2 C 阶段补 `tool_call_id`） |
+| **`DagStepFailed`** | **V0.7** | `plan_id, step_id, error, retryable`（v2.2 C 阶段补 `tool_call_id`） |
+| **`DagStepSkipped`** | **V0.7 v2.2** | `plan_id, step_id, reason(dep_not_normal)` — 门控产生 SKIPPED 落记录（D9） |
+| **`PlanRevised`** | **V0.7** | `plan_id, revision_reason, remaining_steps_summary`（v2.2 C 阶段补 `steps` 结构；D 阶段补 `step_tasks` 审计便签） |
 | **`PlanCompleted`** | **V0.7** | `plan_id, completed_steps, total_layers, summary` |
 | **`PlanFailed`** | **V0.7** | `plan_id, completed_steps, total_layers, final_error` |
 | `OrchestrationStarted/Completed/Failed` | Orchestrator | （旧 V0.4+，与 V0.7 共存） |

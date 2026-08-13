@@ -437,8 +437,18 @@ class TestFoldDagStepDedup:
     def test_dag_step_started_completed_no_duplicate(self):
         events = [
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
-            _event("r1", 2, EventType.PLAN_CREATED, {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1}),
-            _event("r1", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []}),
+            _event(
+                "r1",
+                2,
+                EventType.PLAN_CREATED,
+                {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1},
+            ),
+            _event(
+                "r1",
+                3,
+                EventType.DAG_STEP_STARTED,
+                {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []},
+            ),
             _event("r1", 4, EventType.DAG_STEP_COMPLETED, {"plan_id": "p1", "step_id": "s1", "output_summary": "ok"}),
         ]
         state = fold_events(events)
@@ -450,9 +460,24 @@ class TestFoldDagStepDedup:
     def test_dag_step_started_failed_no_duplicate(self):
         events = [
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
-            _event("r1", 2, EventType.PLAN_CREATED, {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1}),
-            _event("r1", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []}),
-            _event("r1", 4, EventType.DAG_STEP_FAILED, {"plan_id": "p1", "step_id": "s1", "error": "boom", "retryable": False}),
+            _event(
+                "r1",
+                2,
+                EventType.PLAN_CREATED,
+                {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1},
+            ),
+            _event(
+                "r1",
+                3,
+                EventType.DAG_STEP_STARTED,
+                {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []},
+            ),
+            _event(
+                "r1",
+                4,
+                EventType.DAG_STEP_FAILED,
+                {"plan_id": "p1", "step_id": "s1", "error": "boom", "retryable": False},
+            ),
         ]
         state = fold_events(events)
         assert state.latest_plan is not None
@@ -464,11 +489,31 @@ class TestFoldDagStepDedup:
         """Different step_ids should each have their own entry."""
         events = [
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
-            _event("r1", 2, EventType.PLAN_CREATED, {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1}),
-            _event("r1", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []}),
-            _event("r1", 4, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s2", "tool_name": "echo", "depends_on": []}),
+            _event(
+                "r1",
+                2,
+                EventType.PLAN_CREATED,
+                {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1},
+            ),
+            _event(
+                "r1",
+                3,
+                EventType.DAG_STEP_STARTED,
+                {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []},
+            ),
+            _event(
+                "r1",
+                4,
+                EventType.DAG_STEP_STARTED,
+                {"plan_id": "p1", "step_id": "s2", "tool_name": "echo", "depends_on": []},
+            ),
             _event("r1", 5, EventType.DAG_STEP_COMPLETED, {"plan_id": "p1", "step_id": "s1", "output_summary": "ok"}),
-            _event("r1", 6, EventType.DAG_STEP_FAILED, {"plan_id": "p1", "step_id": "s2", "error": "boom", "retryable": False}),
+            _event(
+                "r1",
+                6,
+                EventType.DAG_STEP_FAILED,
+                {"plan_id": "p1", "step_id": "s2", "error": "boom", "retryable": False},
+            ),
         ]
         state = fold_events(events)
         assert state.latest_plan is not None
@@ -481,12 +526,37 @@ class TestFoldDagStepDedup:
         """Steps from different plan_ids should not mix."""
         events = [
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
-            _event("r1", 2, EventType.PLAN_CREATED, {"plan_id": "p1", "intent": "first", "steps_summary": "1 step", "layer_count": 1}),
-            _event("r1", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []}),
+            _event(
+                "r1",
+                2,
+                EventType.PLAN_CREATED,
+                {"plan_id": "p1", "intent": "first", "steps_summary": "1 step", "layer_count": 1},
+            ),
+            _event(
+                "r1",
+                3,
+                EventType.DAG_STEP_STARTED,
+                {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []},
+            ),
             _event("r1", 4, EventType.DAG_STEP_COMPLETED, {"plan_id": "p1", "step_id": "s1", "output_summary": "ok"}),
-            _event("r1", 5, EventType.PLAN_REVISED, {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"}),
-            _event("r1", 6, EventType.PLAN_CREATED, {"plan_id": "p2", "intent": "revised", "steps_summary": "1 step", "layer_count": 1}),
-            _event("r1", 7, EventType.DAG_STEP_STARTED, {"plan_id": "p2", "step_id": "s2", "tool_name": "echo", "depends_on": []}),
+            _event(
+                "r1",
+                5,
+                EventType.PLAN_REVISED,
+                {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"},
+            ),
+            _event(
+                "r1",
+                6,
+                EventType.PLAN_CREATED,
+                {"plan_id": "p2", "intent": "revised", "steps_summary": "1 step", "layer_count": 1},
+            ),
+            _event(
+                "r1",
+                7,
+                EventType.DAG_STEP_STARTED,
+                {"plan_id": "p2", "step_id": "s2", "tool_name": "echo", "depends_on": []},
+            ),
             _event("r1", 8, EventType.DAG_STEP_COMPLETED, {"plan_id": "p2", "step_id": "s2", "output_summary": "done"}),
         ]
         state = fold_events(events)
@@ -494,6 +564,75 @@ class TestFoldDagStepDedup:
         assert state.latest_plan["plan_id"] == "p2"
         assert len(state.latest_plan["steps"]) == 1
         assert state.latest_plan["steps"][0]["step_id"] == "s2"
+
+    def test_plan_revised_steps_replace_blueprint(self):
+        """v2.2 (P2): PLAN_REVISED 携带 steps → 折叠态 latest_plan 与实际修订计划对齐。"""
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event(
+                "r1",
+                2,
+                EventType.PLAN_CREATED,
+                {"plan_id": "p1", "intent": "first", "steps_summary": "2 steps", "layer_count": 1},
+            ),
+            _event(
+                "r1",
+                3,
+                EventType.PLAN_REVISED,
+                {
+                    "plan_id": "p1",
+                    "revision_reason": "step_failure_revised",
+                    "remaining_steps_summary": "1 step remaining",
+                    "steps": [
+                        {
+                            "step_id": "s2",
+                            "tool_name": "http_request",
+                            "input": {"url": "http://b"},
+                            "depends_on": [],
+                            "description": "",
+                            "probe": False,
+                        },
+                    ],
+                },
+            ),
+        ]
+        state = fold_events(events)
+        assert state.latest_plan is not None
+        assert state.latest_plan["plan_id"] == "p1"
+        assert state.latest_plan["revision_reason"] == "step_failure_revised"
+        steps = state.latest_plan["steps"]
+        assert len(steps) == 1
+        assert steps[0]["step_id"] == "s2"
+        assert steps[0]["tool_name"] == "http_request"
+        assert steps[0]["input"] == {"url": "http://b"}
+
+    def test_plan_revised_without_steps_keeps_blueprint(self):
+        """PLAN_REVISED 不带 steps（空修订）→ 保留原有步骤蓝图（兼容旧事件流）。"""
+        events = [
+            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event(
+                "r1",
+                2,
+                EventType.PLAN_CREATED,
+                {"plan_id": "p1", "intent": "first", "steps_summary": "1 step", "layer_count": 1},
+            ),
+            _event(
+                "r1",
+                3,
+                EventType.DAG_STEP_STARTED,
+                {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []},
+            ),
+            _event(
+                "r1",
+                4,
+                EventType.PLAN_REVISED,
+                {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"},
+            ),
+        ]
+        state = fold_events(events)
+        assert state.latest_plan is not None
+        assert len(state.latest_plan["steps"]) == 1
+        assert state.latest_plan["steps"][0]["step_id"] == "s1"
 
 
 class TestFoldFeedbackInjected:
@@ -535,8 +674,18 @@ class TestFoldFeedbackInjected:
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
             _event("r1", 2, EventType.FEEDBACK_INJECTED, {"feedback_text": "warning", "priority": "high"}),
             _event("r1", 3, EventType.FEEDBACK_INJECTED, {"feedback_text": "info", "priority": "low"}),
-            _event("r1", 4, EventType.PLAN_CREATED, {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1}),
-            _event("r1", 5, EventType.PLAN_REVISED, {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"}),
+            _event(
+                "r1",
+                4,
+                EventType.PLAN_CREATED,
+                {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1},
+            ),
+            _event(
+                "r1",
+                5,
+                EventType.PLAN_REVISED,
+                {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"},
+            ),
         ]
         state = fold_events(events)
         assert len(state.feedbacks) == 2
@@ -549,11 +698,31 @@ class TestFoldFeedbackInjected:
         events = [
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
             _event("r1", 2, EventType.FEEDBACK_INJECTED, {"feedback_text": "warning", "priority": "high"}),
-            _event("r1", 3, EventType.PLAN_CREATED, {"plan_id": "p1", "intent": "test", "steps_summary": "1 step", "layer_count": 1}),
-            _event("r1", 4, EventType.PLAN_REVISED, {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"}),
+            _event(
+                "r1",
+                3,
+                EventType.PLAN_CREATED,
+                {"plan_id": "p1", "intent": "test", "steps_summary": "1 step", "layer_count": 1},
+            ),
+            _event(
+                "r1",
+                4,
+                EventType.PLAN_REVISED,
+                {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"},
+            ),
             _event("r1", 5, EventType.FEEDBACK_INJECTED, {"feedback_text": "new_issue", "priority": "high"}),
-            _event("r1", 6, EventType.PLAN_CREATED, {"plan_id": "p2", "intent": "revised", "steps_summary": "1 step", "layer_count": 1}),
-            _event("r1", 7, EventType.PLAN_REVISED, {"plan_id": "p2", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"}),
+            _event(
+                "r1",
+                6,
+                EventType.PLAN_CREATED,
+                {"plan_id": "p2", "intent": "revised", "steps_summary": "1 step", "layer_count": 1},
+            ),
+            _event(
+                "r1",
+                7,
+                EventType.PLAN_REVISED,
+                {"plan_id": "p2", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"},
+            ),
         ]
         state = fold_events(events)
         assert len(state.feedbacks) == 2
@@ -590,16 +759,35 @@ class TestFoldContextCompressedPruning:
         )
         events = [
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
-            _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "old thought", "tool_choice": None, "token_count": 10}),
-            _event("r1", 3, EventType.TOOL_COMPLETED, {"tool_call_id": "tc-1", "tool_name": "echo", "output": "old", "duration_ms": 5}),
-            _event("r1", 4, EventType.AGENT_THOUGHT, {"thought": "keep thought", "tool_choice": None, "token_count": 10}),
-            _event("r1", 5, EventType.TOOL_COMPLETED, {"tool_call_id": "tc-2", "tool_name": "echo", "output": "keep", "duration_ms": 5}),
-            _event("r1", 6, EventType.CONTEXT_COMPRESSED, {
-                "original_tokens": 1000,
-                "compressed_tokens": 200,
-                "summary_ref": summary.model_dump(mode="json"),
-                "keep_recent_count": 2,
-            }),
+            _event(
+                "r1", 2, EventType.AGENT_THOUGHT, {"thought": "old thought", "tool_choice": None, "token_count": 10}
+            ),
+            _event(
+                "r1",
+                3,
+                EventType.TOOL_COMPLETED,
+                {"tool_call_id": "tc-1", "tool_name": "echo", "output": "old", "duration_ms": 5},
+            ),
+            _event(
+                "r1", 4, EventType.AGENT_THOUGHT, {"thought": "keep thought", "tool_choice": None, "token_count": 10}
+            ),
+            _event(
+                "r1",
+                5,
+                EventType.TOOL_COMPLETED,
+                {"tool_call_id": "tc-2", "tool_name": "echo", "output": "keep", "duration_ms": 5},
+            ),
+            _event(
+                "r1",
+                6,
+                EventType.CONTEXT_COMPRESSED,
+                {
+                    "original_tokens": 1000,
+                    "compressed_tokens": 200,
+                    "summary_ref": summary.model_dump(mode="json"),
+                    "keep_recent_count": 2,
+                },
+            ),
         ]
         state = fold_events(events)
         assert state.summary is not None
@@ -619,12 +807,17 @@ class TestFoldContextCompressedPruning:
         events = [
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
             _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "t1", "tool_choice": None, "token_count": 10}),
-            _event("r1", 3, EventType.CONTEXT_COMPRESSED, {
-                "original_tokens": 500,
-                "compressed_tokens": 100,
-                "summary_ref": summary.model_dump(mode="json"),
-                "keep_recent_count": 0,
-            }),
+            _event(
+                "r1",
+                3,
+                EventType.CONTEXT_COMPRESSED,
+                {
+                    "original_tokens": 500,
+                    "compressed_tokens": 100,
+                    "summary_ref": summary.model_dump(mode="json"),
+                    "keep_recent_count": 0,
+                },
+            ),
         ]
         state = fold_events(events)
         assert len(state.thought_history) == 1
@@ -634,12 +827,17 @@ class TestFoldContextCompressedPruning:
         events = [
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
             _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "t1", "tool_choice": None, "token_count": 10}),
-            _event("r1", 3, EventType.CONTEXT_COMPRESSED, {
-                "original_tokens": 500,
-                "compressed_tokens": 100,
-                "summary_ref": "legacy summary string",
-                "keep_recent_count": 0,
-            }),
+            _event(
+                "r1",
+                3,
+                EventType.CONTEXT_COMPRESSED,
+                {
+                    "original_tokens": 500,
+                    "compressed_tokens": 100,
+                    "summary_ref": "legacy summary string",
+                    "keep_recent_count": 0,
+                },
+            ),
         ]
         state = fold_events(events)
         assert state.summary == "legacy summary string"

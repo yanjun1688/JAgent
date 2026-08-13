@@ -1,4 +1,4 @@
-"""Semantic evaluator — determines whether a tool's output indicates success or soft error.
+"""Semantic evaluator — determines whether a tool's output indicates success or unsuccessful.
 
 Decoupled from the executor: executor merely calls ``evaluate()`` and acts on the
 result.  All evaluation logic lives here, making it independently testable and
@@ -22,7 +22,7 @@ class SemanticEvaluator:
 
         Returns:
             ``(ToolResultType.SUCCESS, None)`` when the output is semantically
-            correct.  ``(ToolResultType.SOFT_ERROR, error_msg)`` when the
+            correct.  ``(ToolResultType.UNSUCCESSFUL, error_msg)`` when the
             indicator detects a semantic failure.
         """
         indicator: SuccessIndicator | None = tool_def.success_indicator
@@ -60,4 +60,4 @@ class SemanticEvaluator:
             or output.get("message")
             or f"{indicator.field}={actual} (op={indicator.op}, value={indicator.value})"
         )
-        return ToolResultType.SOFT_ERROR, str(error)
+        return ToolResultType.UNSUCCESSFUL, str(error)

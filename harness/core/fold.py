@@ -11,15 +11,21 @@ from harness.models.events import (
     ContextCheckpointedPayload,
     ContextCompressedPayload,
     ContextPrunedPayload,
-    ConversationStartedPayload,
-    ConversationMessagePayload,
-    ConversationEndedPayload,
+    DagStepCompletedPayload,
+    DagStepFailedPayload,
+    DagStepSkippedPayload,
+    DagStepStartedPayload,
+    DeliveryContractsResolvedPayload,
     Episode,
     EpisodeArchivedPayload,
     Event,
     EventType,
     FeedbackInjectedPayload,
     GuardrailTriggeredPayload,
+    PlanCompletedPayload,
+    PlanCreatedPayload,
+    PlanFailedPayload,
+    PlanRevisedPayload,
     RunCompletedPayload,
     RunFailedPayload,
     RunOrphanedPayload,
@@ -31,14 +37,8 @@ from harness.models.events import (
     ToolFailedPayload,
     ToolResultType,
     ToolTimeoutPayload,
-    PlanCreatedPayload,
-    PlanCompletedPayload,
-    PlanFailedPayload,
-    PlanRevisedPayload,
-    DagStepStartedPayload,
-    DagStepCompletedPayload,
-    DagStepFailedPayload,
 )
+from harness.models.intent import DeliveryContract
 
 
 class RunStatus(str, Enum):
@@ -50,7 +50,7 @@ class RunStatus(str, Enum):
 
 class ToolResultStatus(str, Enum):
     COMPLETED = "completed"
-    SOFT_ERROR = "soft_error"
+    UNSUCCESSFUL = "unsuccessful"
     FAILED = "failed"
     TIMEOUT = "timeout"
     GUARDRAIL_BLOCKED = "guardrail_blocked"
@@ -82,12 +82,14 @@ class RunState:
     status: RunStatus = RunStatus.RUNNING
     seq: int = 0
     intent: str = ""
+    current_request: str = ""
     context_snapshot: dict = field(default_factory=dict)
     thought_history: list[ThoughtEntry] = field(default_factory=list)
     latest_thought: ThoughtEntry | None = None
     tool_calls: list[ToolCalledPayload] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)
     last_error: str | None = None
+    user_facing_message: str | None = None
     summary: Episode | str | None = None
     keep_recent_count: int = 0
     pause_reason: str | None = None
@@ -95,11 +97,20 @@ class RunState:
     last_checkpoint_seq: int | None = None
     feedbacks: list[FeedbackInjectedPayload] = field(default_factory=list)
     plan_history: list[dict] = field(default_factory=list)
+    step_tasks: dict[str, str] = field(default_factory=dict)
     latest_plan: dict | None = None
     plan_boundary_seqs: list[int] = field(default_factory=list)
+    # v2.2 (D5): run 终态机械达成证据（洞 5）— RUN_COMPLETED 携带
+    completion_evidence: dict[str, Any] = field(default_factory=dict)
     conversation_id: str | None = None
+    workspace_id: str | None = None
     orphaned: bool = False
     episodes: list[Episode] = field(default_factory=list)
+    # S05 (D-02/D-04/D-05, C-01): 原始意图（不可变）+ 交付契约列表（多交付物）
+    intent_raw: str = ""
+    delivery_contracts: list[DeliveryContract] = field(default_factory=list)
+    # S07 (D-02 / 方案 B): RunStarted 标记 → scheduler 首轮 plan 前需执行契约解析。
+    requires_contract_extraction: bool = False
 
 
 def fold_events(events: list[Event]) -> RunState:
@@ -113,6 +124,7 @@ def fold_events(events: list[Event]) -> RunState:
 
     run_id = events[0].run_id
     state = RunState(run_id=run_id)
+    p: Any = None
 
     for event in events:
         if event.run_id != run_id:
@@ -123,18 +135,30 @@ def fold_events(events: list[Event]) -> RunState:
             case EventType.RUN_STARTED:
                 p = RunStartedPayload(**event.payload)
                 state.intent = p.intent
+                state.current_request = p.current_request or p.intent
                 state.context_snapshot = p.context_snapshot
                 state.status = RunStatus.RUNNING
                 state.conversation_id = p.conversation_id
+                state.workspace_id = p.workspace_id
+                # S05: 原始意图与交付契约折叠（intent_raw 不可变，Planner 不得覆盖）
+                state.intent_raw = p.intent_raw or p.intent
+                state.delivery_contracts = list(p.contracts)
+                state.requires_contract_extraction = p.requires_contract_extraction
+
+            case EventType.DELIVERY_CONTRACTS_RESOLVED:
+                p = DeliveryContractsResolvedPayload(**event.payload)
+                state.delivery_contracts = list(p.contracts)
 
             case EventType.AGENT_THOUGHT:
                 p = AgentThoughtPayload(**event.payload)
-                state.thought_history.append(ThoughtEntry(
-                    seq=event.seq,
-                    thought=p.thought,
-                    tool_choice=p.tool_choice,
-                    token_count=p.token_count,
-                ))
+                state.thought_history.append(
+                    ThoughtEntry(
+                        seq=event.seq,
+                        thought=p.thought,
+                        tool_choice=p.tool_choice,
+                        token_count=p.token_count,
+                    )
+                )
                 state.latest_thought = state.thought_history[-1]
 
             case EventType.TOOL_CALLED:
@@ -147,7 +171,11 @@ def fold_events(events: list[Event]) -> RunState:
                     ToolResult(
                         tool_call_id=p.tool_call_id,
                         tool_name=p.tool_name,
-                        status=ToolResultStatus.SOFT_ERROR if p.result_type == ToolResultType.SOFT_ERROR else ToolResultStatus.COMPLETED,
+                        status=(
+                            ToolResultStatus.UNSUCCESSFUL
+                            if p.result_type == ToolResultType.UNSUCCESSFUL
+                            else ToolResultStatus.COMPLETED
+                        ),
                         output=p.output,
                         duration_ms=p.duration_ms,
                         event_seq=event.seq,
@@ -214,11 +242,11 @@ def fold_events(events: list[Event]) -> RunState:
                     recent_thought_seqs = {t.seq for t in state.thought_history[-keep:]} if keep > 0 else set()
                     recent_result_seqs = {tr.event_seq for tr in state.tool_results[-keep:]} if keep > 0 else set()
                     state.thought_history = [
-                        t for t in state.thought_history
-                        if t.seq not in compressed_seqs or t.seq in recent_thought_seqs
+                        t for t in state.thought_history if t.seq not in compressed_seqs or t.seq in recent_thought_seqs
                     ]
                     state.tool_results = [
-                        tr for tr in state.tool_results
+                        tr
+                        for tr in state.tool_results
                         if tr.event_seq not in compressed_seqs or tr.event_seq in recent_result_seqs
                     ]
                     # Known Issue: tool_calls and feedbacks are NOT trimmed here.
@@ -243,11 +271,20 @@ def fold_events(events: list[Event]) -> RunState:
                 p = RunCompletedPayload(**event.payload)
                 state.status = RunStatus.COMPLETED
                 state.summary = p.result_summary
+                state.completion_evidence = {
+                    "all_normal": p.all_normal,
+                    "unmet_step_ids": list(p.unmet_step_ids),
+                    # S06 (D-03/D-04): 交付契约维度折叠
+                    "deliverable_met": p.deliverable_met,
+                    "deliverable_status": p.deliverable_status,
+                    "deliverable_summary": list(p.deliverable_summary),
+                }
 
             case EventType.RUN_FAILED:
                 p = RunFailedPayload(**event.payload)
                 state.status = RunStatus.FAILED
                 state.last_error = p.final_error
+                state.user_facing_message = p.user_facing_message
                 if p.result_summary:
                     state.summary = p.result_summary
 
@@ -264,8 +301,15 @@ def fold_events(events: list[Event]) -> RunState:
 
             case EventType.PLAN_CREATED:
                 p = PlanCreatedPayload(**event.payload)
-                entry = {"plan_id": p.plan_id, "intent": p.intent, "steps_summary": p.steps_summary,
-                         "layer_count": p.layer_count, "steps": []}
+                # v2.2 (C, D6): 计划结构落事件 — 重建 DAG 蓝图
+                blueprint = p.steps if p.steps else []
+                entry = {
+                    "plan_id": p.plan_id,
+                    "intent": p.intent,
+                    "steps_summary": p.steps_summary,
+                    "layer_count": p.layer_count,
+                    "steps": list(blueprint),
+                }
                 state.plan_history.append(entry)
                 state.latest_plan = entry
 
@@ -277,7 +321,9 @@ def fold_events(events: list[Event]) -> RunState:
                         existing["status"] = "started"
                         existing["tool_name"] = p.tool_name
                     else:
-                        state.latest_plan["steps"].append({"step_id": p.step_id, "tool_name": p.tool_name, "status": "started"})
+                        state.latest_plan["steps"].append(
+                            {"step_id": p.step_id, "tool_name": p.tool_name, "status": "started"}
+                        )
 
             case EventType.DAG_STEP_COMPLETED:
                 p = DagStepCompletedPayload(**event.payload)
@@ -289,11 +335,14 @@ def fold_events(events: list[Event]) -> RunState:
                         existing["output_summary"] = p.output_summary
                         if p.error:
                             existing["error"] = p.error
+                        if p.tool_call_id:
+                            existing["tool_call_id"] = p.tool_call_id
                     else:
-                        step_data = {"step_id": p.step_id, "status": step_status,
-                                     "output_summary": p.output_summary}
+                        step_data = {"step_id": p.step_id, "status": step_status, "output_summary": p.output_summary}
                         if p.error:
                             step_data["error"] = p.error
+                        if p.tool_call_id:
+                            step_data["tool_call_id"] = p.tool_call_id
                         state.latest_plan["steps"].append(step_data)
 
             case EventType.DAG_STEP_FAILED:
@@ -303,8 +352,29 @@ def fold_events(events: list[Event]) -> RunState:
                     if existing:
                         existing["status"] = "failed"
                         existing["error"] = p.error
+                        if p.tool_call_id:
+                            existing["tool_call_id"] = p.tool_call_id
                     else:
-                        state.latest_plan["steps"].append({"step_id": p.step_id, "status": "failed", "error": p.error})
+                        entry = {"step_id": p.step_id, "status": "failed", "error": p.error}
+                        if p.tool_call_id:
+                            entry["tool_call_id"] = p.tool_call_id
+                        state.latest_plan["steps"].append(entry)
+
+            case EventType.DAG_STEP_SKIPPED:
+                p = DagStepSkippedPayload(**event.payload)
+                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                    existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
+                    if existing:
+                        existing["status"] = "skipped"
+                        existing["reason"] = p.reason
+                    else:
+                        state.latest_plan["steps"].append(
+                            {
+                                "step_id": p.step_id,
+                                "status": "skipped",
+                                "reason": p.reason,
+                            }
+                        )
 
             case EventType.PLAN_REVISED:
                 p = PlanRevisedPayload(**event.payload)
@@ -316,6 +386,13 @@ def fold_events(events: list[Event]) -> RunState:
                     state.latest_plan["intent"] = p.intent
                     state.latest_plan["revision_reason"] = p.revision_reason
                     state.latest_plan["remaining_steps_summary"] = p.remaining_steps_summary
+                    state.latest_plan["step_tasks"] = dict(p.step_tasks)
+                    # v2.2 (P2): 修订蓝图落事件 → 折叠态 latest_plan 与实际修订计划对齐。
+                    # 修订后的步骤列表替换旧蓝图（各步骤以 step_id 为主键，后续
+                    # DAG_STEP_* 事件继续按 step_id 更新状态）。
+                    if p.steps:
+                        state.latest_plan["steps"] = [dict(s) for s in p.steps]
+                state.step_tasks.update(p.step_tasks)
 
             case EventType.PLAN_COMPLETED:
                 p = PlanCompletedPayload(**event.payload)
@@ -348,22 +425,18 @@ def fold_events(events: list[Event]) -> RunState:
                 recent_thought_seqs = {t.seq for t in state.thought_history[-keep:]} if keep > 0 else set()
                 recent_result_seqs = {tr.event_seq for tr in state.tool_results[-keep:]} if keep > 0 else set()
                 state.thought_history = [
-                    t for t in state.thought_history
-                    if t.seq not in archived_set or t.seq in recent_thought_seqs
+                    t for t in state.thought_history if t.seq not in archived_set or t.seq in recent_thought_seqs
                 ]
                 state.tool_results = [
-                    tr for tr in state.tool_results
+                    tr
+                    for tr in state.tool_results
                     if tr.event_seq not in archived_set or tr.event_seq in recent_result_seqs
                 ]
 
             case EventType.CONTEXT_PRUNED:
                 p = ContextPrunedPayload(**event.payload)
                 pruned_set = set(p.pruned_event_refs)
-                state.thought_history = [
-                    t for t in state.thought_history if t.seq not in pruned_set
-                ]
-                state.tool_results = [
-                    tr for tr in state.tool_results if tr.event_seq not in pruned_set
-                ]
+                state.thought_history = [t for t in state.thought_history if t.seq not in pruned_set]
+                state.tool_results = [tr for tr in state.tool_results if tr.event_seq not in pruned_set]
 
     return state

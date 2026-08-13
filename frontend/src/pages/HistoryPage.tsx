@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { useQuery } from '@tanstack/react-query'
 import { History as HistoryIcon, Loader2 } from 'lucide-react'
-import { listRuns } from '../api/client'
+import { listRuns, listWorkspaces } from '../api/client'
 import { RunTimeline } from '../components/history/RunTimeline'
 import { RunDetailPanel } from '../components/history/RunDetailPanel'
 
@@ -10,14 +10,16 @@ export default function HistoryPage() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<string | null>(null)
+  const [workspaceId, setWorkspaceId] = useState<string | undefined>()
+  const { data: workspaceData } = useQuery({ queryKey: ['workspaces'], queryFn: listWorkspaces })
 
   const {
     data,
     isLoading,
     error,
   } = useQuery({
-    queryKey: ['runs'],
-    queryFn: () => listRuns(),
+    queryKey: ['runs', workspaceId],
+    queryFn: () => listRuns(workspaceId),
     refetchInterval: 5000,
   })
 
@@ -39,9 +41,11 @@ export default function HistoryPage() {
             </span>
             <div>
               <h1 className="font-display text-base font-bold text-text-primary">Run 历史</h1>
-              <p className="text-[10px] text-text-tertiary">
-                每 5 秒自动刷新 · 共 {runs.length} 条
-              </p>
+              <p className="text-[10px] text-text-tertiary">每 5 秒自动刷新 · 共 {runs.length} 条</p>
+              <select value={workspaceId ?? ''} onChange={(event) => setWorkspaceId(event.target.value || undefined)} className="mt-2 w-full rounded-lg border border-border-soft bg-surface-1 px-2 py-1 text-xs text-text-secondary">
+                <option value="">全部 Workspace</option>
+                {(workspaceData?.workspaces ?? []).map((workspace) => <option key={workspace.workspace_id} value={workspace.workspace_id}>{workspace.name}</option>)}
+              </select>
             </div>
           </div>
           <RunTimeline

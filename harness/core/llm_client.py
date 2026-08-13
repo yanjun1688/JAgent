@@ -8,6 +8,7 @@ tool_call.arguments are observable via _logger.warning and surface as
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from abc import ABC, abstractmethod
@@ -57,6 +58,7 @@ class LLMClient(ABC):
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        run_id: str | None = None,
     ) -> ChatResponse: ...
 
 
@@ -69,8 +71,7 @@ class MockLLMClient(LLMClient):
 
     def __init__(self, responses: list[str | ChatResponse]) -> None:
         self.responses: list[ChatResponse] = [
-            r if isinstance(r, ChatResponse) else ChatResponse(content=r)
-            for r in responses
+            r if isinstance(r, ChatResponse) else ChatResponse(content=r) for r in responses
         ]
         self.calls: list[dict[str, Any]] = []
         self._idx = 0
@@ -82,8 +83,9 @@ class MockLLMClient(LLMClient):
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        run_id: str | None = None,
     ) -> ChatResponse:
-        self.calls.append({"messages": messages, "tools": tools})
+        self.calls.append({"messages": messages, "tools": tools, "run_id": run_id})
         if self._idx >= len(self.responses):
             return ChatResponse(content=f"{_STOP_MARKER} Task complete.")
         response = self.responses[self._idx]
@@ -94,10 +96,30 @@ class MockLLMClient(LLMClient):
 class OpenAILLMClient(LLMClient):
     """Real LLM client for OpenAI-compatible APIs (Bailian, DeepSeek, OpenAI, etc.)."""
 
-    def __init__(self, api_key: str, model: str, base_url: str = "https://api.openai.com/v1") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str = "https://api.openai.com/v1",
+        max_concurrency: int = 8,
+    ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
+        self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        async with self._client_lock:
+            if self._client is None:
+                self._client = httpx.AsyncClient(timeout=120.0)
+            return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def chat(
         self,
@@ -106,6 +128,7 @@ class OpenAILLMClient(LLMClient):
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        run_id: str | None = None,
     ) -> ChatResponse:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -121,22 +144,29 @@ class OpenAILLMClient(LLMClient):
             body["tools"] = tools
             body["tool_choice"] = "auto"
 
-        _logger.info("[LLM] Sending %d messages (%.0f chars) to %s",
-                     len(messages), sum(len(str(m)) for m in messages), self.model)
+        tag = f"[run={run_id}] " if run_id else ""
+        _logger.info(
+            "[LLM] %sSending %d messages (%.0f chars) to %s",
+            tag,
+            len(messages),
+            sum(len(str(m)) for m in messages),
+            self.model,
+        )
         for i, m in enumerate(messages):
             content = m.get("content", "")
             preview = content[:200].replace("\n", " ") + ("..." if len(content) > 200 else "")
-            _logger.info("[LLM]   msg[%d] role=%s (%d chars) %s", i, m.get("role", "?"), len(content), preview)
+            _logger.info("[LLM] %s msg[%d] role=%s (%d chars) %s", tag, i, m.get("role", "?"), len(content), preview)
 
         _t0 = time.monotonic()
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        client = await self._get_client()
+        async with self._semaphore:
             resp = await client.post(
                 f"{self.base_url}/chat/completions",
                 headers=headers,
                 json=body,
             )
             if resp.status_code != 200:
-                _logger.error("[LLM] API responded %d: %s", resp.status_code, resp.text)
+                _logger.error("[LLM] %sAPI responded %d: %s", tag, resp.status_code, resp.text)
                 resp.raise_for_status()
             data = resp.json()
         _ms = (time.monotonic() - _t0) * 1000
@@ -144,8 +174,14 @@ class OpenAILLMClient(LLMClient):
         usage = data.get("usage", {})
         prompt_tokens = usage.get("prompt_tokens", 0)
         completion_tokens = usage.get("completion_tokens", 0)
-        _logger.info("[LLM] Response in %dms (prompt=%d, completion=%d, total=%d)",
-                     _ms, prompt_tokens, completion_tokens, prompt_tokens + completion_tokens)
+        _logger.info(
+            "[LLM] %sResponse in %dms (prompt=%d, completion=%d, total=%d)",
+            tag,
+            _ms,
+            prompt_tokens,
+            completion_tokens,
+            prompt_tokens + completion_tokens,
+        )
 
         choice = data["choices"][0]
         msg = choice.get("message", {})
@@ -164,18 +200,20 @@ class OpenAILLMClient(LLMClient):
                     parsed = {"_parse_error": raw_args, "_value": parsed}
             except json.JSONDecodeError:
                 _logger.warning(
-                    "[LLM] tool_call arguments json decode failed: id=%s name=%s raw=%.200s",
-                    tc_id, name, raw_args,
+                    "[LLM] %stool_call arguments json decode failed: id=%s name=%s raw=%.200s",
+                    tag,
+                    tc_id,
+                    name,
+                    raw_args,
                 )
                 parsed = {"_parse_error": raw_args}
             tool_calls.append(ToolCall(id=tc_id, name=name, arguments=parsed))
 
         if tool_calls:
             tc_names = [tc.name for tc in tool_calls]
-            _logger.info("[LLM] → tool_calls: %s [reason=%s]", ", ".join(tc_names), finish_reason)
+            _logger.info("[LLM] %s→ tool_calls: %s [reason=%s]", tag, ", ".join(tc_names), finish_reason)
         else:
-            _logger.info("[LLM] → text (%d chars) [reason=%s]: %s",
-                         len(content), finish_reason, content)
+            _logger.info("[LLM] %s→ text (%d chars) [reason=%s]: %s", tag, len(content), finish_reason, content)
 
         # ── Langfuse tracing (non-trusted observability layer) ──
         # The active TraceContext is propagated via contextvars by the

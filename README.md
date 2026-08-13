@@ -257,8 +257,8 @@ asyncio.run(main())
 ### 启动 API 服务 + 前端
 
 ```bash
-# 终端 1: 启动后端 (Mock 模式 — 2 步 DAG echo)
-uvicorn harness.api.serve:app --reload --port 8000
+# 终端 1: 启动后端 (Mock 模式 — 2 步 DAG echo；reload 仅监听源码目录)
+python -m harness.api.serve
 
 # 终端 2: 启动前端
 cd frontend && npm run dev   # http://localhost:5173

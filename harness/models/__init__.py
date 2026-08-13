@@ -1,9 +1,9 @@
 from harness.models.conversation import (
     Conversation,
     ConversationDetail,
+    ConversationListResponse,
     ConversationMessageItem,
     ConversationStatus,
-    ConversationListResponse,
     CreateConversationRequest,
     CreateConversationResponse,
     DeleteConversationResponse,
@@ -26,6 +26,7 @@ from harness.models.events import (
     DagStepCompletedPayload,
     DagStepFailedPayload,
     DagStepStartedPayload,
+    DeliveryContractsResolvedPayload,
     Event,
     EventType,
     FeedbackCategory,
@@ -55,6 +56,14 @@ from harness.models.tools import (
     SuccessIndicator,
     ToolDefinition,
 )
+from harness.models.workspace import (
+    ExecutionTarget,
+    ExecutionTargetType,
+    Tenant,
+    Workspace,
+    WorkspaceScope,
+    WorkspaceUpdate,
+)
 
 __all__ = [
     "Conversation",
@@ -80,6 +89,7 @@ __all__ = [
     "ConfirmationRequestedPayload",
     "ContextCheckpointedPayload",
     "ContextCompressedPayload",
+    "DeliveryContractsResolvedPayload",
     "FeedbackCategory",
     "FeedbackInjectedPayload",
     "FeedbackSource",
@@ -109,4 +119,10 @@ __all__ = [
     "SideEffect",
     "SuccessIndicator",
     "ToolDefinition",
+    "ExecutionTarget",
+    "ExecutionTargetType",
+    "Tenant",
+    "Workspace",
+    "WorkspaceScope",
+    "WorkspaceUpdate",
 ]

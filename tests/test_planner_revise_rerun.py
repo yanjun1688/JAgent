@@ -16,7 +16,7 @@ from harness.tools.registry import ToolRegistry
 def _make_registry_with_http() -> ToolRegistry:
     """Create a minimal registry with http_request tool registered."""
     registry = ToolRegistry()
-    registry.register(
+    registry._register(
         ToolDefinition(
             name="http_request",
             description="HTTP request tool",
@@ -33,73 +33,94 @@ def _make_registry_with_http() -> ToolRegistry:
 
 # ── 2.4 completed_step_ids → executed_step_ids (tc-csi-01~04) ──
 
-@pytest.mark.parametrize("results,expected_ids", [
-    (
-        {"s1": StepResult("s1", exec_state=ExecState.COMPLETED),
-         "s2": StepResult("s2", exec_state=ExecState.COMPLETED)},
-        {"s1", "s2"},
-    ),
-    (
-        {"s1": StepResult("s1", exec_state=ExecState.COMPLETED),
-         "s2": StepResult("s2", exec_state=ExecState.SOFT_ERROR)},
-        {"s1"},  # v2.1: SOFT_ERROR excluded from executed ids (re-runnable)
-    ),
-    (
-        {"s1": StepResult("s1", exec_state=ExecState.COMPLETED),
-         "s2": StepResult("s2", exec_state=ExecState.FAILED)},
-        {"s1"},
-    ),
-    (
-        {"s1": StepResult("s1", exec_state=ExecState.SOFT_ERROR),
-         "s2": StepResult("s2", exec_state=ExecState.FAILED)},
-        set(),  # v2.1: SOFT_ERROR + FAILED both re-runnable → nothing executed
-    ),
-])
-def test_completed_step_ids_includes_soft_error(results, expected_ids):
-    computed = {
-        sid for sid, r in results.items()
-        if isinstance(r, StepResult) and r.should_not_rerun
-    }
+
+@pytest.mark.parametrize(
+    "results,expected_ids",
+    [
+        (
+            {
+                "s1": StepResult("s1", exec_state=ExecState.COMPLETED),
+                "s2": StepResult("s2", exec_state=ExecState.COMPLETED),
+            },
+            {"s1", "s2"},
+        ),
+        (
+            {
+                "s1": StepResult("s1", exec_state=ExecState.COMPLETED),
+                "s2": StepResult("s2", exec_state=ExecState.UNSUCCESSFUL),
+            },
+            {"s1"},  # v2.1: UNSUCCESSFUL excluded from executed ids (re-runnable)
+        ),
+        (
+            {
+                "s1": StepResult("s1", exec_state=ExecState.COMPLETED),
+                "s2": StepResult("s2", exec_state=ExecState.FAILED),
+            },
+            {"s1"},
+        ),
+        (
+            {
+                "s1": StepResult("s1", exec_state=ExecState.UNSUCCESSFUL),
+                "s2": StepResult("s2", exec_state=ExecState.FAILED),
+            },
+            set(),  # v2.1: UNSUCCESSFUL + FAILED both re-runnable → nothing executed
+        ),
+    ],
+)
+def test_completed_step_ids_includes_unsuccessful(results, expected_ids):
+    computed = {sid for sid, r in results.items() if isinstance(r, StepResult) and r.should_not_rerun}
     assert computed == expected_ids
 
 
 # ── 2.5 build_dag_status_text 包含 exec_state (tc-bds-01) ──────
 
+
 def test_build_dag_status_text_includes_exec_state():
     sr = StepResult("s1", exec_state=ExecState.COMPLETED)
-    plan = DagPlan(intent="test intent", steps=[
-        DagStep(id="s1", tool="http_request", input={}, description="step 1"),
-    ])
+    plan = DagPlan(
+        intent="test intent",
+        steps=[
+            DagStep(id="s1", tool="http_request", input={}, description="step 1"),
+        ],
+    )
     text = DagExecutor.build_dag_status_text(plan, {"s1": sr}, current_layer=0)
     assert "exec=" in text
 
 
 def test_build_dag_status_text_includes_replan_tag():
-    sr = StepResult("s1", exec_state=ExecState.SOFT_ERROR)
-    plan = DagPlan(intent="test intent", steps=[
-        DagStep(id="s1", tool="http_request", input={}, description="step 1"),
-    ])
+    sr = StepResult("s1", exec_state=ExecState.UNSUCCESSFUL)
+    plan = DagPlan(
+        intent="test intent",
+        steps=[
+            DagStep(id="s1", tool="http_request", input={}, description="step 1"),
+        ],
+    )
     text = DagExecutor.build_dag_status_text(plan, {"s1": sr}, current_layer=0)
-    assert "replan=MAYBE" in text  # v2.1: SOFT_ERROR may be re-run
+    assert "replan=MAYBE" in text  # v2.1: UNSUCCESSFUL may be re-run
 
 
 def test_build_dag_status_text_failed_replan_maybe():
     sr = StepResult("s1", exec_state=ExecState.FAILED, error="timeout")
-    plan = DagPlan(intent="test intent", steps=[
-        DagStep(id="s1", tool="http_request", input={}, description="step 1"),
-    ])
+    plan = DagPlan(
+        intent="test intent",
+        steps=[
+            DagStep(id="s1", tool="http_request", input={}, description="step 1"),
+        ],
+    )
     text = DagExecutor.build_dag_status_text(plan, {"s1": sr}, current_layer=0)
     assert "replan=MAYBE" in text
 
 
 def test_build_dag_status_text_includes_step_description():
     """Revise state must surface the step's business goal so the revise LLM
-    can judge whether a soft-error step's task was actually met (tc-bds-02)."""
-    sr = StepResult("s1", exec_state=ExecState.SOFT_ERROR, error="File not found")
-    plan = DagPlan(intent="test intent", steps=[
-        DagStep(id="s1", tool="file_op", input={},
-                description="Read dataset.csv and return its real content"),
-    ])
+    can judge whether a unsuccessful step's task was actually met (tc-bds-02)."""
+    sr = StepResult("s1", exec_state=ExecState.UNSUCCESSFUL, error="File not found")
+    plan = DagPlan(
+        intent="test intent",
+        steps=[
+            DagStep(id="s1", tool="file_op", input={}, description="Read dataset.csv and return its real content"),
+        ],
+    )
     text = DagExecutor.build_dag_status_text(plan, {"s1": sr}, current_layer=0)
     assert "Task: Read dataset.csv and return its real content" in text
     assert "replan=MAYBE" in text
@@ -107,15 +128,19 @@ def test_build_dag_status_text_includes_step_description():
 
 def test_build_dag_status_text_omits_empty_description():
     """Steps without a description must not render a stray Task line."""
-    sr = StepResult("s1", exec_state=ExecState.SOFT_ERROR, error="File not found")
-    plan = DagPlan(intent="test intent", steps=[
-        DagStep(id="s1", tool="file_op", input={}, description=""),
-    ])
+    sr = StepResult("s1", exec_state=ExecState.UNSUCCESSFUL, error="File not found")
+    plan = DagPlan(
+        intent="test intent",
+        steps=[
+            DagStep(id="s1", tool="file_op", input={}, description=""),
+        ],
+    )
     text = DagExecutor.build_dag_status_text(plan, {"s1": sr}, current_layer=0)
     assert "Task:" not in text
 
 
 # ── 3.2 PlanGuardrail 依赖检查 (tc-grd-01) ─────────────────────
+
 
 def test_plan_guardrail_uses_completed_step_ids():
     guardrail = PlanGuardrail(_make_registry_with_http())
@@ -140,6 +165,7 @@ def test_plan_guardrail_unfulfilled_dependency():
 
 # ── 3.3 topological_sort with executed deps (tc-topo-01) ──────
 
+
 def test_topological_sort_with_executed_deps():
     plan = DagPlan(
         intent="test",
@@ -158,10 +184,11 @@ def test_topological_sort_without_executed_deps_raises():
         plan.topological_sort()
 
 
-# ── SOFT_ERROR 步骤输出可被 revise 计划引用（Bug 修复回归）────────
+# ── UNSUCCESSFUL 步骤输出可被 revise 计划引用（Bug 修复回归）────────
 
-def test_plan_guardrail_allows_dep_on_soft_error_step():
-    """revise 计划依赖 soft-error 步骤是合法的：其输出已记录（is_done），
+
+def test_plan_guardrail_allows_dep_on_unsuccessful_step():
+    """revise 计划依赖 unsuccessful 步骤是合法的：其输出已记录（output_available），
     执行时 upstream 可解析，拓扑上作为 external 依赖（不产生调度边）。"""
     guardrail = PlanGuardrail(_make_registry_with_http())
     plan = DagPlan(
@@ -188,20 +215,13 @@ def test_plan_guardrail_still_rejects_unknown_step():
     assert "depends on unknown step" in errors[0]
 
 
-def test_plan_guardrail_soft_error_dep_via_is_done_results():
-    """从 StepResult 聚合的 available ids（is_done）应使 soft-error 依赖通过。"""
+def test_plan_guardrail_unsuccessful_dep_via_output_available_results():
+    """从 StepResult 聚合的 available ids（output_available）应使 unsuccessful 依赖通过。"""
     results = {
-        "s1": StepResult("s1", exec_state=ExecState.SOFT_ERROR,
-                         output={"success": False, "error": "File not found"}),
+        "s1": StepResult("s1", exec_state=ExecState.UNSUCCESSFUL, output={"success": False, "error": "File not found"}),
     }
-    completed = {
-        sid for sid, r in results.items()
-        if isinstance(r, StepResult) and r.should_not_rerun
-    }
-    available = {
-        sid for sid, r in results.items()
-        if isinstance(r, StepResult) and r.is_done
-    }
+    completed = {sid for sid, r in results.items() if isinstance(r, StepResult) and r.should_not_rerun}
+    available = {sid for sid, r in results.items() if isinstance(r, StepResult) and r.output_available}
     assert completed == set()
     assert available == {"s1"}
 
@@ -211,13 +231,15 @@ def test_plan_guardrail_soft_error_dep_via_is_done_results():
         steps=[DagStep(id="s2", tool="http_request", input={}, depends_on=["s1"], description="")],
     )
     errors = guardrail.validate(
-        plan, completed_step_ids=completed, available_step_ids=available,
+        plan,
+        completed_step_ids=completed,
+        available_step_ids=available,
     )
     assert errors == []
 
 
-def test_topological_sort_accepts_external_soft_error_dep():
-    """soft-error 步骤作为 external 依赖：合法且不产生调度边。"""
+def test_topological_sort_accepts_external_unsuccessful_dep():
+    """unsuccessful 步骤作为 external 依赖：合法且不产生调度边。"""
     plan = DagPlan(
         intent="revise",
         steps=[DagStep(id="s2", tool="file_op", input={}, depends_on=["s1"], description="")],
@@ -241,29 +263,30 @@ def test_topological_sort_external_dep_in_plan_still_scheduled():
 
 # ── ExecState/TaskState 回归检查 ─────────────────────────────────
 
+
 def test_step_result_all_properties_work():
     """All StepResult backward-compat properties remain functional."""
     sr = StepResult(step_id="s1", exec_state=ExecState.COMPLETED)
     assert sr.is_completed is True
-    assert sr.is_done is True
+    assert sr.output_available is True
     assert sr.is_failed is False
     assert sr.needs_confirmation is False
-    assert sr.has_soft_error is False
+    assert sr.is_unsuccessful is False
 
 
-def test_step_result_soft_error_properties():
-    sr = StepResult(step_id="s1", exec_state=ExecState.SOFT_ERROR, error="minor issue")
+def test_step_result_unsuccessful_properties():
+    sr = StepResult(step_id="s1", exec_state=ExecState.UNSUCCESSFUL, error="minor issue")
     assert sr.is_completed is False
-    assert sr.is_done is True
+    assert sr.output_available is True
     assert sr.is_failed is False
-    assert sr.has_soft_error is True
-    assert sr.should_not_rerun is False  # v2.1: SOFT_ERROR is re-runnable
+    assert sr.is_unsuccessful is True
+    assert sr.should_not_rerun is False  # v2.1: UNSUCCESSFUL is re-runnable
 
 
 def test_step_result_failed_properties():
     sr = StepResult(step_id="s1", exec_state=ExecState.FAILED, error="timeout")
     assert sr.is_completed is False
-    assert sr.is_done is False
+    assert sr.output_available is False
     assert sr.is_failed is True
     assert sr.should_not_rerun is False
 
@@ -271,12 +294,13 @@ def test_step_result_failed_properties():
 def test_step_result_executor_error_properties():
     sr = StepResult(step_id="s1", exec_state=ExecState.FAILED, error="internal")
     assert sr.is_completed is False
-    assert sr.is_done is False
+    assert sr.output_available is False
     assert sr.is_failed is True
     assert sr.should_not_rerun is False
 
 
 # ── ExecState 和 TaskState 正交性 ─────────────────────────────────
+
 
 def test_exec_state_and_task_state_are_independent():
     sr = StepResult(
@@ -291,6 +315,7 @@ def test_exec_state_and_task_state_are_independent():
 
 # ── IDEMPOTENT exec_state ──────────────────────────────────────
 
+
 def test_idempotent_step_result():
     sr = StepResult(
         step_id="s1",
@@ -301,6 +326,7 @@ def test_idempotent_step_result():
 
 
 # ── Self-heal 拓扑跳过已完成的 in-plan 步骤（Bug 修复回归）──────────────
+
 
 def test_topological_sort_skips_completed_in_plan_step():
     """Revise 复用相同 step id 时，已完成的步骤必须从拓扑层中移除。

@@ -3,13 +3,11 @@
 import pytest
 
 from harness import (
-    ContextManager,
     EventStore,
     EventType,
     MockAgentKernel,
     MockLLMClient,
     RetryPolicy,
-    SideEffect,
     ThinkResult,
     ToolDefinition,
     ToolExecutor,
@@ -30,9 +28,12 @@ from harness.core.token_counter import HeuristicTokenCounter
 
 def _make_tool(name="test"):
     return ToolDefinition(
-        name=name, description=name,
-        input_schema={}, idempotency_key_fields=[],
-        side_effects=[], retry_policy=RetryPolicy(max_retries=0),
+        name=name,
+        description=name,
+        input_schema={},
+        idempotency_key_fields=[],
+        side_effects=[],
+        retry_policy=RetryPolicy(max_retries=0),
     )
 
 
@@ -48,8 +49,13 @@ async def _run_with_responses(store, responses, context_manager=None):
     config = SchedulerConfig(max_iterations=50)
     executor = ToolExecutor(store)
     scheduler = AgentLoopScheduler(
-        store, executor, kernel, tool_defs, tool_fns,
-        config=config, context_manager=context_manager,
+        store,
+        executor,
+        kernel,
+        tool_defs,
+        tool_fns,
+        config=config,
+        context_manager=context_manager,
     )
     return await scheduler.run("run-1", "test")
 
@@ -78,10 +84,12 @@ class TestTokenEstimation:
         cm = ContextManagerCls(None)
         state = RunState(run_id="r")
         from harness.core.fold import ToolResult, ToolResultStatus
+
         thought = type("obj", (), {"thought": "Hello world " * 10})()
         state.thought_history.append(thought)
         tr = ToolResult(
-            tool_call_id="t1", tool_name="echo",
+            tool_call_id="t1",
+            tool_name="echo",
             status=ToolResultStatus.COMPLETED,
             output={"result": "done"},
         )
@@ -106,6 +114,7 @@ class TestCompressionTrigger:
         tc = HeuristicTokenCounter()
         cm = ContextManagerCls(store, token_counter=tc, token_limit=100, compression_threshold_ratio=0.5)
         from harness.core.fold import ThoughtEntry
+
         state = RunState(run_id="r")
         state.seq = 99
         state.plan_boundary_seqs = [99]
@@ -127,6 +136,7 @@ class TestCompressionTrigger:
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         state.thought_history.append(ThoughtEntry(seq=1, thought="hello"))
 
         await cm.maybe_compress("run-c2", 1, state)
@@ -141,6 +151,7 @@ class TestCompressionTrigger:
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         state.thought_history.append(ThoughtEntry(seq=1, thought="x" * 100))
 
         await cm.maybe_compress("run-c3", 1, state)
@@ -156,6 +167,7 @@ class TestCompressionTrigger:
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         for i in range(5):
             state.thought_history.append(ThoughtEntry(seq=i + 1, thought="x" * 100))
 
@@ -169,12 +181,14 @@ class TestCompressionTrigger:
     @pytest.mark.asyncio
     async def test_compression_cooldown_prevents_repeat(self, store):
         tc = HeuristicTokenCounter()
-        cm = ContextManagerCls(store, token_counter=tc, token_limit=20, compression_threshold_ratio=0.5,
-                               checkpoint_interval=3)
+        cm = ContextManagerCls(
+            store, token_counter=tc, token_limit=20, compression_threshold_ratio=0.5, checkpoint_interval=3
+        )
         state = RunState(run_id="r")
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         state.thought_history.append(ThoughtEntry(seq=1, thought="x" * 100))
 
         await cm.maybe_compress("run-cd1", 1, state)
@@ -190,17 +204,19 @@ class TestCompressionTrigger:
     async def test_compress_with_llm_client(self, store):
         mock_llm = MockLLMClient(["COMPRESSED SUMMARY: agent did X then Y"])
         cm = ContextManagerCls(
-            store, llm_client=mock_llm,
-            token_limit=100, compression_threshold_ratio=0.5,
+            store,
+            llm_client=mock_llm,
+            token_limit=100,
+            compression_threshold_ratio=0.5,
         )
         from harness.core.fold import ThoughtEntry, ToolResult, ToolResultStatus
+
         state = RunState(run_id="r")
         state.seq = 99
         state.plan_boundary_seqs = [99]
         for _ in range(20):
             state.thought_history.append(ThoughtEntry(seq=_, thought="x" * 30))
-        tr = ToolResult(tool_call_id="t1", tool_name="echo",
-                        status=ToolResultStatus.COMPLETED, output="done")
+        tr = ToolResult(tool_call_id="t1", tool_name="echo", status=ToolResultStatus.COMPLETED, output="done")
         state.tool_results.append(tr)
 
         await cm.maybe_compress("run-c5", 1, state)
@@ -217,6 +233,7 @@ class TestCompressionTrigger:
 async def _state_from_store(store, run_id):
     """Helper: fold events from store into a RunState for try_checkpoint calls."""
     from harness.core.fold import fold_events
+
     events = await store.get_events(run_id)
     return fold_events(events) if events else RunState(run_id=run_id)
 
@@ -225,11 +242,9 @@ class TestCheckpoint:
     @pytest.mark.asyncio
     async def test_checkpoint_written_at_interval(self, store):
         cm = ContextManagerCls(store, checkpoint_interval=5)
-        await store.append_event("run-chk1", EventType.RUN_STARTED,
-                                 {"intent": "test", "context_snapshot": {}})
+        await store.append_event("run-chk1", EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}})
         for i in range(1, 8):
-            await store.append_event("run-chk1", EventType.AGENT_THOUGHT,
-                                     {"thought": f"t{i}", "token_count": 10})
+            await store.append_event("run-chk1", EventType.AGENT_THOUGHT, {"thought": f"t{i}", "token_count": 10})
             state = await _state_from_store(store, "run-chk1")
             await cm.try_checkpoint("run-chk1", i, state)
 
@@ -263,11 +278,9 @@ class TestCheckpoint:
     @pytest.mark.asyncio
     async def test_multiple_checkpoints(self, store):
         cm = ContextManagerCls(store, checkpoint_interval=3)
-        await store.append_event("run-chk4", EventType.RUN_STARTED,
-                                 {"intent": "test", "context_snapshot": {}})
+        await store.append_event("run-chk4", EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}})
         for i in range(1, 10):
-            await store.append_event("run-chk4", EventType.AGENT_THOUGHT,
-                                     {"thought": f"t{i}", "token_count": 10})
+            await store.append_event("run-chk4", EventType.AGENT_THOUGHT, {"thought": f"t{i}", "token_count": 10})
             state = await _state_from_store(store, "run-chk4")
             await cm.try_checkpoint("run-chk4", i, state)
 
@@ -282,24 +295,32 @@ class TestCheckpoint:
 class TestFindResumeSeq:
     def test_no_checkpoint_returns_zero(self, store):
         async def _test():
-            await store.append_event("run-res1", EventType.RUN_STARTED,
-                                     {"intent": "test", "context_snapshot": {}})
+            await store.append_event("run-res1", EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}})
             events = await store.get_events("run-res1")
             assert ContextManagerCls.find_resume_seq(events) == 0
+
         import asyncio
+
         asyncio.run(_test())
 
     def test_with_checkpoints_returns_latest_seq(self, store):
         async def _test():
-            await store.append_event("run-res2", EventType.RUN_STARTED,
-                                     {"intent": "test", "context_snapshot": {}})
-            await store.append_event("run-res2", EventType.CONTEXT_CHECKPOINTED,
-                                     {"checkpoint_seq": 5, "snapshot_ref": "cp1", "token_count": 100})
-            await store.append_event("run-res2", EventType.CONTEXT_CHECKPOINTED,
-                                     {"checkpoint_seq": 12, "snapshot_ref": "cp2", "token_count": 200})
+            await store.append_event("run-res2", EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}})
+            await store.append_event(
+                "run-res2",
+                EventType.CONTEXT_CHECKPOINTED,
+                {"checkpoint_seq": 5, "snapshot_ref": "cp1", "token_count": 100},
+            )
+            await store.append_event(
+                "run-res2",
+                EventType.CONTEXT_CHECKPOINTED,
+                {"checkpoint_seq": 12, "snapshot_ref": "cp2", "token_count": 200},
+            )
             events = await store.get_events("run-res2")
             assert ContextManagerCls.find_resume_seq(events) == 12
+
         import asyncio
+
         asyncio.run(_test())
 
 
@@ -323,8 +344,9 @@ class TestSchedulerIntegration:
     async def test_compression_integrated_in_scheduler(self, store):
         """When token limit is low, ContextManager triggers compression during run."""
         tc = HeuristicTokenCounter()
-        cm = ContextManagerCls(store, token_counter=tc, token_limit=100,
-                               compression_threshold_ratio=0.5, checkpoint_interval=1)
+        cm = ContextManagerCls(
+            store, token_counter=tc, token_limit=100, compression_threshold_ratio=0.5, checkpoint_interval=1
+        )
         # 8 tool responses: by iter 4, 3 thoughts have accumulated → archive_episode
         # checkpoint_interval=1 avoids cooldown blocking the 2nd compression attempt
         resp = [ThinkResult(thought="x" * 100, tool_name="echo", tool_input={}) for _ in range(8)]
@@ -339,7 +361,9 @@ class TestSchedulerIntegration:
     async def test_compression_does_not_break_run(self, store):
         """Compression events are written; run completes normally."""
         tc = HeuristicTokenCounter()
-        cm = ContextManagerCls(store, token_counter=tc, token_limit=80, compression_threshold_ratio=0.5, checkpoint_interval=2)
+        cm = ContextManagerCls(
+            store, token_counter=tc, token_limit=80, compression_threshold_ratio=0.5, checkpoint_interval=2
+        )
         resp = [ThinkResult(thought="x" * 80, tool_name="echo", tool_input={}) for _ in range(5)]
         resp.append(ThinkResult(thought="done"))
         result = await _run_with_responses(store, resp, context_manager=cm)
@@ -358,15 +382,19 @@ class TestLongRunning:
     async def test_100_iterations_without_overflow(self, store):
         """100+ tool call round trips: no overflow, clean completion."""
         cm = ContextManagerCls(store, token_limit=1000, checkpoint_interval=10)
-        resp = [ThinkResult(thought=f"iteration {i}", tool_name="echo",
-                            tool_input={"x": i}) for i in range(105)]
+        resp = [ThinkResult(thought=f"iteration {i}", tool_name="echo", tool_input={"x": i}) for i in range(105)]
         resp.append(ThinkResult(thought="done"))
         kernel = MockAgentKernel(resp)
         config = SchedulerConfig(max_iterations=150)
         executor = ToolExecutor(store)
         scheduler = AgentLoopScheduler(
-            store, executor, kernel, [_make_tool("echo")], {"echo": _noop_fn},
-            config=config, context_manager=cm,
+            store,
+            executor,
+            kernel,
+            [_make_tool("echo")],
+            {"echo": _noop_fn},
+            config=config,
+            context_manager=cm,
         )
         result = await scheduler.run("run-1", "test")
 
@@ -380,17 +408,20 @@ class TestLongRunning:
     @pytest.mark.asyncio
     async def test_100_iterations_with_compression(self, store):
         """Compression events are written during long runs."""
-        cm = ContextManagerCls(store, token_limit=100, compression_threshold_ratio=0.5,
-                               checkpoint_interval=10)
-        resp = [ThinkResult(thought="Hello world " * 5, tool_name="echo",
-                            tool_input={}) for _ in range(50)]
+        cm = ContextManagerCls(store, token_limit=100, compression_threshold_ratio=0.5, checkpoint_interval=10)
+        resp = [ThinkResult(thought="Hello world " * 5, tool_name="echo", tool_input={}) for _ in range(50)]
         resp.append(ThinkResult(thought="done"))
         kernel = MockAgentKernel(resp)
         config = SchedulerConfig(max_iterations=80)
         executor = ToolExecutor(store)
         scheduler = AgentLoopScheduler(
-            store, executor, kernel, [_make_tool("echo")], {"echo": _noop_fn},
-            config=config, context_manager=cm,
+            store,
+            executor,
+            kernel,
+            [_make_tool("echo")],
+            {"echo": _noop_fn},
+            config=config,
+            context_manager=cm,
         )
         result = await scheduler.run("run-1", "test")
 
@@ -408,20 +439,31 @@ class TestStructuredSummary:
     async def test_llm_returns_episode_summary(self, store):
         """When LLM returns valid JSON matching EpisodeSummary, episode is Episode."""
         import json
-        mock_llm = MockLLMClient([json.dumps({
-            "key_decisions": ["search for file", "parse output"],
-            "tools_used": ["file_op", "grep"],
-            "key_findings": ["found config file"],
-            "errors_encountered": [],
-            "current_plan": "Continue processing",
-        })])
+
+        mock_llm = MockLLMClient(
+            [
+                json.dumps(
+                    {
+                        "key_decisions": ["search for file", "parse output"],
+                        "tools_used": ["file_op", "grep"],
+                        "key_findings": ["found config file"],
+                        "errors_encountered": [],
+                        "current_plan": "Continue processing",
+                    }
+                )
+            ]
+        )
         tc = HeuristicTokenCounter()
         cm = ContextManagerCls(
-            store, llm_client=mock_llm, token_counter=tc,
-            token_limit=100, compression_threshold_ratio=0.5,
+            store,
+            llm_client=mock_llm,
+            token_counter=tc,
+            token_limit=100,
+            compression_threshold_ratio=0.5,
         )
         state = RunState(run_id="r")
         from harness.core.fold import ThoughtEntry
+
         for i in range(20):
             state.thought_history.append(ThoughtEntry(seq=i + 1, thought="x" * 60))
 
@@ -442,11 +484,15 @@ class TestStructuredSummary:
         mock_llm = MockLLMClient(["Plain text summary of agent activity"])
         tc = HeuristicTokenCounter()
         cm = ContextManagerCls(
-            store, llm_client=mock_llm, token_counter=tc,
-            token_limit=100, compression_threshold_ratio=0.5,
+            store,
+            llm_client=mock_llm,
+            token_counter=tc,
+            token_limit=100,
+            compression_threshold_ratio=0.5,
         )
         state = RunState(run_id="r")
         from harness.core.fold import ThoughtEntry
+
         for i in range(20):
             state.thought_history.append(ThoughtEntry(seq=i + 1, thought="x" * 60))
 
@@ -466,12 +512,12 @@ class TestEmergencyCompression:
     async def test_archive_episode_compresses_all_thoughts(self, store):
         """Normal compression through _archive_episode compresses all thoughts."""
         tc = HeuristicTokenCounter()
-        cm = ContextManagerCls(store, token_counter=tc, token_limit=100,
-                                compression_threshold_ratio=0.5)
+        cm = ContextManagerCls(store, token_counter=tc, token_limit=100, compression_threshold_ratio=0.5)
         state = RunState(run_id="r")
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         for i in range(4):
             state.thought_history.append(ThoughtEntry(seq=i + 1, thought="x" * 80))
 
@@ -486,12 +532,12 @@ class TestEmergencyCompression:
     async def test_emergency_triggers_episode_archive(self, store):
         """Emergency compression triggers episode archive with keep_recent_count=3."""
         tc = HeuristicTokenCounter()
-        cm = ContextManagerCls(store, token_counter=tc, token_limit=50,
-                                compression_threshold_ratio=0.5)
+        cm = ContextManagerCls(store, token_counter=tc, token_limit=50, compression_threshold_ratio=0.5)
         state = RunState(run_id="r")
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         for i in range(10):
             state.thought_history.append(ThoughtEntry(seq=i + 1, thought="x" * 100))
 
@@ -504,12 +550,12 @@ class TestEmergencyCompression:
     async def test_compression_below_threshold_no_events(self, store):
         """When under compression threshold, no events written."""
         tc = HeuristicTokenCounter()
-        cm = ContextManagerCls(store, token_counter=tc, token_limit=1000,
-                                compression_threshold_ratio=0.8)
+        cm = ContextManagerCls(store, token_counter=tc, token_limit=1000, compression_threshold_ratio=0.8)
         state = RunState(run_id="r")
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         state.thought_history.append(ThoughtEntry(seq=1, thought="hello"))
 
         await cm.maybe_compress("run-wu1", 1, state)
@@ -523,12 +569,12 @@ class TestEmergencyCompression:
     async def test_emergency_keep_count_propagated(self, store):
         """keep_recent_count=3 is written to event and folded into state."""
         tc = HeuristicTokenCounter()
-        cm = ContextManagerCls(store, token_counter=tc, token_limit=50,
-                                compression_threshold_ratio=0.5)
+        cm = ContextManagerCls(store, token_counter=tc, token_limit=50, compression_threshold_ratio=0.5)
         state = RunState(run_id="r")
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         for i in range(10):
             state.thought_history.append(ThoughtEntry(seq=i + 1, thought="x" * 100))
 
@@ -545,12 +591,12 @@ class TestEmergencyCompression:
     async def test_normal_keep_count_default(self, store):
         """Normal compression writes keep_recent_count=2."""
         tc = HeuristicTokenCounter()
-        cm = ContextManagerCls(store, token_counter=tc, token_limit=100,
-                                compression_threshold_ratio=0.5)
+        cm = ContextManagerCls(store, token_counter=tc, token_limit=100, compression_threshold_ratio=0.5)
         state = RunState(run_id="r")
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         for i in range(4):
             state.thought_history.append(ThoughtEntry(seq=i + 1, thought="x" * 80))
 
@@ -596,7 +642,9 @@ class TestKernelSummaryConsumption:
         kernel = LLMAgentKernel(mock_llm)
         ep = Episode(
             title="Test Episode",
-            episode_range=(1, 20), original_tokens=500, compressed_tokens=50,
+            episode_range=(1, 20),
+            original_tokens=500,
+            compressed_tokens=50,
             key_decisions=["search file", "parse result"],
             tools_used=["file_op", "grep"],
             key_findings=["found config"],
@@ -631,7 +679,7 @@ class TestKernelSummaryConsumption:
         kernel = LLMAgentKernel(mock_llm)
         state = RunState(run_id="r", summary="test summary", keep_recent_count=3)
         for i in range(5):
-            state.thought_history.append(ThoughtEntry(seq=i+1, thought=f"thought {i}"))
+            state.thought_history.append(ThoughtEntry(seq=i + 1, thought=f"thought {i}"))
         td = _make_tool("echo")
 
         await kernel.think("test task", [td], state)
@@ -651,6 +699,7 @@ class TestTokenCounterIntegration:
         """ContextManager uses injected TokenCounter for estimation."""
         from harness.core.token_counter import HeuristicTokenCounter
         from harness.core.fold import ThoughtEntry
+
         tc = HeuristicTokenCounter()
         cm = ContextManagerCls(store, token_counter=tc, token_limit=100, compression_threshold_ratio=0.5)
         state = RunState(run_id="r")
@@ -665,10 +714,12 @@ class TestTokenCounterIntegration:
     async def test_async_estimate_uses_token_counter(self, store):
         """_async_estimate_context_tokens delegates to TokenCounter."""
         from harness.core.token_counter import HeuristicTokenCounter
+
         tc = HeuristicTokenCounter()
         cm = ContextManagerCls(store, token_counter=tc)
         state = RunState(run_id="r")
         from harness.core.fold import ThoughtEntry
+
         state.thought_history.append(ThoughtEntry(seq=1, thought="Hello world"))
         estimate = await cm._async_estimate_context_tokens(state)
         assert estimate == max(1, int(len("Hello world") * 0.25))
@@ -686,13 +737,19 @@ class TestThreeTierCompression:
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry, ToolResult, ToolResultStatus
+
         for i in range(5):
             state.thought_history.append(ThoughtEntry(seq=i, thought="x" * 50))
         for i in range(5, 10):
-            state.tool_results.append(ToolResult(
-                tool_call_id=f"t{i}", tool_name="echo",
-                status=ToolResultStatus.COMPLETED, output="y" * 50, event_seq=i,
-            ))
+            state.tool_results.append(
+                ToolResult(
+                    tool_call_id=f"t{i}",
+                    tool_name="echo",
+                    status=ToolResultStatus.COMPLETED,
+                    output="y" * 50,
+                    event_seq=i,
+                )
+            )
 
         await cm.maybe_compress("run-3t1", 1, state)
         events = await store.get_events("run-3t1")
@@ -704,11 +761,14 @@ class TestThreeTierCompression:
     async def test_episode_archive_writes_episode_archived(self, store):
         """When ratio is 70-90%, writes EPISODE_ARCHIVED with Episode data."""
         tc = HeuristicTokenCounter()
-        cm = ContextManagerCls(store, token_counter=tc, token_limit=100, compression_threshold_ratio=0.7, lazy_clear_ratio=0.5)
+        cm = ContextManagerCls(
+            store, token_counter=tc, token_limit=100, compression_threshold_ratio=0.7, lazy_clear_ratio=0.5
+        )
         state = RunState(run_id="r")
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         for i in range(10):
             state.thought_history.append(ThoughtEntry(seq=i, thought="x" * 75))
 
@@ -720,12 +780,12 @@ class TestThreeTierCompression:
     @pytest.mark.asyncio
     async def test_emergency_compact_keeps_recent_3(self, store):
         """Emergency compression (>90%) keeps recent 3 rounds."""
-        cm = ContextManagerCls(store, token_limit=10, compression_threshold_ratio=0.7,
-                               emergency_threshold_ratio=0.9)
+        cm = ContextManagerCls(store, token_limit=10, compression_threshold_ratio=0.7, emergency_threshold_ratio=0.9)
         state = RunState(run_id="r")
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         for i in range(10):
             state.thought_history.append(ThoughtEntry(seq=i, thought="x" * 100))
 
@@ -744,34 +804,36 @@ class TestImportanceScoring:
     def test_thought_default_importance(self):
         cm = ContextManagerCls(None)
         from harness.core.fold import ThoughtEntry
+
         t = ThoughtEntry(seq=1, thought="just thinking")
         assert cm._score_event_importance(t) == 0.5
 
     def test_thought_with_decision_markers(self):
         cm = ContextManagerCls(None)
         from harness.core.fold import ThoughtEntry
+
         t = ThoughtEntry(seq=1, thought="I decided to use a different approach")
         assert cm._score_event_importance(t) == 0.7
 
     def test_tool_failed_high_importance(self):
         cm = ContextManagerCls(None)
         from harness.core.fold import ToolResult, ToolResultStatus
-        tr = ToolResult(tool_call_id="t1", tool_name="echo",
-                        status=ToolResultStatus.FAILED, error="boom")
+
+        tr = ToolResult(tool_call_id="t1", tool_name="echo", status=ToolResultStatus.FAILED, error="boom")
         assert cm._score_event_importance(tr) == 0.8
 
     def test_tool_completed_low_importance(self):
         cm = ContextManagerCls(None)
         from harness.core.fold import ToolResult, ToolResultStatus
-        tr = ToolResult(tool_call_id="t1", tool_name="echo",
-                        status=ToolResultStatus.COMPLETED, output="done")
+
+        tr = ToolResult(tool_call_id="t1", tool_name="echo", status=ToolResultStatus.COMPLETED, output="done")
         assert cm._score_event_importance(tr) == 0.2
 
     def test_tool_timeout_high_importance(self):
         cm = ContextManagerCls(None)
         from harness.core.fold import ToolResult, ToolResultStatus
-        tr = ToolResult(tool_call_id="t1", tool_name="echo",
-                        status=ToolResultStatus.TIMEOUT, error="timeout")
+
+        tr = ToolResult(tool_call_id="t1", tool_name="echo", status=ToolResultStatus.TIMEOUT, error="timeout")
         assert cm._score_event_importance(tr) == 0.8
 
 
@@ -787,6 +849,7 @@ class TestEpisodeGeneration:
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         for i in range(5):
             state.thought_history.append(ThoughtEntry(seq=i, thought="x" * 50))
 
@@ -801,20 +864,28 @@ class TestEpisodeGeneration:
     async def test_episode_with_llm_json(self, store):
         """With LLM returning valid JSON, Episode has format='structured'."""
         import json
-        mock_llm = MockLLMClient([json.dumps({
-            "title": "Test Episode",
-            "summary": "A test episode summary",
-            "key_decisions": ["decision 1"],
-            "tools_used": ["echo"],
-            "key_findings": ["finding 1"],
-            "errors_encountered": [],
-            "current_plan": "continue",
-        })])
+
+        mock_llm = MockLLMClient(
+            [
+                json.dumps(
+                    {
+                        "title": "Test Episode",
+                        "summary": "A test episode summary",
+                        "key_decisions": ["decision 1"],
+                        "tools_used": ["echo"],
+                        "key_findings": ["finding 1"],
+                        "errors_encountered": [],
+                        "current_plan": "continue",
+                    }
+                )
+            ]
+        )
         cm = ContextManagerCls(store, llm_client=mock_llm, token_limit=100, compression_threshold_ratio=0.5)
         state = RunState(run_id="r")
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         for i in range(20):
             state.thought_history.append(ThoughtEntry(seq=i, thought="x" * 30))
 
@@ -832,6 +903,7 @@ class TestEpisodeGeneration:
         state.seq = 99
         state.plan_boundary_seqs = [99]
         from harness.core.fold import ThoughtEntry
+
         for i in range(20):
             state.thought_history.append(ThoughtEntry(seq=i, thought="x" * 30))
 
@@ -851,15 +923,27 @@ class TestFoldNewEventTypes:
         """EPISODE_ARCHIVED sets state.summary and appends to episodes."""
         from harness.core.fold import fold_events
         from harness.models.events import Episode, EpisodeArchivedPayload
+
         episode = Episode(
-            episode_range=(1, 10), original_tokens=100, compressed_tokens=20,
-            key_decisions=["d1"], tools_used=["t1"], key_findings=["f1"],
-            errors_encountered=[], current_plan="plan", original_event_refs=[1, 2, 3],
-            title="Test", summary="Summary", format="structured",
+            episode_range=(1, 10),
+            original_tokens=100,
+            compressed_tokens=20,
+            key_decisions=["d1"],
+            tools_used=["t1"],
+            key_findings=["f1"],
+            errors_encountered=[],
+            current_plan="plan",
+            original_event_refs=[1, 2, 3],
+            title="Test",
+            summary="Summary",
+            format="structured",
         )
         payload = EpisodeArchivedPayload(
-            original_tokens=100, compressed_tokens=20, episode=episode,
-            keep_recent_count=2, archived_event_refs=[1, 2, 3],
+            original_tokens=100,
+            compressed_tokens=20,
+            episode=episode,
+            keep_recent_count=2,
+            archived_event_refs=[1, 2, 3],
         )
         events = [
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
@@ -874,8 +958,11 @@ class TestFoldNewEventTypes:
         """CONTEXT_PRUNED removes events from thought_history/tool_results."""
         from harness.core.fold import fold_events
         from harness.models.events import ContextPrunedPayload
+
         payload = ContextPrunedPayload(
-            pruned_event_refs=[2, 3], pruned_token_count=50, pruned_seq_count=2,
+            pruned_event_refs=[2, 3],
+            pruned_token_count=50,
+            pruned_seq_count=2,
         )
         events = [
             _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
@@ -892,14 +979,24 @@ class TestFoldNewEventTypes:
         """EPISODE_ARCHIVED events fold correctly."""
         from harness.core.fold import fold_events
         from harness.models.events import Episode, EpisodeArchivedPayload
+
         ep = Episode(
             title="Legacy",
-            episode_range=(1, 5), original_tokens=100, compressed_tokens=20,
-            key_decisions=["d1"], tools_used=["t1"], key_findings=["f1"],
-            errors_encountered=[], current_plan="plan", original_event_refs=[1, 2, 3],
+            episode_range=(1, 5),
+            original_tokens=100,
+            compressed_tokens=20,
+            key_decisions=["d1"],
+            tools_used=["t1"],
+            key_findings=["f1"],
+            errors_encountered=[],
+            current_plan="plan",
+            original_event_refs=[1, 2, 3],
         )
         payload = EpisodeArchivedPayload(
-            original_tokens=100, compressed_tokens=20, episode=ep, keep_recent_count=2,
+            original_tokens=100,
+            compressed_tokens=20,
+            episode=ep,
+            keep_recent_count=2,
             archived_event_refs=[1, 2, 3],
         )
         events = [
@@ -914,4 +1011,5 @@ class TestFoldNewEventTypes:
 
 def _event(run_id, seq, event_type, payload):
     from harness.models.events import Event
+
     return Event(run_id=run_id, seq=seq, event_type=event_type, payload=payload, created_at=0.0)

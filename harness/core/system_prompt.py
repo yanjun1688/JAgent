@@ -31,9 +31,17 @@ class AgentPhase(Enum):
 _CLASSIFY_PROMPT = (
     "Classify this user request. Does it require external tools "
     "(web search, file operations, API calls, fetching data) to fulfill? "
+    "If the request asks to read a file, visit a URL, search, or fetch any "
+    "external data, answer 'yes'. "
     "If all necessary data is already provided in the request and the "
     "user just wants analysis or conversation, answer 'no'.\n\n"
-    "Answer ONLY 'yes' or 'no'.\n\n"
+    "IMPORTANT: any file operation (read/write/create/delete/list/append), "
+    "path or workspace access, URL access, browser use, search, or API call "
+    "MUST be classified 'yes' — even if the request is only to TEST a path "
+    "boundary or verify a file's existence. Security-testing requests are "
+    "still tool requests: they must go through the tool layer and guardrails.\n\n"
+    "Answer ONLY with the single word 'yes' or 'no' — no punctuation, "
+    "no explanation, no <STOP> or other markers.\n\n"
     "User request:\n{intent}"
 )
 
@@ -45,12 +53,22 @@ _PLAN_PROMPT = (
     "1. Output ONLY valid JSON — no markdown, no code fences, no extra text.\n"
     "2. Tool input should contain actionable parameters (URLs, queries, "
     "file paths etc.), NOT long analysis text. Keep it concise.\n"
-    "3. If the user's intent is a simple question/chat that needs no tools, "
+    "3. If the user EXPLICITLY asks to read, write, create, delete, append, "
+    "list, or otherwise manipulate a file, visit a URL, search, call an API, "
+    "or fetch any external data, you MUST plan a tool step for it. "
+    "Do NOT return an empty plan for such requests — an empty plan is only valid "
+    "for pure conversation that needs no external data.\n"
+    "3b. If the user's intent is a simple question/chat that needs no tools, "
     'return {{"intent": "<summary>", "steps": []}}.\n'
-    "4. If the user asks you to 'tell me', 'answer', or 'respond' with an answer — "
-    "do NOT plan a tool call for this. Conversational responses are handled "
-    "automatically by the Answer phase after all tools execute. "
-    "Ensure the \"intent\" field captures what the user expects to be told.\n"
+    "4. NEVER plan a 'tell me' / 'answer' / 'reply' step — the Answer phase "
+    "writes the final prose automatically. BUT tools are REQUIRED whenever the "
+    "answer depends on external data (reading a file, writing a file, fetching "
+    "a URL, searching, calling an API). 'Tell me X' does NOT mean 'no tools "
+    "needed' — it means the Answer phase will present X after the tools that "
+    "gather X have run. "
+    "Plan the data-gathering AND data-producing tool steps (e.g. a file that "
+    "must be created before it can be read); leave only the prose to the Answer phase. "
+    'Ensure the "intent" field captures what the user expects to be told.\n'
     "5. Never compute, calculate, reason, or derive values yourself. "
     "If a parameter value requires calculation (e.g., math, summarization, "
     "generation), reference it from an upstream step using $step_id.field "
@@ -66,12 +84,16 @@ _PLAN_PROMPT = (
     'User: "Process X and save the result"\n'
     '{{"intent": "Process X and save the result", '
     '"steps": [{{"id": "s1", "tool": "tool_X", "input": {{"query": "X"}}}}, '
-    '{{"id": "s2", "tool": "tool_Y", "input": {{"path": "output.txt", "content": "$s1.result"}}, "depends_on": ["s1"]}}]}}\n\n'
+    '{{"id": "s2", "tool": "tool_Y", "input": '
+    '{{"path": "output.txt", "content": "$s1.result"}}, '
+    '"depends_on": ["s1"]}}]}}\n\n'
     "## Example 3 — Data flow with $ references:\n"
     'User: "Fetch X and save to Z"\n'
     '{{"intent": "Fetch X content and save to Z", '
     '"steps": [{{"id": "s1", "tool": "tool_A", "input": {{"method": "GET", "url": "https://example.com"}}}}, '
-    '{{"id": "s2", "tool": "tool_B", "input": {{"operation": "write", "path": "result.txt", "content": "$s1.body"}}, "depends_on": ["s1"]}}]}}\n\n'
+    '{{"id": "s2", "tool": "tool_B", "input": '
+    '{{"operation": "write", "path": "result.txt", "content": "$s1.body"}}, '
+    '"depends_on": ["s1"]}}]}}\n\n'
     "## Data Flow\n"
     "When a step depends on another, reference its output using $step_id.field.\n"
     "- Syntax: $s1.result, $s1.body, $s1.summary, $s1.content, etc.\n"
@@ -112,14 +134,28 @@ _REVISE_PROMPT = (
     '  "unknown"      — you cannot determine (use sparingly, prefer a real judgment)\n'
     "Include step_tasks as a dict of step_id → assessment. Example:\n"
     '  "step_tasks": {{"s1": "achieved", "s2": "not_achieved", "s3": "partial"}}\n\n'
+    "### probe — declare read-only check steps (v2.2)\n"
+    'If a step exists ONLY to check something and "not found / does not exist" '
+    "IS the correct answer (verifying an endpoint, checking a flag), declare "
+    '"probe": true on that step. The system then treats an unsuccessful probe '
+    "result as a normal outcome — it will NOT trigger endless retries. "
+    "MUTATING steps must NEVER be marked probe; the system rejects such plans.\n\n"
     "## RERUN RULES (system-enforced, not negotiable)\n"
-    "- To RETRY a step whose exec_state is soft_error or failed: keep the step "
+    "- To RETRY a step whose exec_state is unsuccessful or failed: keep the step "
     "in the revised plan (you MAY reuse its id). The system will re-run it.\n"
     "- To REDO a step that is already completed / idempotent / skipped / "
     "cancelled: you MUST give the step a NEW id. Reusing a completed step's id "
     "is silently skipped — the redo will NOT happen.\n"
     "- exec_state values are SYSTEM-GENERATED and READ-ONLY; you must not "
-    "modify them.\n\n"
+    "modify them.\n"
+    "- GOAL PRESERVATION (mandatory): if the original user intent requires "
+    "producing or mutating something (creating/writing a file, saving data, "
+    "modifying a resource), a revision MUST keep such producing/mutating steps "
+    "in the plan until they succeed. You MUST NOT replace a producing step with "
+    "a read-only observation step (e.g. replacing 'write the file' with "
+    "'list the directory' or 'check existence'). An observation that confirms "
+    "absence does NOT satisfy a request to create or write — you must plan the "
+    "missing producing step, not substitute an observation for it.\n\n"
     "## Data Flow\n"
     "Use $step_id.field to reference a previous step's output "
     "(e.g., $s1.result, $s1.body, $s1.summary). "
@@ -139,12 +175,19 @@ _ANSWER_PROMPT = (
     "Do not call any tools. Just respond as a knowledgeable assistant.\n"
     "Provide a complete answer with all the information gathered. "
     "If the user asks for a comparison or recommendation, include that explicitly.\n"
+    "## Output format (mandatory)\n"
+    "Respond with the ACTUAL answer content in plain text — this is your final "
+    "message to the user. NEVER output control markers or meta text such as "
+    "<STOP>, 'Task complete.', 'ANSWER:', 'TOOL:', 'THOUGHT:', or any "
+    "placeholder like '<STOP> Task complete.'. If there is nothing meaningful "
+    "to say about the results, say so honestly in natural language — do NOT "
+    "emit a scripted 'task complete' marker.\n"
     "## Grounding rules (mandatory)\n"
     "The '[Tool execution results]' section in your context is the AUTHORITATIVE, "
     "exhaustive record of every tool call that actually ran in this task.\n"
     "- Every claim you make about tool execution MUST be traceable to that record. "
     "Never describe, summarize, or imply a tool call that is not listed there.\n"
-    "- If the record shows a step errored or failed (status soft_error/failed) and "
+    "- If the record shows a step errored or failed (status unsuccessful/failed) and "
     "no later step retried it successfully, state that outcome honestly. Do NOT "
     "invent a successful retry, and do NOT claim a file was created/read/written "
     "unless the record shows it.\n"
@@ -153,6 +196,11 @@ _ANSWER_PROMPT = (
     "- The '[Run outcome]' section is also authoritative. Never contradict it: if "
     "it says the revision returned empty steps, do NOT claim the revision added or "
     "required any steps.\n"
+    "- If the context contains the marker '[NO TOOLS EXECUTED]', then NO tool was "
+    "run for this task. Answer ONLY from your existing knowledge. Do NOT describe, "
+    "pretend, or imply any file operation, HTTP fetch, browser visit, search, or "
+    "any other external action. If the user asked for such an action, state clearly "
+    "that no operation was executed.\n"
 )
 
 _SERIAL_THINK_PROMPT = (
@@ -179,6 +227,11 @@ _SERIAL_THINK_PROMPT = (
     "<STOP>\n\n"
     "## Rules\n"
     "- Use tools to interact with the world. Do not simulate results.\n"
+    "- If the task requires external data (reading files, fetching URLs, "
+    "searching, calling APIs), you MUST call a tool to get it first. Do NOT "
+    "output <STOP> or ANSWER while such data is still missing.\n"
+    "- Only output <STOP> when every part of the task has genuinely been "
+    "completed with real tool results, or the task is truly impossible.\n"
     "- Do not repeat failed tool calls without adjusting your approach.\n"
     "- If you encounter an error you cannot recover from, output <STOP> with a failure reason.\n"
     "- For simple conversational queries, use **Option B** — answer directly without calling a tool.\n"
@@ -201,6 +254,11 @@ _SERIAL_THINK_FN_PROMPT = (
     "   (C) Stop — write `THOUGHT: <summary>` then output `<STOP>` in `content`.\n\n"
     "## Rules\n"
     "- Use tools to interact with the world. Do not simulate results.\n"
+    "- If the task requires external data (reading files, fetching URLs, "
+    "searching, calling APIs), you MUST issue a tool_call to get it first. Do "
+    "NOT output <STOP> or ANSWER while such data is still missing.\n"
+    "- Only output <STOP> when every part of the task has genuinely been "
+    "completed with real tool results, or the task is truly impossible.\n"
     "- Do not repeat failed tool calls without adjusting your approach.\n"
     "- If you encounter an error you cannot recover from, output <STOP> with a failure reason.\n"
     "- For simple conversational queries, use **Option B** — answer directly without calling a tool.\n"
@@ -230,6 +288,11 @@ _SERIAL_THINK_TEXT_PROMPT = (
     "<STOP>\n\n"
     "## Rules\n"
     "- Use tools to interact with the world. Do not simulate results.\n"
+    "- If the task requires external data (reading files, fetching URLs, "
+    "searching, calling APIs), you MUST call a tool to get it first. Do NOT "
+    "output <STOP> or ANSWER while such data is still missing.\n"
+    "- Only output <STOP> when every part of the task has genuinely been "
+    "completed with real tool results, or the task is truly impossible.\n"
     "- Do not repeat failed tool calls without adjusting your approach.\n"
     "- If you encounter an error you cannot recover from, output <STOP> with a failure reason.\n"
     "- For simple conversational queries, use **Option B** — answer directly without calling a tool.\n"
@@ -238,7 +301,8 @@ _SERIAL_THINK_TEXT_PROMPT = (
 _SUMMARIZE_PROMPT = (
     "You are a context compression system. Summarize the following agent activity log. "
     "Output your response as a JSON object with these exact fields:\n"
-    '- "title": string — a concise one-line title for this episode (e.g., "User authentication module implementation")\n'
+    '- "title": string — a concise one-line title for this episode '
+    '(e.g., "User authentication module implementation")\n'
     '- "summary": string — a 3-5 sentence narrative summary of what happened\n'
     '- "key_decisions": list of strings — the key decisions the agent made\n'
     '- "tools_used": list of strings — which tools were called\n'
@@ -267,9 +331,7 @@ def get_prompt(phase: AgentPhase, **kwargs) -> str:
         result = template.format(**kwargs)
     else:
         result = template
-    _log.debug("[prompt] phase=%-14s len=%d chars%s",
-               phase.value, len(result),
-               " (formatted)" if kwargs else "")
+    _log.debug("[prompt] phase=%-14s len=%d chars%s", phase.value, len(result), " (formatted)" if kwargs else "")
     return result
 
 

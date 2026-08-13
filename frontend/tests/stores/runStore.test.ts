@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { useRunStore } from '../../src/stores/runStore'
 import type { WsEvent } from '../../src/api/types'
 
-function mkEvent(seq: number, eventType = 'ToolCalled'): WsEvent {
+function mkEvent(seq: number, eventType = 'ToolCalled', runId = 'r1'): WsEvent {
   return {
-    run_id: 'r1',
+    run_id: runId,
     seq,
     event_type: eventType,
     payload: {},
@@ -60,6 +60,37 @@ describe('runStore', () => {
       activeRunId: null,
       runStatus: null,
       events: [],
+    })
+  })
+
+  // ── P0-07: WS 事件入口受信过滤 ─────────────────────────────────
+  describe('event isolation (P0-07)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    it('adds events matching the active run', () => {
+      useRunStore.getState().setActiveRun('run-a')
+      useRunStore.getState().addEvent(mkEvent(1, 'ToolCalled', 'run-a'))
+      expect(useRunStore.getState().events).toHaveLength(1)
+      expect(useRunStore.getState().events[0].run_id).toBe('run-a')
+    })
+
+    it('drops events whose run_id does not match the active run', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      useRunStore.getState().setActiveRun('run-a')
+      useRunStore.getState().addEvent(mkEvent(5, 'RunFailed', 'run-b'))
+      expect(useRunStore.getState().events).toHaveLength(0)
+      expect(warn).toHaveBeenCalled()
+    })
+
+    it('keeps sorting by seq after dropping foreign events', () => {
+      useRunStore.getState().setActiveRun('run-a')
+      useRunStore.getState().addEvent(mkEvent(2, 'AgentThought', 'run-a'))
+      useRunStore.getState().addEvent(mkEvent(1, 'ToolCalled', 'run-b')) // dropped
+      useRunStore.getState().addEvent(mkEvent(1, 'RunStarted', 'run-a'))
+      const seqs = useRunStore.getState().events.map((e) => e.seq)
+      expect(seqs).toEqual([1, 2])
     })
   })
 })

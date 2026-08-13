@@ -24,6 +24,7 @@ _OUTPUT_SUMMARY_MAX_CHARS = 200
 
 # ── Sentinels ────────────────────────────────────────────────────────────
 
+
 class VariableResolutionError(ValueError):
     """Raised when a $var.field reference cannot be resolved because the
     variable exists in upstream but the field path is missing.
@@ -42,11 +43,14 @@ class VariableResolutionError(ValueError):
 
 class _RefNotFound:
     """Sentinel: variable name is not a key in upstream at all."""
+
     pass
+
 
 _REF_NOT_FOUND = _RefNotFound()
 
 # ── Core resolution ─────────────────────────────────────────────────────
+
 
 def _resolve_ref(var_name: str, path: str | None, upstream: dict[str, Any]) -> Any:
     """Resolve a single ``$var_name`` or ``$var_name.path`` reference.
@@ -116,7 +120,9 @@ def _resolve_ref(var_name: str, path: str | None, upstream: dict[str, Any]) -> A
 
     return value
 
+
 # ── Public API ───────────────────────────────────────────────────────────
+
 
 def resolve_variables_in_input(step_input: dict, upstream: dict[str, Any]) -> dict:
     """Resolve $var and $var.path references in a step input dict.
@@ -133,7 +139,7 @@ def resolve_variables_in_input(step_input: dict, upstream: dict[str, Any]) -> di
     resolved = {}
     for key, value in step_input.items():
         if isinstance(value, str):
-            pure = re.match(r'^\$(\w+)(?:\.([\w.]+))?$', value)
+            pure = re.match(r"^\$([A-Za-z_][\w-]*)(?:\.([\w.]+))?$", value)
             if pure:
                 var_name = pure.group(1)
                 path = pure.group(2)
@@ -147,7 +153,7 @@ def resolve_variables_in_input(step_input: dict, upstream: dict[str, Any]) -> di
         elif isinstance(value, dict):
             resolved[key] = resolve_variables_in_input(value, upstream)
         elif isinstance(value, list):
-            resolved_list = []
+            resolved_list: list[Any] = []
             for item in value:
                 if isinstance(item, str):
                     resolved_list.append(substitute_vars(item, upstream))
@@ -182,7 +188,7 @@ def substitute_vars(text: str, upstream: dict[str, Any]) -> str:
             return m.group(0)
         return "null" if resolved is None else str(resolved)
 
-    return re.sub(r'\$(\w+)(?:\.([\w.]+))?', _replacer, text)
+    return re.sub(r"\$([A-Za-z_][\w-]*)(?:\.([\w.]+))?", _replacer, text)
 
 
 def deep_resolve(output: dict, parts: list[str], _depth: int = 0) -> Any:

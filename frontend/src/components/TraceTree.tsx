@@ -13,6 +13,7 @@ function StatusBadge({ status }: { status: string }) {
 
 function TraceRow({ trace, defaultOpen }: { trace: ToolTraceItem; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen || false)
+  const retryable = trace.retryable
 
   return (
     <div style={{ border: `1px solid ${colors.border}`, borderRadius: 8, overflow: 'hidden' }}>
@@ -46,7 +47,7 @@ function TraceRow({ trace, defaultOpen }: { trace: ToolTraceItem; defaultOpen?: 
         )}
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
           <span style={{ ...badge('#eee', '#666'), fontSize: 10 }}>{trace.tool_call_id.slice(0, 8)}</span>
-          {trace.retryable.eligible && (
+          {retryable?.eligible && (
             <button
               style={{
                 padding: '2px 10px',
@@ -58,7 +59,7 @@ function TraceRow({ trace, defaultOpen }: { trace: ToolTraceItem; defaultOpen?: 
                 fontSize: 11,
                 fontWeight: 600,
               }}
-              title={trace.retryable.ineligible_reason || ''}
+              title={retryable.ineligible_reason || ''}
             >
               Retry
             </button>
