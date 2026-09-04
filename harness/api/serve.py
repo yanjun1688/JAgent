@@ -33,10 +33,11 @@ from harness.core.context_manager import ContextManager
 from harness.core.llm_client import MockLLMClient, OpenAILLMClient
 from harness.core.logger import guard_logger
 from harness.core.scheduler import SchedulerConfig
-from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
+from harness.models.tools import SideEffect
 from harness.monitoring import LangfuseTracer
 from harness.monitoring.run_monitor import RunMonitor
 from harness.storage.event_store import EventStore
+from harness.tools.base import BaseTool
 from harness.tools.executor import ToolExecutor
 from harness.tools.registry import ToolRegistry
 
@@ -125,6 +126,27 @@ if env_path.exists():
 
 USE_REAL_LLM = "LLM_API_KEY" in os.environ
 
+
+class _EchoTool(BaseTool):
+    """Mock 模式占位工具 — 经 register_tool 走与 real 工具一致的受信 invoker 路径。
+
+    ADR-010 D-07：工具注册唯一公开入口为 register_tool(BaseTool)。mock 模式不再
+    直调私有 _register 注入裸 callable，避免绕过契约合成与依赖注入（D-03）。
+    """
+
+    name = "echo"
+    description = "Echo back what you send"
+    input_schema = {"type": "object", "properties": {"msg": {"type": "string"}}}
+    output_schema = {"type": "object"}
+    idempotency_key_fields = ["msg"]
+    side_effects = [SideEffect.WRITE]
+    timeout_ms = 5000
+
+    async def run(self, input: dict) -> dict:
+        import time
+
+        return {"echo": input, "ts": time.time()}
+
 # ── 1. 创建基础设施 ─────────────────────────────────────────
 
 store = EventStore(os.environ.get("HARNESS_DB_PATH", ".harness.db"))
@@ -155,22 +177,6 @@ if USE_REAL_LLM:
 else:
     _logger.info("Mock mode: MockLLMClient with echo tool")
 
-    async def echo_tool(input: dict) -> dict:
-        import time
-
-        return {"echo": input, "ts": time.time()}
-
-    echo_def = ToolDefinition(
-        name="echo",
-        description="Echo back what you send",
-        input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
-        output_schema={"type": "object"},
-        idempotency_key_fields=["msg"],
-        side_effects=[SideEffect.WRITE],
-        timeout_ms=5000,
-        retry_policy=RetryPolicy(),
-    )
-
     client = MockLLMClient(
         responses=[
             json.dumps(
@@ -184,13 +190,11 @@ else:
             json.dumps({"steps": []}),
         ]
     )
-    api.tool_defs = [echo_def]
-    api.tool_fns = {"echo": echo_tool}
     api.scheduler_config = SchedulerConfig(max_iterations=150)
 
 # 注册工具到 ToolRegistry（ADR-010 D-07：register_tool 为唯一公开入口）。
-# real 模式 4 个工具全部为 BaseTool，经 register_tool 注册（D-03 依赖注入）；
-# mock 模式 echo 工具经内部原语 _register 装配。
+# real 模式 4 个工具 + mock 模式 echo 均为 BaseTool，统一经 register_tool 注册，
+# 走同一受信 invoker 路径（D-03 依赖注入）；生产代码不再直调私有 _register。
 registry = ToolRegistry()
 if USE_REAL_LLM:
     from harness.tools.browser_tool import BrowserTool
@@ -201,10 +205,7 @@ if USE_REAL_LLM:
     for tool in (FileOpTool(), HttpRequestTool(), BrowserTool(), McpCallTool()):
         registry.register_tool(tool)
 else:
-    for td in api.tool_defs:
-        fn = api.tool_fns.get(td.name)
-        if fn:
-            registry._register(td, fn)
+    registry.register_tool(_EchoTool())
 api.registry = registry
 # ADR-010 §8.1：BaseScheduler 构造签名不变，tool_defs/tool_fns 从 registry 派生。
 api.tool_defs = registry.list_tool_defs()
