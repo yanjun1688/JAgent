@@ -356,7 +356,7 @@ class TestExecutorSemanticEvaluation:
     async def test_file_op_success_false_is_unsuccessful(self, init_store):
         store = init_store
         from harness.tools.executor import ToolExecutor
-        from harness.tools.file_op import FILE_OP_DEF
+        from harness.tools.file_op import FileOpTool
 
         executor = ToolExecutor(store=store)
 
@@ -368,7 +368,7 @@ class TestExecutorSemanticEvaluation:
             run_id=run_id,
             tool_name="file_op",
             input={"operation": "read", "path": "/tmp/nope.txt"},
-            tool_def=FILE_OP_DEF,
+            tool_def=FileOpTool().to_definition(),
             tool_fn=fake_file_op,
         )
 
@@ -386,7 +386,7 @@ class TestExecutorSemanticEvaluation:
     async def test_file_op_success_true_is_success(self, init_store):
         store = init_store
         from harness.tools.executor import ToolExecutor
-        from harness.tools.file_op import FILE_OP_DEF
+        from harness.tools.file_op import FileOpTool
 
         executor = ToolExecutor(store=store)
 
@@ -398,7 +398,7 @@ class TestExecutorSemanticEvaluation:
             run_id=run_id,
             tool_name="file_op",
             input={"operation": "read", "path": "/tmp/f.txt"},
-            tool_def=FILE_OP_DEF,
+            tool_def=FileOpTool().to_definition(),
             tool_fn=fake_file_op,
         )
 

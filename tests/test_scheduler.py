@@ -1409,11 +1409,12 @@ async def test_classify_no_cannot_bypass_tool_layer_for_file_write(store: EventS
     from harness.core.scheduler.plan import PlanningExecutorScheduler
     from harness.core.dag_executor import DagExecutor
     from harness.tools.registry import ToolRegistry
-    from harness.tools.file_op import FILE_OP_DEF
+    from harness.tools.file_op import FileOpTool
 
+    file_op_def = FileOpTool().to_definition()
     executor = ToolExecutor(store)
     registry = ToolRegistry()
-    registry._register(FILE_OP_DEF, lambda i: {"success": False, "path": i.get("path"), "error": "blocked"})
+    registry._register(file_op_def, lambda i: {"success": False, "path": i.get("path"), "error": "blocked"})
 
     # MockLLM 第 1 个响应是 classify=no，验证受信门不会走到这里 / 即使走到也被覆盖
     llm = MockLLMClient(
@@ -1430,7 +1431,7 @@ async def test_classify_no_cannot_bypass_tool_layer_for_file_write(store: EventS
         executor,
         planner,
         dag,
-        [FILE_OP_DEF],
+        [file_op_def],
         {"file_op": lambda i: {"success": False, "path": i.get("path"), "error": "blocked"}},
         config=SchedulerConfig(max_iterations=5),
     )
@@ -1485,7 +1486,7 @@ async def test_cee7d7f6_write_read_weakened_to_list_fails(store: EventStore):
     from harness.core.scheduler.plan import PlanningExecutorScheduler
     from harness.core.dag_executor import DagExecutor
     from harness.tools.registry import ToolRegistry
-    from harness.tools.file_op import FILE_OP_DEF
+    from harness.tools.file_op import FileOpTool
 
     def file_fn(input: dict) -> dict:
         op = input.get("operation")
@@ -1499,7 +1500,7 @@ async def test_cee7d7f6_write_read_weakened_to_list_fails(store: EventStore):
 
     executor = ToolExecutor(store)
     registry = ToolRegistry()
-    registry._register(FILE_OP_DEF, file_fn)
+    registry._register(FileOpTool().to_definition(), file_fn)
 
     # 首轮 root_plan：write+read 且声明 declared_operations → 通过 guardrail。
     # read 失败后 revise 弱化为 list（丢 read）。完成门须拦截。
@@ -1516,7 +1517,7 @@ async def test_cee7d7f6_write_read_weakened_to_list_fails(store: EventStore):
     planner = Planner(llm, registry, store, max_plan_retries=1)
     dag = DagExecutor(executor, store, registry)
     sched = PlanningExecutorScheduler(
-        store, executor, planner, dag, [FILE_OP_DEF], {"file_op": file_fn}, config=SchedulerConfig(max_iterations=6)
+        store, executor, planner, dag,         [FileOpTool().to_definition()], {"file_op": file_fn}, config=SchedulerConfig(max_iterations=6)
     )
     sched.dag = dag
     planner.generate_answer = AsyncMock(return_value="answer")
@@ -1536,7 +1537,7 @@ async def test_cee7d7f6_write_read_satisfied_completes(store: EventStore):
     from harness.core.scheduler.plan import PlanningExecutorScheduler
     from harness.core.dag_executor import DagExecutor
     from harness.tools.registry import ToolRegistry
-    from harness.tools.file_op import FILE_OP_DEF
+    from harness.tools.file_op import FileOpTool
 
     def file_fn(input: dict) -> dict:
         op = input.get("operation")
@@ -1550,7 +1551,7 @@ async def test_cee7d7f6_write_read_satisfied_completes(store: EventStore):
 
     executor = ToolExecutor(store)
     registry = ToolRegistry()
-    registry._register(FILE_OP_DEF, file_fn)
+    registry._register(FileOpTool().to_definition(), file_fn)
 
     llm = MockLLMClient(
         responses=[
@@ -1564,7 +1565,7 @@ async def test_cee7d7f6_write_read_satisfied_completes(store: EventStore):
     planner = Planner(llm, registry, store, max_plan_retries=1)
     dag = DagExecutor(executor, store, registry)
     sched = PlanningExecutorScheduler(
-        store, executor, planner, dag, [FILE_OP_DEF], {"file_op": file_fn}, config=SchedulerConfig(max_iterations=6)
+        store, executor, planner, dag,         [FileOpTool().to_definition()], {"file_op": file_fn}, config=SchedulerConfig(max_iterations=6)
     )
     sched.dag = dag
     planner.generate_answer = AsyncMock(return_value="answer")

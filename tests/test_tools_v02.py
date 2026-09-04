@@ -9,24 +9,16 @@ import pytest
 
 from harness.models.tools import SideEffect, ToolDefinition
 from harness.tools import (
-    FILE_OP_DEF,
     HTTP_REQUEST_DEF,
     ToolRegistry,
-    file_op_fn as _file_op_fn,
     http_request_fn,
-    set_sandbox_root,
 )
+from harness.tools.file_op import FileOpTool
 from harness.tools.skill import Skill
 from harness.tools.executor import ToolExecutor, current_run_id
 from harness.storage.event_store import EventStore
 from harness.models.events import EventType
 from harness.execution.local import LocalDirectoryBackend
-
-_TEST_BACKEND = None
-
-async def file_op_fn(input: dict[str, Any]):
-    """Route direct tests through an explicit sandbox backend."""
-    return await _file_op_fn(input, backend=_TEST_BACKEND)
 
 # ── ToolRegistry ──────────────────────────────────────────────────
 
@@ -408,16 +400,19 @@ class TestHttpRequestConcurrency:
 
 class TestFileOpDefinition:
     def test_definition_fields(self):
-        assert FILE_OP_DEF.name == "file_op"
-        assert FILE_OP_DEF.idempotency_key_fields == ["operation", "path", "content"]
-        assert SideEffect.WRITE in FILE_OP_DEF.side_effects
-        assert SideEffect.DELETE in FILE_OP_DEF.side_effects
+        td = FileOpTool().to_definition()
+        assert td.name == "file_op"
+        assert td.idempotency_key_fields == ["operation", "path", "content"]
+        assert SideEffect.WRITE in td.side_effects
+        assert SideEffect.DELETE in td.side_effects
 
     def test_schema_requires_operation_path(self):
-        assert FILE_OP_DEF.input_schema["required"] == ["operation", "path"]
+        td = FileOpTool().to_definition()
+        assert td.input_schema["required"] == ["operation", "path"]
 
     def test_schema_enumerates_operations(self):
-        enum = FILE_OP_DEF.input_schema["properties"]["operation"]["enum"]
+        td = FileOpTool().to_definition()
+        enum = td.input_schema["properties"]["operation"]["enum"]
         assert "read" in enum
         assert "write" in enum
         assert "append" in enum
@@ -428,58 +423,58 @@ class TestFileOpDefinition:
 class TestFileOpIntegration:
     @pytest.fixture(autouse=True)
     def _sandbox(self):
-        global _TEST_BACKEND
         with tempfile.TemporaryDirectory() as tmp:
-            set_sandbox_root(tmp)
-            _TEST_BACKEND = LocalDirectoryBackend(tmp)
+            self.backend = LocalDirectoryBackend(tmp)
             yield tmp
-        _TEST_BACKEND = None
+
+    async def _file_op(self, input: dict[str, Any]) -> dict[str, Any]:
+        tool = FileOpTool()
+        return await tool.invoke(input, backend=self.backend)
 
     async def test_write_and_read(self):
-        result = await file_op_fn({"operation": "write", "path": "hello.txt", "content": "world"})
+        result = await self._file_op({"operation": "write", "path": "hello.txt", "content": "world"})
         assert result["success"] is True
 
-        result = await file_op_fn({"operation": "read", "path": "hello.txt"})
+        result = await self._file_op({"operation": "read", "path": "hello.txt"})
         assert result["success"] is True
         assert result["content"] == "world"
 
     async def test_direct_file_op_requires_backend(self):
-        from harness.tools.file_op import file_op_fn as trusted_file_op_fn
-
+        tool = FileOpTool()
         with pytest.raises(RuntimeError, match="Execution backend is required"):
-            await trusted_file_op_fn({"operation": "write", "path": "unsafe.txt", "content": "x"})
+            await tool.run({"operation": "write", "path": "unsafe.txt", "content": "x"})
 
     async def test_append(self):
-        await file_op_fn({"operation": "write", "path": "log.txt", "content": "line1\n"})
-        await file_op_fn({"operation": "append", "path": "log.txt", "content": "line2\n"})
-        result = await file_op_fn({"operation": "read", "path": "log.txt"})
+        await self._file_op({"operation": "write", "path": "log.txt", "content": "line1\n"})
+        await self._file_op({"operation": "append", "path": "log.txt", "content": "line2\n"})
+        result = await self._file_op({"operation": "read", "path": "log.txt"})
         assert result["content"] == "line1\nline2\n"
 
     async def test_delete(self):
-        await file_op_fn({"operation": "write", "path": "todelete.txt", "content": "bye"})
-        result = await file_op_fn({"operation": "delete", "path": "todelete.txt"})
+        await self._file_op({"operation": "write", "path": "todelete.txt", "content": "bye"})
+        result = await self._file_op({"operation": "delete", "path": "todelete.txt"})
         assert result["success"] is True
-        result = await file_op_fn({"operation": "read", "path": "todelete.txt"})
+        result = await self._file_op({"operation": "read", "path": "todelete.txt"})
         assert result["success"] is False
 
     async def test_list_directory(self):
-        await file_op_fn({"operation": "write", "path": "a.txt", "content": ""})
-        await file_op_fn({"operation": "write", "path": "b.txt", "content": ""})
-        result = await file_op_fn({"operation": "list", "path": "."})
+        await self._file_op({"operation": "write", "path": "a.txt", "content": ""})
+        await self._file_op({"operation": "write", "path": "b.txt", "content": ""})
+        result = await self._file_op({"operation": "list", "path": "."})
         assert result["success"] is True
         assert "a.txt" in result["content"]
         assert "b.txt" in result["content"]
 
     async def test_outside_sandbox_blocked(self):
         with pytest.raises(PermissionError):
-            await file_op_fn({"operation": "read", "path": "../outside.txt"})
+            await self._file_op({"operation": "read", "path": "../outside.txt"})
 
     async def test_list_non_existent(self):
-        result = await file_op_fn({"operation": "list", "path": "nonexistent"})
+        result = await self._file_op({"operation": "list", "path": "nonexistent"})
         assert result["success"] is False
 
     async def test_delete_non_existent(self):
-        result = await file_op_fn({"operation": "delete", "path": "ghost.txt"})
+        result = await self._file_op({"operation": "delete", "path": "ghost.txt"})
         assert result["success"] is False
 
 
@@ -488,33 +483,34 @@ class TestToolResultEnrichmentBug6:
 
     @pytest.fixture(autouse=True)
     def _sandbox(self):
-        global _TEST_BACKEND
         with tempfile.TemporaryDirectory() as tmp:
-            set_sandbox_root(tmp)
-            _TEST_BACKEND = LocalDirectoryBackend(tmp)
+            self.backend = LocalDirectoryBackend(tmp)
             yield tmp
-        _TEST_BACKEND = None
+
+    async def _file_op(self, input: dict[str, Any]) -> dict[str, Any]:
+        tool = FileOpTool()
+        return await tool.invoke(input, backend=self.backend)
 
     async def test_file_op_write_includes_path(self):
-        result = await file_op_fn({"operation": "write", "path": "output.txt", "content": "hello"})
+        result = await self._file_op({"operation": "write", "path": "output.txt", "content": "hello"})
         assert result["success"] is True
         assert result["path"] == "output.txt", f"write should include path, got: {result}"
 
     async def test_file_op_read_includes_path(self):
-        await file_op_fn({"operation": "write", "path": "data.txt", "content": "test"})
-        result = await file_op_fn({"operation": "read", "path": "data.txt"})
+        await self._file_op({"operation": "write", "path": "data.txt", "content": "test"})
+        result = await self._file_op({"operation": "read", "path": "data.txt"})
         assert result["success"] is True
         assert result["path"] == "data.txt", f"read should include path, got: {result}"
         assert result["content"] == "test"
 
     async def test_file_op_delete_includes_path(self):
-        await file_op_fn({"operation": "write", "path": "tmp.txt", "content": ""})
-        result = await file_op_fn({"operation": "delete", "path": "tmp.txt"})
+        await self._file_op({"operation": "write", "path": "tmp.txt", "content": ""})
+        result = await self._file_op({"operation": "delete", "path": "tmp.txt"})
         assert result["success"] is True
         assert result["path"] == "tmp.txt", f"delete should include path, got: {result}"
 
     async def test_file_op_error_includes_path(self):
-        result = await file_op_fn({"operation": "read", "path": "missing.txt"})
+        result = await self._file_op({"operation": "read", "path": "missing.txt"})
         assert result["success"] is False
         assert result["path"] == "missing.txt", f"error response should include path, got: {result}"
 
@@ -536,9 +532,8 @@ class TestToolResultEnrichmentBug6:
 
     def test_file_op_schema_includes_path(self):
         """File op output_schema should include path."""
-        from harness.tools.file_op import FILE_OP_DEF
-
-        props = FILE_OP_DEF.output_schema.get("properties", {})
+        td = FileOpTool().to_definition()
+        props = td.output_schema.get("properties", {})
         assert "path" in props, f"output_schema should include path, got: {list(props.keys())}"
 
 
@@ -734,8 +729,10 @@ class TestToolRegistryWithBuiltinDefs:
 
     def test_register_file_op(self):
         registry = ToolRegistry()
-        registry._register(FILE_OP_DEF, file_op_fn)
-        assert registry.get_tool_def("file_op") is FILE_OP_DEF
+        tool = FileOpTool()
+        registry.register_tool(tool)
+        assert registry.get_tool_def("file_op") == tool.to_definition()
+        assert registry.get_tool_fn("file_op") is not None
 
     def test_build_llm_schemas_multiple(self):
         registry = ToolRegistry()
@@ -754,13 +751,10 @@ class TestToolRegistryWithBuiltinDefs:
 
     def test_sandbox_violation_path_traversal(self):
         with tempfile.TemporaryDirectory() as tmp:
-            set_sandbox_root(tmp)
+            backend = LocalDirectoryBackend(tmp)
+            tool = FileOpTool()
+            tool.backend = backend
             with pytest.raises(PermissionError, match="outside the sandbox"):
                 import asyncio
 
-                asyncio.run(
-                    _file_op_fn(
-                        {"operation": "read", "path": "..\\..\\secret.txt"},
-                        backend=LocalDirectoryBackend(tmp),
-                    )
-                )
+                asyncio.run(tool.run({"operation": "read", "path": "..\\..\\secret.txt"}))

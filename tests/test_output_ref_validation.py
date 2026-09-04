@@ -11,7 +11,7 @@ import pytest
 from harness.core.planner import PlanGuardrail, parse_output_refs
 from harness.models.plan import DagPlan, DagStep
 from harness.models.tools import ToolDefinition
-from harness.tools.file_op import FILE_OP_DEF
+from harness.tools.file_op import FileOpTool
 from harness.tools.registry import ToolRegistry
 
 
@@ -29,7 +29,7 @@ def _echo_def() -> ToolDefinition:
 def registry():
     r = ToolRegistry()
     r._register(_echo_def(), lambda x: {"echo": x.get("msg", "")})
-    r._register(FILE_OP_DEF, lambda x: {"success": True})
+    r._register(FileOpTool().to_definition(), lambda x: {"success": True})
     return r
 
 
@@ -107,7 +107,7 @@ def test_additional_properties_lenient(registry):
     )
     r = ToolRegistry()
     r._register(td, lambda x: {"any": 1})
-    r._register(FILE_OP_DEF, lambda x: {"success": True})
+    r._register(FileOpTool().to_definition(), lambda x: {"success": True})
     plan = _plan(
         DagStep(id="s1", tool="flex", input={"msg": "hello"}),
         DagStep(id="s2", tool="flex", input={"msg": "$s1.anything"}, depends_on=["s1"]),

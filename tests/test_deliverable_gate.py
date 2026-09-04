@@ -249,10 +249,11 @@ async def test_e2e_planner_dropping_write_never_claims_deliverable(store):
     from harness.core.planner import Planner
     from harness.core.scheduler.base import SchedulerConfig
     from harness.models.intent import DeliveryContract, DeliverySource
-    from harness.tools.file_op import FILE_OP_DEF
+    from harness.tools.file_op import FileOpTool
 
     registry = ToolRegistry()
-    registry._register(FILE_OP_DEF, lambda x: {"success": True, "path": x.get("path", "")})
+    file_op_def = FileOpTool().to_definition()
+    registry._register(file_op_def, lambda x: {"success": True, "path": x.get("path", "")})
     planner = Planner(MockLLMClient(responses=[]), registry, store, max_plan_retries=1)
     executor = ToolExecutor(store)
     dag = DagExecutor(executor, store, registry)

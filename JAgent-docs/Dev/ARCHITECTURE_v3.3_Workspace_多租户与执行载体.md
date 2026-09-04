@@ -660,7 +660,7 @@ class CreateRunRequest(BaseModel):   # 扩展
 2. Header 租户注入不提供身份认证，仅适用于可信 Demo 部署；JWT 后续替换 middleware
 3. `run_command` 接口预留但 directory 载体默认不启用 —— 沙箱/远端载体启用时显式声明命令白名单
 4. tenant 管理端点仅占位，无真实 JWT —— 接入时替换 middleware 内部实现
-5. 生产执行不再使用旧 `_SANDBOX_BASE`；为保持既有单元测试和脚本可运行，`file_op` 仍保留仅供直接测试调用的 deprecated fallback，Scheduler/API 不使用该入口；旧 `.db` 删除重建
+5. 生产执行不再使用旧 `_SANDBOX_BASE`；遗留的模块级全局 `_SANDBOX_BASE`、`set_sandbox_root`、`reset_sandbox_root`、`_resolve_path`、`FILE_OP_DEF`、`file_op_fn` 及 `allow_legacy_fallback` 后门均已删除（方案 A 根治），文件访问统一经受信 ExecutionBackend 注入，测试改用 `FileOpTool().to_definition()` 契约 + `LocalDirectoryBackend` 后端；旧 `.db` 删除重建
 6. Monitor 由基础 EventStore 接收广播，但读取和反馈写入按当前 task 的 tenant 动态包装 ScopedEventStore；脱离请求上下文的 worker 必须显式携带 tenant_id
 7. Workspace DELETE 采用软删除，不递归删除本地目录、Docker mount 或 SSH 远端路径；载体数据清理由独立、显式授权的生命周期操作负责
 8. WebSocket 连接必须先通过当前 tenant 的 ScopedEventStore 验证 run_id，未知或跨租户 Run 拒绝订阅

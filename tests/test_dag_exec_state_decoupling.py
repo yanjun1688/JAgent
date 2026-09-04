@@ -31,18 +31,11 @@ from harness.core.scheduler.plan import PlanningExecutorScheduler
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ExecutionStatus, ToolExecutor
 from harness.tools.base import make_invoker
-from harness.tools.file_op import FileOpTool, reset_sandbox_root, set_sandbox_root
+from harness.tools.file_op import FileOpTool
 from harness.execution.local import LocalDirectoryBackend
 from harness.tools.registry import ToolRegistry
 
 ROOT = Path(__file__).resolve().parent.parent
-
-
-@pytest.fixture(autouse=True)
-def _sandbox_isolation():
-    """Isolate the module-global sandbox root (mirrors test_dag_self_heal)."""
-    yield
-    reset_sandbox_root()
 
 
 # ── 1. should_not_rerun is a pure ExecState function (constraint 4) ─────────
@@ -137,7 +130,6 @@ async def test_unsuccessful_result_is_not_idempotency_cached():
     store = EventStore(":memory:")
     await store.initialize()
     try:
-        set_sandbox_root(str(ROOT))
         ex = ToolExecutor(store)
         backend = LocalDirectoryBackend(str(ROOT))
         step_input = {"operation": "read", "path": "nonexistent_file.xyz"}
@@ -170,7 +162,6 @@ async def _count_step_starts(store: EventStore, run_id: str) -> Counter:
 async def _build_engine():
     store = EventStore(":memory:")
     await store.initialize()
-    set_sandbox_root(str(ROOT))
     ex = ToolExecutor(store)
     backend = LocalDirectoryBackend(str(ROOT))
     reg = ToolRegistry()

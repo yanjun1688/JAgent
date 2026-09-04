@@ -23,21 +23,10 @@ from harness.core.scheduler.base import SchedulerConfig
 from harness.core.scheduler.plan import PlanningExecutorScheduler
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ToolExecutor
-from harness.tools.file_op import FileOpTool, reset_sandbox_root, set_sandbox_root
+from harness.tools.file_op import FileOpTool
 from harness.tools.registry import ToolRegistry
 
 ROOT = Path(__file__).resolve().parent.parent
-
-
-@pytest.fixture(autouse=True)
-def _sandbox_isolation():
-    """Isolate the module-global sandbox root.
-
-    The self-heal path sets a sandbox root; restore the default afterwards so
-    other tests (which rely on cwd-based resolution) are not polluted.
-    """
-    yield
-    reset_sandbox_root()
 
 
 def _build_engine():
@@ -64,7 +53,6 @@ async def test_self_heal_does_not_re_execute_completed_step():
     store = EventStore(":memory:")
     await store.initialize()
     try:
-        set_sandbox_root(str(ROOT))
         ex = ToolExecutor(store)
         backend = LocalDirectoryBackend(str(ROOT))
         reg = ToolRegistry()
@@ -141,7 +129,6 @@ async def test_unsuccessful_self_heal_reruns_only_failed_step():
     store = EventStore(":memory:")
     await store.initialize()
     try:
-        set_sandbox_root(str(ROOT))
         ex = ToolExecutor(store)
         backend = LocalDirectoryBackend(str(ROOT))
         reg = ToolRegistry()
