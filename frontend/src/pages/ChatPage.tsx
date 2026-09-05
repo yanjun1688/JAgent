@@ -3,9 +3,11 @@ import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'motion/react'
 import { Sparkles } from 'lucide-react'
 import {
+  ConversationApiError,
   createConversation,
   createClientRequestId,
   getConversation,
+  isRetryableConversationError,
   persistCurrentConversationId,
   restoreCurrentConversationId,
   sendMessage,
@@ -208,6 +210,23 @@ export default function ChatPage() {
     }
   }, [])
 
+  // 自愈：持久化的会话 id 在后端已不存在（DB 重置 / 会话被删除归档 / 跨租户）。
+  // 清掉陈旧引用与 localStorage，回到"新会话"态，避免后续发消息持续 404。
+  const resetStaleConversation = useCallback(() => {
+    activeConvRef.current = null
+    setActiveConvId(null)
+    setActiveConversation(null)
+    persistCurrentConversationId(null)
+    setConversationTitle('新对话')
+    setMessages([])
+    setActiveRunId(null)
+    setActiveRunStatus('')
+    setTimelineEvents([])
+    setIsExecuting(false)
+    setQueue([])
+    setError(null)
+  }, [setActiveConversation])
+
   const loadConversation = useCallback(async (convId: string) => {
     activeConvRef.current = convId
     setActiveConvId(convId)
@@ -238,11 +257,16 @@ export default function ChatPage() {
       const lastUser = [...msgs].reverse().find((m) => m.role === 'user')
       if (lastUser) void resumeActiveRun(lastUser.run_id, convId)
     } catch (err) {
+      // 404 = 会话已不存在：陈旧的 localStorage 引用，自愈到新会话而非报错卡死。
+      if (err instanceof ConversationApiError && err.status === 404) {
+        if (activeConvRef.current === convId) resetStaleConversation()
+        return
+      }
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
     }
-  }, [setActiveConversation, resumeActiveRun])
+  }, [setActiveConversation, resumeActiveRun, resetStaleConversation])
 
   // 初始化加载持久化的对话
   useEffect(() => {
@@ -344,6 +368,8 @@ export default function ChatPage() {
           break
         } catch (err) {
           lastErr = err
+          // 确定性错误（404 会话不存在 / 4xx）重试结果不变，立即停止，避免刷重复 404。
+          if (!isRetryableConversationError(err)) break
         }
       }
       if (runId === null) throw lastErr ?? new Error('Failed to send message')
@@ -375,8 +401,15 @@ export default function ChatPage() {
         else if (last.event_type === 'RunFailed') setActiveRunStatus('failed')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      setIsExecuting(false)
+      // 404 = 当前会话在后端已不存在（DB 重置 / 被删除）。自愈到新会话，
+      // 并提示用户重发——不保留会持续 404 的陈旧引用。
+      if (err instanceof ConversationApiError && err.status === 404) {
+        if (activeConvRef.current === convId) resetStaleConversation()
+        setError('该对话已不存在（可能后端数据已重置），已为你切换到新对话，请重新发送。')
+      } else {
+        setError(err instanceof Error ? err.message : String(err))
+        setIsExecuting(false)
+      }
     } finally {
       setLoading(false)
     }

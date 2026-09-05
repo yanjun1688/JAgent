@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from typing import Any
 
@@ -21,6 +22,9 @@ def _subprocess_supported() -> bool:
     Windows 的 SelectorEventLoop 不支持 asyncio 子进程（playwright 内部会抛
     NotImplementedError）。ProactorEventLoop 支持。serve.py 已在启动时切换到
     Proactor 策略；这里作为兜底给出明确错误而非深埋在 playwright 内部。
+
+    注：即使是 launch_persistent_context 驱动本机 Chrome，playwright 仍需通过
+    子进程启动其 Node driver 进程，所以这个检测依然适用。
     """
     if sys.platform != "win32":
         return True
@@ -30,9 +34,26 @@ def _subprocess_supported() -> bool:
     except RuntimeError:
         return True
 
+
+# 不再需要手动配置/开放调试端口。Playwright 的 launch_persistent_context +
+# channel="chrome" 会自己找到本机安装的真实 Chrome、自己管理内部通信端口，
+# 对我们完全透明，Windows / macOS / Linux 通用。
+#
+# 用一个独立的 user-data-dir（而不是用户平时的 Chrome profile），这样：
+#   1. 不会和用户平时已经打开的 Chrome 窗口抢用户数据目录导致启动失败；
+#   2. 每次运行都是相对独立、干净的浏览会话（登录态等会持久化在这个目录里，
+#      同一台机器多次运行可以复用）。
+CHROME_USER_DATA_DIR = os.environ.get(
+    "BROWSER_CHROME_PROFILE_DIR",
+    os.path.join(os.path.expanduser("~"), ".agent-chrome-profile"),
+)
+# 默认可见启动（headless=False），方便用户直接看到 Chrome 在做什么。
+# 无图形界面的 Linux 服务器上可设置 BROWSER_CHROME_HEADLESS=1 切到无头模式。
+CHROME_HEADLESS = os.environ.get("BROWSER_CHROME_HEADLESS", "0").strip().lower() in ("1", "true", "yes")
+
 BROWSER_DEF = ToolDefinition(
     name="browser",
-    description="Control a web browser: navigate, click, type, extract text, or take screenshots.",
+    description="Control a local Chrome browser: navigate, click, type, extract text, or take screenshots.",
     input_schema={
         "type": "object",
         "properties": {
@@ -153,6 +174,7 @@ class BrowserManager:
     _instance: BrowserManager | None = None
 
     def __init__(self) -> None:
+        self._playwright: Any = None
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
@@ -176,13 +198,38 @@ class BrowserManager:
 
         from playwright.async_api import async_playwright
 
-        p = await async_playwright().start()
+        os.makedirs(CHROME_USER_DATA_DIR, exist_ok=True)
+
+        self._playwright = await async_playwright().start()
         try:
-            self._browser = await asyncio.wait_for(p.chromium.launch(headless=True), timeout=15.0)
+            # channel="chrome" 让 Playwright 直接驱动本机安装的正式版 Chrome
+            # （而不是它自带的 headless Chromium），launch_persistent_context
+            # 内部自己处理调试端口，不需要我们手动配置/暴露任何端口。
+            self._context = await asyncio.wait_for(
+                self._playwright.chromium.launch_persistent_context(
+                    CHROME_USER_DATA_DIR,
+                    channel="chrome",
+                    headless=CHROME_HEADLESS,
+                    no_viewport=True,
+                ),
+                timeout=30.0,
+            )
         except (asyncio.TimeoutError, NotImplementedError, Exception) as e:
-            raise RuntimeError(f"Playwright init failed: {type(e).__name__}: {e}")
-        self._context = await self._browser.new_context()
-        self._page = await self._context.new_page()
+            raise RuntimeError(
+                f"启动本地 Chrome 失败：{type(e).__name__}: {e}。请确认本机已安装 Chrome"
+                "（若尚未安装 Playwright 关联的 Chrome，可运行一次 `playwright install chrome`）；"
+                "若在没有图形界面的 Linux 服务器上运行，请设置环境变量 BROWSER_CHROME_HEADLESS=1。"
+            )
+
+        # persistent context 场景下没有独立的 Browser 对象，统一置空，
+        # 便于 close() 判断走哪条清理路径。
+        self._browser = None
+
+        if self._context.pages:
+            self._page = self._context.pages[0]
+        else:
+            self._page = await self._context.new_page()
+
         return self._page
 
     async def navigate(self, url: str, timeout_ms: int = 30000) -> str:
@@ -213,11 +260,20 @@ class BrowserManager:
         return base64.b64encode(bytes_data).decode("ascii")
 
     async def close(self) -> None:
-        if self._browser:
+        # launch_persistent_context 场景下，这个 Chrome 实例是我们自己拉起的
+        # 独立进程（用独立 profile），关闭 context 即关闭这个 Chrome 窗口，
+        # 不会影响用户平时自己打开的 Chrome。
+        if self._context:
             try:
-                await self._browser.close()
+                await self._context.close()
             except Exception:
                 pass
+        if self._playwright:
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
+        self._playwright = None
         self._browser = None
         self._context = None
         self._page = None
@@ -305,10 +361,11 @@ class BrowserTool(BaseTool):
     """browser 声明式实现（ADR-010 D-01/D-08）— 取代 BROWSER_DEF + fn。
 
     业务执行复用 ``browser_fn``；BrowserManager 生命周期收敛到 ``close()``（D-08）。
+    现通过 launch_persistent_context 直接驱动本机安装的 Chrome，无需任何端口配置。
     """
 
     name = "browser"
-    description = "Control a web browser: navigate, click, type, extract text, or take screenshots."
+    description = "Control a local Chrome browser: navigate, click, type, extract text, or take screenshots."
     input_schema = {
         "type": "object",
         "properties": {

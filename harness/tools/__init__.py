@@ -1,7 +1,7 @@
 from harness.tools.base import BaseTool, current_backend, make_invoker, operation
 from harness.tools.browser_tool import BROWSER_DEF, BrowserManager, BrowserTool, browser_fn
 from harness.tools.executor import ExecutionStatus, ToolExecutionResult, ToolExecutor
-from harness.tools.file_op import FILE_OP_DEF, FileOpTool, file_op_fn, set_sandbox_root
+from harness.tools.file_op import FileOpTool
 from harness.tools.guardrails import (
     DependencyGuardrail,
     DestructiveOpGuardrail,
@@ -64,9 +64,6 @@ __all__ = [
     "HTTP_REQUEST_DEF",
     "http_request_fn",
     "close_client",
-    "FILE_OP_DEF",
-    "file_op_fn",
-    "set_sandbox_root",
     "FileOpTool",
     "HttpRequestTool",
     "BrowserTool",

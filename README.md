@@ -3,7 +3,8 @@
 **Agent-First 任务执行引擎** — Agent 拥有决策权，系统拥有强制权。
 
 > 当前版本：**v3.3**（Workspace 多租户 + S1 完成语义链 + 质量门禁）
-> 架构文档见 `JAgent-docs/Dev/ARCHITECTURE_v3.3_Workspace_多租户与执行载体.md`
+> 文档总入口：[`JAgent-docs/README.md`](JAgent-docs/README.md)（进度看板 + 全站导航）
+> 架构文档见 `JAgent-docs/architecture/ARCHITECTURE_v3.3_Workspace_多租户与执行载体.md`
 
 ## 核心范式
 
@@ -240,7 +241,10 @@ cd frontend && npm install
 # 终端 1: 启动后端（Real LLM 模式需配置 .env 的 LLM_API_KEY；否则 Mock 模式）
 python -m harness.api.serve
 #   或: uvicorn harness.api.serve:app --host 0.0.0.0 --port 8000
-#   Windows 上建议加 --loop harness.api.loop:event_loop_factory（Proactor，修复 Docker 子进程）
+#   Windows 必须加 --loop harness.api.loop:event_loop_factory（Proactor，修复
+#   playwright/Docker 子进程）。reload/workers 模式下 loop=auto 会退回
+#   SelectorEventLoop → create_subprocess_exec 抛 NotImplementedError；
+#   `python -m harness.api.serve` 已内置该 factory，无需再加。
 
 # 终端 2: 启动前端
 cd frontend && npm run dev   # http://localhost:5173

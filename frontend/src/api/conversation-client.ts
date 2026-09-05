@@ -16,25 +16,63 @@ export type {
   SendMessageResponse,
 } from './schema'
 
+// Structured API error carrying the HTTP status so callers can distinguish a
+// deterministic client error (e.g. 404 conversation gone) from a transient
+// failure (network / 5xx). Mirrors AnalysisApiError / ReplayApiError.
+export class ConversationApiError extends Error {
+  status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+    this.name = 'ConversationApiError'
+  }
+}
+
+async function checkResponse(res: Response): Promise<void> {
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const body = await res.json()
+      const raw = body.detail ?? body.error ?? body.message ?? body
+      detail = typeof raw === 'string' ? raw : JSON.stringify(raw)
+    } catch {
+      /* use statusText */
+    }
+    throw new ConversationApiError(res.status, detail)
+  }
+}
+
+// Only transient failures justify an idempotent retry. Deterministic 4xx
+// (404 conversation deleted/reset, 400/422 bad request, 401/403) will fail
+// the same way on every attempt, so retrying just hammers the API and spams
+// the log with duplicate 404s (root cause of the repeated POST .../messages 404).
+export function isRetryableConversationError(err: unknown): boolean {
+  if (err instanceof ConversationApiError) {
+    return err.status >= 500
+  }
+  // Network errors (fetch rejected with TypeError) are transient.
+  return true
+}
+
 export async function createConversation(title?: string): Promise<{ conversation_id: string; title: string; created_at: number }> {
   const res = await fetch(`${BASE}/conversations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title }),
   })
-  if (!res.ok) throw new Error(`Failed to create conversation: ${res.statusText}`)
+  await checkResponse(res)
   return res.json()
 }
 
 export async function listConversations(): Promise<ConversationListResponse> {
   const res = await fetch(`${BASE}/conversations`)
-  if (!res.ok) throw new Error(`Failed to list conversations: ${res.statusText}`)
+  await checkResponse(res)
   return res.json()
 }
 
 export async function getConversation(id: string): Promise<ConversationDetail> {
   const res = await fetch(`${BASE}/conversations/${id}`)
-  if (!res.ok) throw new Error(`Failed to get conversation: ${res.statusText}`)
+  await checkResponse(res)
   return res.json()
 }
 
@@ -52,7 +90,7 @@ export async function sendMessage(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  if (!res.ok) throw new Error(`Failed to send message: ${res.statusText}`)
+  await checkResponse(res)
   return res.json()
 }
 
@@ -70,7 +108,7 @@ export function createClientRequestId(): string {
 
 export async function deleteConversation(id: string): Promise<{ success: boolean }> {
   const res = await fetch(`${BASE}/conversations/${id}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`Failed to delete conversation: ${res.statusText}`)
+  await checkResponse(res)
   return res.json()
 }
 
@@ -83,7 +121,7 @@ export async function updateConversation(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!res.ok) throw new Error(`Failed to update conversation: ${res.statusText}`)
+  await checkResponse(res)
   return res.json()
 }
 

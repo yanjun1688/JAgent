@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from harness.models.tools import OperationContract, SideEffect, ToolDefinition, resolve_operation_contract
 from harness.tools.browser_tool import BROWSER_DEF
-from harness.tools.file_op import FILE_OP_DEF
+from harness.tools.file_op import FileOpTool
 from harness.tools.http_request import HTTP_REQUEST_DEF
 from harness.tools.mcp_call import MCP_CALL_DEF
+
+FILE_OP_DEF = FileOpTool().to_definition()
 
 
 # ── 解析函数 ─────────────────────────────────────────────────────

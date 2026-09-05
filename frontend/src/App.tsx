@@ -10,6 +10,7 @@ const ChatPage = lazy(() => import('./pages/ChatPage'))
 const OverviewPage = lazy(() => import('./pages/OverviewPage'))
 const HistoryPage = lazy(() => import('./pages/HistoryPage'))
 const WorkspacePage = lazy(() => import('./pages/WorkspacePage'))
+const ReplayPage = lazy(() => import('./pages/ReplayPage'))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -38,6 +39,8 @@ function App() {
               <Route path="/" element={<ChatPage />} />
               <Route path="/overview" element={<OverviewPage />} />
               <Route path="/history" element={<HistoryPage />} />
+              <Route path="/replay" element={<ReplayPage />} />
+              <Route path="/replay/:runId" element={<ReplayPage />} />
               <Route path="/workspaces" element={<WorkspacePage />} />
 
               {/* 旧路由重定向 → 3 页面 */}

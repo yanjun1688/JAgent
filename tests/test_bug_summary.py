@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 
-BUG_DIR = Path(__file__).parents[1] / "JAgent-docs" / "Bug"
+BUG_DIR = Path(__file__).parents[1] / "JAgent-docs" / "bugs"
 SUMMARY = BUG_DIR / "JAGENT-Bug-Summary.md"
 BUG_FILE_PATTERN = re.compile(r"^JAGENT-\d{4}-P[01]-\d{2}_.+\.md$")
 LINK_PATTERN = re.compile(r"\]\(\./([^\)]+\.md)\)")

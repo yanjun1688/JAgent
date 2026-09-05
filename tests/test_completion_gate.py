@@ -394,11 +394,11 @@ async def test_plan_guardrail_rejects_plan_missing_declared_op(store):
     """PlanGuardrail（受信）拒绝缺 declared op 匹配 step 的计划（结构自洽检查）→ Planner 重试。"""
     from harness.core.planner import PlanGuardrail
     from harness.models.plan import DagPlan, DagStep, RequiredOperation
-    from harness.tools.file_op import FILE_OP_DEF
+    from harness.tools.file_op import FileOpTool
     from harness.tools.registry import ToolRegistry
 
     registry = ToolRegistry()
-    registry._register(FILE_OP_DEF, lambda i: {})
+    registry._register(FileOpTool().to_definition(), lambda i: {})
     guardrail = PlanGuardrail(registry)
 
     plan = DagPlan(
@@ -415,11 +415,11 @@ async def test_plan_guardrail_accepts_plan_with_declared_op(store):
     """PlanGuardrail 通过含 declared op 且自洽的计划。"""
     from harness.core.planner import PlanGuardrail
     from harness.models.plan import DagPlan, DagStep, RequiredOperation
-    from harness.tools.file_op import FILE_OP_DEF
+    from harness.tools.file_op import FileOpTool
     from harness.tools.registry import ToolRegistry
 
     registry = ToolRegistry()
-    registry._register(FILE_OP_DEF, lambda i: {})
+    registry._register(FileOpTool().to_definition(), lambda i: {})
     guardrail = PlanGuardrail(registry)
 
     plan = DagPlan(
