@@ -3,7 +3,7 @@
 > 日期：2026-08-13
 > 范围：审查反馈后的 P0/P1/H/M/P2-1 修复 + ADR-009 Q-01~Q-06 落地
 > 说明：`DeliveryContract.after` 已按 ADR-009 Q-05 删除，时序归 `DagStep.depends_on`（Q-03）。
-> 历史评审 `JAgent-docs/Reviews/completion_alignment_followup_20260813.md` 记录的 L-01 已由 Q-03/Q-05 替代关闭。
+> 历史评审 `JAgent-docs/reviews/completion_alignment_followup_20260813.md` 记录的 L-01 已由 Q-03/Q-05 替代关闭。
 
 ## 结论
 
@@ -55,7 +55,7 @@ caller 契约在 `RunStarted` 中写入。无 caller 契约时，先写空 contr
 
 ## 架构收敛（ADR-009）
 
-质量门禁与执行依赖分离设计已固化于 `JAgent-docs/Prd/ADR-009_质量门禁与执行依赖分离设计.md`：
+质量门禁与执行依赖分离设计已固化于 `JAgent-docs/architecture/ADR-009_质量门禁与执行依赖分离设计.md`：
 
 - Q-01 DeliveryContract = 用户要求 + 最终验收（已确认）
 - Q-02 `required_operations` → `declared_operations`（LLM 自检，已实施）
@@ -84,7 +84,7 @@ python -m pytest -q -p no:cacheprovider
 
 > 会话：quality_gate_dependency_split（独立任务会话）
 > 日期：2026-08-13
-> 依据：`JAgent-docs/Handover/quality_gate_dependency_split_handover_20260813.md`；上游 Q-07/Q-08 已实现内容未改动。
+> 依据：`JAgent-docs/handovers/quality_gate_dependency_split_handover_20260813.md`；上游 Q-07/Q-08 已实现内容未改动。
 
 ### 本任务改动清单
 

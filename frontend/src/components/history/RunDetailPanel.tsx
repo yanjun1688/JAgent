@@ -1,4 +1,5 @@
 import { motion } from 'motion/react'
+import { Link } from 'react-router-dom'
 import {
   X,
   Clock,
@@ -8,6 +9,7 @@ import {
   ShieldAlert,
   ChevronDown,
   ChevronRight,
+  FlaskConical,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '../../design-system/utils/cn'
@@ -146,9 +148,16 @@ export function RunDetailPanel({ runId, onClose }: RunDetailPanelProps) {
           <p className="truncate text-[10px] text-text-muted">Run 详情</p>
         </div>
         <StatusBadge status={status} className="ml-2" />
+        <Link
+          to={`/replay/${encodeURIComponent(runId)}`}
+          className="ml-auto flex items-center gap-1 rounded-lg bg-accent-primary/20 px-2.5 py-1 text-xs text-accent-primary hover:bg-accent-primary/30"
+          title="在时间旅行调试器中打开"
+        >
+          <FlaskConical size={13} /> 调试
+        </Link>
         <button
           onClick={onClose}
-          className="ml-auto flex h-7 w-7 items-center justify-center rounded-lg text-text-muted hover:bg-surface-1 hover:text-text-primary"
+          className="flex h-7 w-7 items-center justify-center rounded-lg text-text-muted hover:bg-surface-1 hover:text-text-primary"
           title="关闭"
         >
           <X size={15} />

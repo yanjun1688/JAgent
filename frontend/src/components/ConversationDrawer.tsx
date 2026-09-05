@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { colors } from '../api/analysis-styles'
 import { getRunTimeline } from '../api/analysis-client'
 import { confirmAction, pauseRun, resumeRun } from '../api/client'
 import {
+  ConversationApiError,
   createClientRequestId,
   getConversation,
   sendMessage,
   createConversation,
+  isRetryableConversationError,
   persistCurrentConversationId,
 } from '../api/conversation-client'
 import type { ConversationMessageItem } from '../api/conversation-client'
@@ -199,6 +201,23 @@ export default function ConversationDrawer({
     }
   }
 
+  // 自愈：持久化/传入的会话 id 在后端已不存在（DB 重置 / 删除归档 / 跨租户）。
+  // 清掉陈旧引用并向上冒泡重置，回到"新会话"态，避免后续发消息持续 404。
+  const resetStaleConversation = useCallback(() => {
+    conversationIdRef.current = null
+    setConversationId(null)
+    onConversationChange?.(null)
+    persistCurrentConversationId(null)
+    setConversationTitle('Agent Chat')
+    setMessages([])
+    setActiveRunId(null)
+    setActiveRunStatus('')
+    setTimelineEvents([])
+    setIsExecuting(false)
+    setQueue([])
+    setError(null)
+  }, [onConversationChange])
+
   async function loadConversation(convId: string) {
     conversationIdRef.current = convId
     setConversationId(convId)
@@ -229,6 +248,11 @@ export default function ConversationDrawer({
       const lastUser = [...msgs].reverse().find((m) => m.role === 'user')
       if (lastUser) void resumeActiveRun(lastUser.run_id, convId)
     } catch (err) {
+      // 404 = 会话已不存在：陈旧引用，自愈到新会话而非报错卡死。
+      if (err instanceof ConversationApiError && err.status === 404) {
+        if (conversationIdRef.current === convId) resetStaleConversation()
+        return
+      }
       const msg = err instanceof Error ? err.message : String(err)
       setError(msg)
     } finally {
@@ -335,6 +359,8 @@ export default function ConversationDrawer({
           break
         } catch (err) {
           lastErr = err
+          // 确定性错误（404 会话不存在 / 4xx）重试结果不变，立即停止，避免刷重复 404。
+          if (!isRetryableConversationError(err)) break
         }
       }
       if (runId === null) throw lastErr ?? new Error('Failed to send message')
@@ -366,9 +392,15 @@ export default function ConversationDrawer({
         else if (last.event_type === 'RunFailed') setActiveRunStatus('failed')
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      setError(msg)
-      setIsExecuting(false)
+      // 404 = 当前会话在后端已不存在（DB 重置 / 被删除）。自愈到新会话并提示重发。
+      if (err instanceof ConversationApiError && err.status === 404) {
+        if (conversationIdRef.current === convId) resetStaleConversation()
+        setError('该对话已不存在（可能后端数据已重置），已为你切换到新对话，请重新发送。')
+      } else {
+        const msg = err instanceof Error ? err.message : String(err)
+        setError(msg)
+        setIsExecuting(false)
+      }
     } finally {
       setLoading(false)
     }

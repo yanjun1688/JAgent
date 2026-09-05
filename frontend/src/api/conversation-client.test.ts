@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
+  ConversationApiError,
   persistCurrentConversationId,
   restoreCurrentConversationId,
   sendMessage,
+  getConversation,
+  isRetryableConversationError,
   createClientRequestId,
 } from './conversation-client'
 
@@ -76,5 +79,53 @@ describe('sendMessage (P0-06/M3 client_request_id)', () => {
     const b = createClientRequestId()
     expect(a).toBeTruthy()
     expect(a).not.toBe(b)
+  })
+})
+
+describe('structured errors & retry classification (stale-conversation 404 root cause)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('sendMessage rejects with ConversationApiError carrying status 404', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      statusText: 'Not Found',
+      json: () => Promise.resolve({ detail: 'Conversation not found' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(sendMessage('conv-gone', 'hi')).rejects.toMatchObject({
+      name: 'ConversationApiError',
+      status: 404,
+      message: 'Conversation not found',
+    })
+  })
+
+  it('getConversation rejects with ConversationApiError carrying status 404', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      statusText: 'Not Found',
+      json: () => Promise.resolve({ detail: 'Conversation not found' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(getConversation('conv-gone')).rejects.toBeInstanceOf(ConversationApiError)
+    await expect(getConversation('conv-gone')).rejects.toMatchObject({ status: 404 })
+  })
+
+  it('classifies deterministic 4xx as non-retryable', () => {
+    expect(isRetryableConversationError(new ConversationApiError(404, 'x'))).toBe(false)
+    expect(isRetryableConversationError(new ConversationApiError(400, 'x'))).toBe(false)
+    expect(isRetryableConversationError(new ConversationApiError(422, 'x'))).toBe(false)
+    expect(isRetryableConversationError(new ConversationApiError(401, 'x'))).toBe(false)
+  })
+
+  it('classifies 5xx and network errors as retryable', () => {
+    expect(isRetryableConversationError(new ConversationApiError(500, 'x'))).toBe(true)
+    expect(isRetryableConversationError(new ConversationApiError(503, 'x'))).toBe(true)
+    expect(isRetryableConversationError(new TypeError('Failed to fetch'))).toBe(true)
   })
 })

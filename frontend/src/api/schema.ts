@@ -98,6 +98,11 @@ export interface DeliveryOperationInput {
   input?: Record<string, unknown>
 }
 
+export interface ErrorChangeView {
+  from_error?: string
+  to_error?: string
+}
+
 export interface EventListResponse {
   events: EventResponse[]
   total: number
@@ -132,6 +137,15 @@ export type ExecutionTargetType = "directory" | "sandbox" | "remote"
 export interface FeedbackResponse {
   status: string
   feedback_id: string
+}
+
+export interface GuardrailBlockView {
+  guardrail_id: string
+  reason: string
+  event_seq: number
+  tool_call_id?: string
+  tool_name?: string
+  step_id?: string
 }
 
 export interface GuardrailStatItem {
@@ -184,6 +198,62 @@ export interface PendingConfirmationItem {
   risk_level: string
 }
 
+export interface PendingConfirmationView {
+  confirmation_id: string
+  tool_name: string
+  risk_level: string
+  event_seq: number
+}
+
+export interface PlanStepView {
+  step_id: string
+  status: string
+  tool_name?: string
+  output_summary?: string
+  error?: string
+  reason?: string
+  tool_call_id?: string
+}
+
+export interface PlanView {
+  plan_id?: string
+  intent: string
+  status?: string
+  summary?: string
+  final_error?: string
+  steps?: PlanStepView[]
+}
+
+export interface ReplayRunMeta {
+  run_id: string
+  status: string
+  intent: string
+  latest_seq: number
+  event_count: number
+  created_at?: number
+  langfuse_trace_url?: string
+}
+
+export interface ReplayTimelineEvent {
+  seq: number
+  event_type: string
+  created_at: number
+  payload: Record<string, unknown>
+  tool_name?: string
+  tool_call_id?: string
+  step_id?: string
+  is_terminal: boolean
+}
+
+export interface ReplayTimelineResponse {
+  run_id: string
+  latest_seq: number
+  total: number
+  timeline?: ReplayTimelineEvent[]
+  next_cursor: number
+  has_more: boolean
+}
+
 export interface RequiredOperationInput {
   tool: string
   input?: Record<string, unknown>
@@ -234,6 +304,28 @@ export interface RunListResponse {
   total: number
 }
 
+export interface RunStateView {
+  run_id: string
+  at_seq: number
+  latest_seq: number
+  is_latest: boolean
+  status: string
+  intent: string
+  last_error?: string
+  user_facing_message?: string
+  pause_reason?: string
+  completion_summary?: string
+  completion_evidence?: Record<string, unknown>
+  plan?: PlanView
+  tool_results?: ToolResultView[]
+  guardrail_blocks?: GuardrailBlockView[]
+  pending_confirmations?: PendingConfirmationView[]
+  thought_count: number
+  orphaned: boolean
+  workspace_id?: string
+  conversation_id?: string
+}
+
 export interface RunSummary {
   run_id: string
   intent: string
@@ -259,6 +351,30 @@ export interface SendMessageResponse {
   claimed: boolean
 }
 
+export interface StateDiff {
+  run_id: string
+  from_seq: number
+  to_seq: number
+  status_change?: StatusChangeView
+  steps_changed?: StepChangeView[]
+  tool_results_added?: ToolResultChangeView[]
+  guardrails_triggered?: GuardrailBlockView[]
+  error_change?: ErrorChangeView
+  events_in_range?: ReplayTimelineEvent[]
+}
+
+export interface StatusChangeView {
+  from_status: string
+  to_status: string
+}
+
+export interface StepChangeView {
+  step_id: string
+  from_status?: string
+  to_status?: string
+  error?: string
+}
+
 export interface SuccessResponse {
   success: boolean
 }
@@ -267,6 +383,24 @@ export interface TimelineResponse {
   timeline: ParsedEventDetail[]
   next_cursor: number
   has_more: boolean
+}
+
+export interface ToolResultChangeView {
+  tool_call_id: string
+  tool_name: string
+  status: string
+  event_seq: number
+  error?: string
+}
+
+export interface ToolResultView {
+  tool_call_id: string
+  tool_name: string
+  status: string
+  output?: unknown
+  error?: string
+  duration_ms: number
+  event_seq: number
 }
 
 export interface ToolStatItem {

@@ -303,5 +303,5 @@ Step 6: 提醒校验与测试 → 引用 6.3 校验清单和 5. 测试规范
 
 ---
 
-*本文件仅包含开发协作规范。技术架构细节（事件类型、工具契约、里程碑等）请参考 `JAgent-docs/Dev/ARCHITECTURE_v3.3_Workspace_多租户与执行载体.md` 和 `JAgent-docs/Todo/TODO_v3.3_Workspace.md`*
+*本文件仅包含开发协作规范。技术架构细节（事件类型、工具契约、里程碑等）请参考 `JAgent-docs/architecture/ARCHITECTURE_v3.3_Workspace_多租户与执行载体.md` 和 `JAgent-docs/plans/workspace-v3.3/TODO_v3.3_Workspace.md`；文档总入口见 `JAgent-docs/README.md`*
 *角色：Agent 导师 · 架构守护者 · 最佳实践布道者*

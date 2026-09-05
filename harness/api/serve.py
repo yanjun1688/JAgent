@@ -241,6 +241,13 @@ def main() -> None:
     使用 `--reload-dir` 限定源码目录（harness + frontend/src），
     排除 data/、*.db、日志、workspace、缓存，避免 reload 监听风暴
     （reload_stderr.log 每秒 `1 change detected` 的根因）。
+
+    P1-13 Bug 5（复发）：uvicorn 的 loop="auto" 在 Windows reload/workers 下
+    use_subprocess=True → 显式实例化 SelectorEventLoop，serve.py import 阶段的
+    configure_event_loop_policy() 无法覆盖（policy 只在 uvicorn 不传 loop_factory
+    时生效）。因此这里必须显式传 loop= 跨平台 factory：Windows 恒为 Proactor，
+    Unix 保持平台默认 loop。这与 CLI 直接跑 uvicorn 需加
+    `--loop harness.api.loop:event_loop_factory` 是同一机制。
     """
     import atexit
 
@@ -268,6 +275,7 @@ def main() -> None:
         "harness.api.serve:app",
         reload=True,
         reload_dirs=["harness", "frontend/src"],
+        loop="harness.api.loop:event_loop_factory",
         host="0.0.0.0",
         port=int(os.environ.get("HARNESS_PORT", "8000")),
     )

@@ -1605,6 +1605,242 @@
           }
         }
       }
+    },
+    "/api/v1/replay/runs/{run_id}/meta": {
+      "get": {
+        "tags": [
+          "replay"
+        ],
+        "summary": "Replay Run Meta",
+        "operationId": "replay_run_meta_api_v1_replay_runs__run_id__meta_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayRunMeta"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/replay/runs/{run_id}/timeline": {
+      "get": {
+        "tags": [
+          "replay"
+        ],
+        "summary": "Replay Run Timeline",
+        "operationId": "replay_run_timeline_api_v1_replay_runs__run_id__timeline_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Event index offset (0 = beginning)",
+              "default": 0,
+              "title": "Cursor"
+            },
+            "description": "Event index offset (0 = beginning)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 200,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayTimelineResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/replay/runs/{run_id}/state": {
+      "get": {
+        "tags": [
+          "replay"
+        ],
+        "summary": "Replay Run State",
+        "operationId": "replay_run_state_api_v1_replay_runs__run_id__state_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "at_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Reconstruct state as-of this seq; omit = latest",
+              "title": "At Seq"
+            },
+            "description": "Reconstruct state as-of this seq; omit = latest"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStateView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/replay/runs/{run_id}/diff": {
+      "get": {
+        "tags": [
+          "replay"
+        ],
+        "summary": "Replay Run Diff",
+        "operationId": "replay_run_diff_api_v1_replay_runs__run_id__diff_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "from_seq",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Start point (exclusive lower bound)",
+              "title": "From Seq"
+            },
+            "description": "Start point (exclusive lower bound)"
+          },
+          {
+            "name": "to_seq",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "End point (inclusive upper bound)",
+              "title": "To Seq"
+            },
+            "description": "End point (inclusive upper bound)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StateDiff"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2027,6 +2263,34 @@
         "title": "DeliveryOperationInput",
         "description": "Public request shape shared by Run and Conversation APIs."
       },
+      "ErrorChangeView": {
+        "properties": {
+          "from_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Error"
+          },
+          "to_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Error"
+          }
+        },
+        "type": "object",
+        "title": "ErrorChangeView"
+      },
       "EventListResponse": {
         "properties": {
           "events": {
@@ -2244,6 +2508,62 @@
           "feedback_id"
         ],
         "title": "FeedbackResponse"
+      },
+      "GuardrailBlockView": {
+        "properties": {
+          "guardrail_id": {
+            "type": "string",
+            "title": "Guardrail Id"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "event_seq": {
+            "type": "integer",
+            "title": "Event Seq"
+          },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          },
+          "tool_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Name"
+          },
+          "step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "guardrail_id",
+          "reason",
+          "event_seq"
+        ],
+        "title": "GuardrailBlockView"
       },
       "GuardrailStatItem": {
         "properties": {
@@ -2523,6 +2843,333 @@
         ],
         "title": "PendingConfirmationItem"
       },
+      "PendingConfirmationView": {
+        "properties": {
+          "confirmation_id": {
+            "type": "string",
+            "title": "Confirmation Id"
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name"
+          },
+          "risk_level": {
+            "type": "string",
+            "title": "Risk Level",
+            "default": "medium"
+          },
+          "event_seq": {
+            "type": "integer",
+            "title": "Event Seq",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "confirmation_id",
+          "tool_name"
+        ],
+        "title": "PendingConfirmationView"
+      },
+      "PlanStepView": {
+        "properties": {
+          "step_id": {
+            "type": "string",
+            "title": "Step Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "pending"
+          },
+          "tool_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Name"
+          },
+          "output_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Summary"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "step_id"
+        ],
+        "title": "PlanStepView"
+      },
+      "PlanView": {
+        "properties": {
+          "plan_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan Id"
+          },
+          "intent": {
+            "type": "string",
+            "title": "Intent",
+            "default": ""
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "final_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Error"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/PlanStepView"
+            },
+            "type": "array",
+            "title": "Steps"
+          }
+        },
+        "type": "object",
+        "title": "PlanView"
+      },
+      "ReplayRunMeta": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "running"
+          },
+          "intent": {
+            "type": "string",
+            "title": "Intent",
+            "default": ""
+          },
+          "latest_seq": {
+            "type": "integer",
+            "title": "Latest Seq",
+            "default": 0
+          },
+          "event_count": {
+            "type": "integer",
+            "title": "Event Count",
+            "default": 0
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "langfuse_trace_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Langfuse Trace Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id"
+        ],
+        "title": "ReplayRunMeta",
+        "description": "Header/metadata for a run, including the (reserved) Langfuse link."
+      },
+      "ReplayTimelineEvent": {
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "title": "Seq"
+          },
+          "event_type": {
+            "type": "string",
+            "title": "Event Type"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          },
+          "tool_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Name"
+          },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          },
+          "step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step Id"
+          },
+          "is_terminal": {
+            "type": "boolean",
+            "title": "Is Terminal",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "seq",
+          "event_type",
+          "created_at",
+          "payload"
+        ],
+        "title": "ReplayTimelineEvent",
+        "description": "A compact event-list entry for the scrubbable timeline."
+      },
+      "ReplayTimelineResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "latest_seq": {
+            "type": "integer",
+            "title": "Latest Seq",
+            "default": 0
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
+          },
+          "timeline": {
+            "items": {
+              "$ref": "#/components/schemas/ReplayTimelineEvent"
+            },
+            "type": "array",
+            "title": "Timeline"
+          },
+          "next_cursor": {
+            "type": "integer",
+            "title": "Next Cursor",
+            "default": 0
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id"
+        ],
+        "title": "ReplayTimelineResponse"
+      },
       "RequiredOperationInput": {
         "properties": {
           "tool": {
@@ -2784,6 +3431,157 @@
         ],
         "title": "RunListResponse"
       },
+      "RunStateView": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "at_seq": {
+            "type": "integer",
+            "title": "At Seq"
+          },
+          "latest_seq": {
+            "type": "integer",
+            "title": "Latest Seq"
+          },
+          "is_latest": {
+            "type": "boolean",
+            "title": "Is Latest"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "intent": {
+            "type": "string",
+            "title": "Intent",
+            "default": ""
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "user_facing_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Facing Message"
+          },
+          "pause_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause Reason"
+          },
+          "completion_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Summary"
+          },
+          "completion_evidence": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Completion Evidence"
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tool_results": {
+            "items": {
+              "$ref": "#/components/schemas/ToolResultView"
+            },
+            "type": "array",
+            "title": "Tool Results"
+          },
+          "guardrail_blocks": {
+            "items": {
+              "$ref": "#/components/schemas/GuardrailBlockView"
+            },
+            "type": "array",
+            "title": "Guardrail Blocks"
+          },
+          "pending_confirmations": {
+            "items": {
+              "$ref": "#/components/schemas/PendingConfirmationView"
+            },
+            "type": "array",
+            "title": "Pending Confirmations"
+          },
+          "thought_count": {
+            "type": "integer",
+            "title": "Thought Count",
+            "default": 0
+          },
+          "orphaned": {
+            "type": "boolean",
+            "title": "Orphaned",
+            "default": false
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Id"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "at_seq",
+          "latest_seq",
+          "is_latest",
+          "status"
+        ],
+        "title": "RunStateView",
+        "description": "Complete reconstructed system state as-of ``at_seq``.\n\nThis is a projection of the folded ``RunState`` (the single source of\ntruth via ``fold_events``) into a stable, UI-independent read shape."
+      },
       "RunSummary": {
         "properties": {
           "run_id": {
@@ -2915,6 +3713,142 @@
         ],
         "title": "SendMessageResponse"
       },
+      "StateDiff": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "from_seq": {
+            "type": "integer",
+            "title": "From Seq"
+          },
+          "to_seq": {
+            "type": "integer",
+            "title": "To Seq"
+          },
+          "status_change": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StatusChangeView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "steps_changed": {
+            "items": {
+              "$ref": "#/components/schemas/StepChangeView"
+            },
+            "type": "array",
+            "title": "Steps Changed"
+          },
+          "tool_results_added": {
+            "items": {
+              "$ref": "#/components/schemas/ToolResultChangeView"
+            },
+            "type": "array",
+            "title": "Tool Results Added"
+          },
+          "guardrails_triggered": {
+            "items": {
+              "$ref": "#/components/schemas/GuardrailBlockView"
+            },
+            "type": "array",
+            "title": "Guardrails Triggered"
+          },
+          "error_change": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorChangeView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "events_in_range": {
+            "items": {
+              "$ref": "#/components/schemas/ReplayTimelineEvent"
+            },
+            "type": "array",
+            "title": "Events In Range"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "from_seq",
+          "to_seq"
+        ],
+        "title": "StateDiff",
+        "description": "Structured difference between state@from_seq and state@to_seq.\n\n``status_change`` and ``steps_changed`` are the prominently-highlighted\nsurfaces (\"how did run status change\" / \"which steps changed\")."
+      },
+      "StatusChangeView": {
+        "properties": {
+          "from_status": {
+            "type": "string",
+            "title": "From Status"
+          },
+          "to_status": {
+            "type": "string",
+            "title": "To Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "from_status",
+          "to_status"
+        ],
+        "title": "StatusChangeView"
+      },
+      "StepChangeView": {
+        "properties": {
+          "step_id": {
+            "type": "string",
+            "title": "Step Id"
+          },
+          "from_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Status"
+          },
+          "to_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Status"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "step_id"
+        ],
+        "title": "StepChangeView"
+      },
       "SuccessResponse": {
         "properties": {
           "success": {
@@ -2953,6 +3887,92 @@
           "timeline"
         ],
         "title": "TimelineResponse"
+      },
+      "ToolResultChangeView": {
+        "properties": {
+          "tool_call_id": {
+            "type": "string",
+            "title": "Tool Call Id"
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "event_seq": {
+            "type": "integer",
+            "title": "Event Seq"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tool_call_id",
+          "tool_name",
+          "status",
+          "event_seq"
+        ],
+        "title": "ToolResultChangeView"
+      },
+      "ToolResultView": {
+        "properties": {
+          "tool_call_id": {
+            "type": "string",
+            "title": "Tool Call Id"
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "output": {
+            "title": "Output"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "title": "Duration Ms",
+            "default": 0
+          },
+          "event_seq": {
+            "type": "integer",
+            "title": "Event Seq",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "tool_call_id",
+          "tool_name",
+          "status"
+        ],
+        "title": "ToolResultView"
       },
       "ToolStatItem": {
         "properties": {
