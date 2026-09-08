@@ -153,6 +153,35 @@ def test_read_only_helper_step_not_flagged():
     assert validate_revision_invariants(contracts, "raw", revised, registry=_registry()) == []
 
 
+# ── Q-06 fail-closed：未知工具（v3.4 review）─────────────────────
+
+
+def test_unknown_tool_uncovered_step_rejected_fail_closed():
+    """未知工具无法证明无副作用 ⇒ 视为 mutating（fail-closed），未被契约覆盖即被拒。
+    修复前该步骤被当作非 mutating 跳过 Q-06（fail-open，依赖下游 PlanGuardrail 兜底）。"""
+    contracts = [_caller_contract(operation="write", path="blackbox.txt")]
+    revised = _plan(
+        DagStep(id="s1", tool="file_op", input={"operation": "write", "path": "blackbox.txt"}),
+        DagStep(id="s2", tool="ghost_tool", input={"action": "anything"}),
+    )
+    errors = validate_revision_invariants(contracts, "raw", revised, registry=_registry())
+    assert any("un-declared mutating step" in e and "ghost_tool" in e for e in errors)
+
+
+def test_unknown_tool_covered_by_contract_passes():
+    """未知工具步骤被同名 DeliveryContract 覆盖时 Q-06 放行（残余角落：契约侧已在上游
+    拒绝未知工具契约，此处只 pin 不变量层行为不回归 fail-open 之外的情况）。"""
+    contracts = [DeliveryContract(tool="ghost_tool", input={}, source=DeliverySource.CALLER)]
+    revised = _plan(DagStep(id="s1", tool="ghost_tool", input={}))
+    assert validate_revision_invariants(contracts, "raw", revised, registry=_registry()) == []
+
+
+def test_unknown_tool_no_contracts_skips_reverse_coverage():
+    """无契约的 legacy 运行仍走 unverified —— Q-06 整体跳过，未知工具不受罚。"""
+    revised = _plan(DagStep(id="s1", tool="ghost_tool", input={}))
+    assert validate_revision_invariants([], "raw", revised, registry=_registry()) == []
+
+
 def test_no_contracts_skips_reverse_coverage():
     revised = _plan(DagStep(id="s1", tool="file_op", input={"operation": "write", "path": "x.txt"}))
     assert validate_revision_invariants([], "raw", revised, registry=_registry()) == []

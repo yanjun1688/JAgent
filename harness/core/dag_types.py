@@ -17,6 +17,7 @@ probe — see ADR-007 §0.2 / TDD_S1 §0.3.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -152,3 +153,21 @@ class StepResult:
     @property
     def is_unsuccessful(self) -> bool:
         return self.exec_state == ExecState.UNSUCCESSFUL
+
+
+# ── v3.4 review (A′): shared "same action" signature ──
+#
+# 退化修订守卫 (revision_guard.find_degenerate_revised_steps) 与 F-5
+# (recovery.unresolved_known_bad_steps) 必须对"是否为同一动作"使用**同一份定义**，
+# 否则同一轮 revise 内会给出自相矛盾的判定（守卫放行同 tool 改 input 的合法新尝试，
+# 而 F-5 按 tool-only 把它误判为未修复）。此叶模块是两者的单一事实源。
+
+def action_input_signature(inp: Any) -> str:
+    """Canonical, deterministic signature of a tool input (key-order independent)."""
+    return json.dumps(inp or {}, sort_keys=True, default=str)
+
+
+def action_signature(tool: str, inp: Any) -> tuple[str, str]:
+    """Canonical (tool, input) signature of an action — the shared meaning of
+    "the same action". Tool change OR input change ⇒ a different action."""
+    return (tool or "", action_input_signature(inp))

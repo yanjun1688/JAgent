@@ -130,7 +130,7 @@ def test_completion_gate_ignores_task_state():
 # ── 2. 假绿消灭 e2e：UNSUCCESSFUL 未被修复 → run FAILED（U2 根治）──
 
 
-async def _make_sched(store, plan_responses, revise_response):
+async def _make_sched(store, plan_responses, revise_response, tool_fn=None):
     from unittest.mock import AsyncMock
 
     from harness.core.llm_client import MockLLMClient
@@ -139,7 +139,7 @@ async def _make_sched(store, plan_responses, revise_response):
 
     executor = ToolExecutor(store)
     registry = ToolRegistry()
-    registry._register(HTTP_REQUEST_DEF, _UNSUCCESSFUL_TOOL_FN)
+    registry._register(HTTP_REQUEST_DEF, tool_fn if tool_fn is not None else _UNSUCCESSFUL_TOOL_FN)
     planner = Planner(MockLLMClient(responses=plan_responses), registry, store, max_plan_retries=1)
     dag = DagExecutor(executor, store, registry)
 
@@ -158,20 +158,52 @@ async def _make_sched(store, plan_responses, revise_response):
     return sched
 
 
+_PLAN_RESP = '{"intent":"t","steps":[{"id":"s1","tool":"http_request","input":{"url":"http://a"}}]}'
+
+
+async def _assert_terminal_fail(store, run_id, expected_reason, err_fragment="Steps not achieved"):
+    state = await store.get_events(run_id)
+    events = state
+    seqs = {e.event_type: e.seq for e in events}
+    assert not any(e.event_type == EventType.RUN_COMPLETED for e in events), "禁止假绿 RUN_COMPLETED"
+    assert EventType.RUN_FAILED in seqs
+    revised = [e for e in events if e.event_type == EventType.PLAN_REVISED]
+    assert revised, "应写入 PLAN_REVISED"
+    assert revised[-1].payload.get("revision_reason") == expected_reason, "应经预期 revise 分支（site）"
+    # 完成门统一分派（review #2）：任何 revise-empty 失败都发 PLAN_FAILED，且先于 RUN_FAILED。
+    assert EventType.PLAN_FAILED in seqs, "完成门判定应统一发 PLAN_FAILED（review #2 收敛）"
+    assert seqs[EventType.PLAN_FAILED] < seqs[EventType.RUN_FAILED], "PLAN_FAILED 应先于 RUN_FAILED"
+    last_revised_summary = revised[-1].payload.get("remaining_steps_summary") or ""
+    assert "task complete" not in last_revised_summary.lower(), "失败结局不得在 PLAN_REVISED 自称 task complete"
+
+
+def _raising_tool(input):
+    raise RuntimeError("always fails")
+
+
 @pytest.mark.asyncio
 async def test_run_fails_when_revise_empty_but_step_unmet(store):
     """U2 根治：s1 永远 UNSUCCESSFUL，revise 返回空 → 完成门拦截 → FAILED。"""
-    plan_resp = '{"intent":"t","steps":[{"id":"s1","tool":"http_request","input":{"url":"http://a"}}]}'
     empty = DagPlan(intent="t", steps=[], step_tasks={"s1": "achieved"})
-    sched = await _make_sched(store, ["yes", plan_resp], empty)
+    sched = await _make_sched(store, ["yes", _PLAN_RESP], empty)
 
     state = await sched.run("run-u2", "t")
     assert state.status.value == "failed"
     assert "Steps not achieved" in (state.last_error or "")
+    await _assert_terminal_fail(store, "run-u2", "unsuccessful_revised")
 
-    events = await store.get_events("run-u2")
-    assert not any(e.event_type == EventType.RUN_COMPLETED for e in events), "禁止假绿 RUN_COMPLETED"
-    assert any(e.event_type == EventType.RUN_FAILED for e in events)
+
+@pytest.mark.asyncio
+async def test_run_fails_via_failed_layer_revise_empty_emits_plan_failed(store):
+    """review #2 收敛：FAILED 层触发 site1 revise（step_failure_revised），空 steps →
+    完成门未过 → 与 site2/tail 一致的 PLAN_FAILED → RUN_FAILED（无假绿）。"""
+    empty = DagPlan(intent="t", steps=[], step_tasks={"s1": "achieved"})
+    sched = await _make_sched(store, ["yes", _PLAN_RESP], empty, tool_fn=_raising_tool)
+
+    state = await sched.run("run-site1", "t")
+    assert state.status.value == "failed"
+    assert "Steps not achieved" in (state.last_error or "")
+    await _assert_terminal_fail(store, "run-site1", "step_failure_revised")
 
 
 @pytest.mark.asyncio

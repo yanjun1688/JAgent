@@ -12,10 +12,15 @@ from harness.tools.registry import ToolRegistry
 
 
 def step_is_mutating(step: DagStep, registry: ToolRegistry) -> bool:
-    """S08 (C-02): 判断 step 是否 mutating — operation 级副作用（S02 契约判定）。"""
+    """S08 (C-02): 判断 step 是否 mutating — operation 级副作用（S02 契约判定）。
+
+    Fail-closed（v3.4 review）：未注册的工具 → 判为 mutating（True）。无法证明
+    无副作用 ⇒ 不得假设无害；与 ``recovery._is_read_only_action`` 的未知工具默认
+    （非只读）对齐，否则 Q-06 反向覆盖会对未知工具步骤静默失效。
+    """
     tool_def = registry.get_tool_def(step.tool)
     if tool_def is None:
-        return False
+        return True
     op = tool_def.resolve_operation(step.input)
     if op is not None:
         return bool(op.side_effects)
@@ -62,6 +67,8 @@ def validate_revision_invariants(
     # Q-06 (ADR-009): C-02 反向覆盖只认 DeliveryContract —— mutating 步骤必须被
     # DeliveryContract 覆盖，绝不因 LLM 在 declared_operations 自报而被授权
     # （堵 self-authorize 漏洞）。仅当运行存在契约时强制（无契约 legacy 走 unverified）。
+    # 未知工具 fail-closed：step_is_mutating 对未注册工具返回 True（视为 mutating），
+    # 故未覆盖的未知工具步骤在此被拒，不依赖下游 PlanGuardrail 的顺序兜底。
     if root_contracts and registry is not None:
         for step in revised.steps:
             if not step_is_mutating(step, registry):

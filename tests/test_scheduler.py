@@ -334,7 +334,9 @@ class TestPlanStateChain:
         )
         dag = DagExecutor(executor, store, registry)
         planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
-        cm = ContextManager(store, token_limit=10000, compression_threshold_ratio=0.5, checkpoint_interval=1)
+        cm = ContextManager(
+            store, token_limit=10000, compression_threshold_ratio=0.5, checkpoint_interval=1, compression_cooldown_iterations=1
+        )
         sched = PlanningExecutorScheduler(
             store,
             executor,
@@ -1994,7 +1996,9 @@ class TestSchedulerWithFullWiring:
 
     @pytest.mark.asyncio
     async def test_scheduler_with_monitor_and_context_manager(self, store: EventStore):
-        cm = ContextManager(store, token_limit=1000, compression_threshold_ratio=0.5, checkpoint_interval=2)
+        cm = ContextManager(
+            store, token_limit=1000, compression_threshold_ratio=0.5, checkpoint_interval=2, compression_cooldown_iterations=2
+        )
         monitor = RunMonitor(store, max_tokens=100, token_warning_ratio=0.5)
         monitor.attach()
 

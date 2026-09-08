@@ -294,3 +294,67 @@ async def test_e2e_planner_dropping_write_never_claims_deliverable(store):
     assert state.status == RunStatus.FAILED
     evidence = state.completion_evidence or {}
     assert evidence.get("deliverable_met") is not True
+
+
+@pytest.mark.asyncio
+async def test_tail_deliverable_fail_emits_plan_failed_and_run_failed(store):
+    """v3.4 review #2 pin：成功完成尾（无 revise）机械全 normal 但契约 unmet →
+    完成门统一分派（_dispose_completion_verdict）必须 PLAN_FAILED 先于 RUN_FAILED，
+    不发 PLAN_COMPLETED，绝不假绿交付达成（C-02）。覆盖 tail 的 deliverable 分支。"""
+    from unittest.mock import AsyncMock
+
+    from harness.core.llm_client import MockLLMClient
+    from harness.core.planner import Planner
+    from harness.core.scheduler.base import SchedulerConfig
+    from harness.models.intent import DeliveryContract, DeliverySource
+    from harness.tools.file_op import FileOpTool
+
+    registry = ToolRegistry()
+    file_op_def = FileOpTool().to_definition()
+    registry._register(file_op_def, lambda x: {"success": True, "path": x.get("path", "")})
+    planner = Planner(MockLLMClient(responses=[]), registry, store, max_plan_retries=1)
+    executor = ToolExecutor(store)
+    dag = DagExecutor(executor, store, registry)
+
+    sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=SchedulerConfig(max_iterations=5))
+
+    async def fake_plan(intent, state=None, feedback=None, conversation_context="", run_id=None):
+        # 弱化 Planner：只写 other.txt，完全没碰契约要求的 blackbox.txt
+        return DagPlan(
+            intent="write other.txt",
+            user_intent=intent,
+            steps=[
+                DagStep(id="s1", tool="file_op", input={"operation": "write", "path": "other.txt"}),
+                DagStep(id="s2", tool="file_op", input={"operation": "read", "path": "other.txt"}, depends_on=["s1"]),
+            ],
+            declared_operations=[],
+        )
+
+    planner.plan = fake_plan
+    planner.revise = AsyncMock(return_value=DagPlan(intent="done", steps=[]))
+
+    contracts = [
+        DeliveryContract(
+            tool="file_op", input={"operation": "write", "path": "blackbox.txt"}, source=DeliverySource.CALLER
+        ),
+        DeliveryContract(tool="file_op", input={"operation": "read", "path": "blackbox.txt"}, source=DeliverySource.CALLER),
+    ]
+    await store.append_event(
+        "r2",
+        EventType.RUN_STARTED,
+        {
+            "intent": "create and read blackbox.txt",
+            "intent_raw": "create and read blackbox.txt",
+            "contracts": [c.model_dump() for c in contracts],
+        },
+    )
+    state = await sched.run("r2", "create and read blackbox.txt")
+    assert state.status == RunStatus.FAILED, "机械全 normal 但契约 unmet 仍必须 fail（绝不假绿）"
+    evidence = state.completion_evidence or {}
+    assert evidence.get("deliverable_met") is not True
+
+    seqs = {e.event_type: e.seq for e in await store.get_events("r2")}
+    assert EventType.PLAN_FAILED in seqs, "tail deliverable 失败应统一发 PLAN_FAILED（review #2 收敛）"
+    assert seqs[EventType.PLAN_FAILED] < seqs[EventType.RUN_FAILED], "PLAN_FAILED 应先于 RUN_FAILED"
+    assert EventType.PLAN_COMPLETED not in seqs, "契约未达成不得发 PLAN_COMPLETED"
+    assert EventType.RUN_COMPLETED not in seqs, "契约未达成不得 RunCompleted"

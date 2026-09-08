@@ -2,8 +2,9 @@
 
 抽取步骤独立于规划（Review 方案 B），使用固定 schema 与独立 prompt。该调用
 是**非受信** LLM 输出：结果必须经受信结构校验（tool 存在 + input 为 dict +
-含操作判别键），无效项丢弃；全部无效或抽取失败 → 返回空列表（D-04 兜底：
-contracts=[] + 全局 unverified，不阻断 Run）。
+含操作判别键），无效项丢弃；JSON 解析失败或列表内全部无效 → 反馈给模型重试
+（对齐 Planner.plan/revise 语义）。重试预算用尽或全部无效仍为空 → 返回空列表
+（D-04 兜底：contracts=[] + 全局 unverified，不阻断 Run）。
 """
 
 from __future__ import annotations
@@ -49,6 +50,17 @@ User request:
 {intent}
 """
 
+# 解析/校验失败时的重试反馈（对齐 Planner.plan/revise 的 retry_prompt 语义）：
+# 错误塞回模型 → 下一轮只修正格式/工具名，不重复正确内容。
+_RETRY_HINT = (
+    "Your previous extraction response had a format or validation error:\n{error}\n\n"
+    "Re-respond with ONLY valid JSON of this exact shape: "
+    '{{"required_operations": [{{"tool": "<tool_name>", "input": {{<key>: <value>}}}}]}}\n'
+    "Available tools: {tool_names}\n"
+    "If the request truly has no hard delivery requirement, "
+    'return {{"required_operations": []}}.'
+)
+
 
 class ContractExtractor:
     """Non-trusted extractor with trusted structural validation gate."""
@@ -62,25 +74,39 @@ class ContractExtractor:
         tool_names = ", ".join(sorted(self.registry.tool_names))
         return _EXTRACT_PROMPT.format(intent=intent[:4000], tool_names=tool_names)
 
-    def _validate(self, item: dict) -> DeliveryContract | None:
-        """受信结构校验：tool 存在 + input 为 dict + 含操作判别键。无效 → None。"""
+    def _validate(self, item: dict) -> tuple[DeliveryContract | None, str]:
+        """受信结构校验：tool 存在 + input 为 dict + 含操作判别键。
+
+        Returns (contract, "") on success; (None, reason) when dropped.
+        """
         tool = item.get("tool", "")
         op_input = item.get("input")
         if not isinstance(tool, str) or not tool:
-            return None
+            return None, "operation missing a 'tool' name"
         if self.registry.get_tool_def(tool) is None:
-            _guard.warning("[extract] Dropping contract for unknown tool '%s'", tool)
-            return None
+            reason = f"unknown tool '{tool}'"
+            _guard.warning("[extract] Dropping contract for %s", reason)
+            return None, reason
         if not isinstance(op_input, dict):
-            _guard.warning("[extract] Dropping contract for tool '%s': input not an object", tool)
-            return None
+            reason = f"tool '{tool}': input not an object"
+            _guard.warning("[extract] Dropping contract for %s", reason)
+            return None, reason
         errors = validate_delivery_contract_input(tool, op_input, self.registry.get_tool_def(tool))
         if errors:
-            _guard.warning("[extract] Dropping contract for tool '%s': %s", tool, "; ".join(errors))
-            return None
-        return DeliveryContract(tool=tool, input=op_input, source=DeliverySource.EXTRACTED)
+            reason = f"tool '{tool}': {'; '.join(errors)}"
+            _guard.warning("[extract] Dropping contract for %s", reason)
+            return None, reason
+        return DeliveryContract(tool=tool, input=op_input, source=DeliverySource.EXTRACTED), ""
 
-    def _parse(self, response: str) -> list[DeliveryContract]:
+    def _parse(self, response: str) -> tuple[list[DeliveryContract], str]:
+        """Parse + structural validation.
+
+        Returns (contracts, "") when the response is *accepted* — this covers
+        a valid non-empty result, a partial result, and the legitimate empty
+        answer ``{"required_operations": []}``. Returns ([], error) when the
+        response is malformed / rejected and should be retried with ``error``
+        fed back to the model (mirrors Planner.parse_plan_response).
+        """
         text = response.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[-1]
@@ -92,57 +118,79 @@ class ContractExtractor:
             start = text.find("{")
             end = text.rfind("}")
             if start == -1 or end <= start:
-                _guard.warning("[extract] No JSON object found in extraction response")
-                return []
+                return [], "no JSON object found in extraction response"
             try:
                 data = json.loads(text[start : end + 1])
             except json.JSONDecodeError:
-                _guard.warning("[extract] Extraction JSON parse failed")
-                return []
+                return [], "extraction JSON parse failed"
         if not isinstance(data, dict):
-            return []
+            return [], "response JSON root is not an object"
         raw_ops = data.get("required_operations")
+        if raw_ops is None:
+            return [], "missing 'required_operations' key"
         if not isinstance(raw_ops, list):
-            return []
+            return [], "'required_operations' is not a list"
         contracts: list[DeliveryContract] = []
+        dropped: list[str] = []
         for item in raw_ops:
             if not isinstance(item, dict):
+                dropped.append("a listed operation was not an object")
                 continue
-            contract = self._validate(item)
+            contract, reason = self._validate(item)
             if contract is not None:
                 contracts.append(contract)
-        return contracts
+            else:
+                dropped.append(reason)
+        if contracts or not dropped:
+            # 部分有效，或 raw_ops 为空（合法空 = 无硬性交付）
+            return contracts, ""
+        return [], "all listed operations were rejected: " + " | ".join(dropped)
 
     async def extract(self, intent: str) -> list[DeliveryContract]:
         """抽取兜底：intent → contracts（source=extracted）。
 
-        抽取失败或全部无效 → []（D-04：contracts=[] + unverified，不阻断 Run）。
+        对齐 Planner.plan/revise 的重试语义：LLM 调用异常、JSON 解析失败、
+        列表内全部被结构校验丢弃 → 反馈给模型重试；合法空（无硬性交付）立即
+        返回 []；部分有效返回有效子集。预算用尽或空 intent → []（D-04：
+        contracts=[] + unverified，不阻断 Run）。
         """
         if not intent:
             return []
         prompt = self._build_prompt(intent)
+        tool_names = ", ".join(sorted(self.registry.tool_names))
         last_err = ""
-        for attempt in range(self.max_retries + 1):
-            try:
-                chat_resp = await self.llm.chat(
-                    [{"role": "system", "content": prompt}],
-                    temperature=0.0,
+        total = self.max_retries + 1
+        for attempt in range(1, total + 1):
+            messages = [{"role": "system", "content": prompt}]
+            if last_err:
+                messages.append(
+                    {"role": "user", "content": _RETRY_HINT.format(error=last_err, tool_names=tool_names)}
                 )
+            try:
+                chat_resp = await self.llm.chat(messages, temperature=0.0)
             except Exception as exc:
                 last_err = repr(exc)
                 _guard.warning(
                     "[extract] LLM call failed (attempt %d/%d): %s",
-                    attempt + 1,
-                    self.max_retries + 1,
+                    attempt,
+                    total,
                     last_err,
                 )
                 continue
-            contracts = self._parse(chat_resp.content)
-            _log.info(
-                "[extract] intent=%.60s → %d contract(s) validated",
-                intent[:60],
-                len(contracts),
+            contracts, parse_err = self._parse(chat_resp.content)
+            if not parse_err:
+                _log.info(
+                    "[extract] intent=%.60s → %d contract(s) validated",
+                    intent[:60],
+                    len(contracts),
+                )
+                return contracts
+            last_err = parse_err
+            _guard.warning(
+                "[extract] Response rejected (attempt %d/%d): %s",
+                attempt,
+                total,
+                last_err,
             )
-            return contracts
         _guard.warning("[extract] All attempts failed (%s) — returning empty contracts (D-04)", last_err)
         return []

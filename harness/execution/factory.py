@@ -5,7 +5,12 @@ from harness.execution.ssh import RemoteSSHBackend
 from harness.models.workspace import ExecutionTarget, ExecutionTargetType
 
 
-async def create_backend(target: ExecutionTarget) -> ExecutionBackend:
+async def create_backend(
+    target: ExecutionTarget,
+    *,
+    run_id: str | None = None,
+    tenant_id: str | None = None,
+) -> ExecutionBackend:
     if target.type == ExecutionTargetType.DIRECTORY:
         return LocalDirectoryBackend(target.filesystem_root or "")
     if target.type == ExecutionTargetType.SANDBOX:
@@ -13,6 +18,8 @@ async def create_backend(target: ExecutionTarget) -> ExecutionBackend:
             target.docker_image or "",
             target.host_mount_src or "",
             target.mount_root or "/workspace",
+            run_id=run_id,
+            tenant_id=tenant_id,
         )
         await backend.check_available()
         return backend

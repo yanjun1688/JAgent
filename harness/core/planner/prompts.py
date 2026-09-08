@@ -166,18 +166,10 @@ def build_answer_user_content(intent: str, state: RunState, conversation_context
 
     if state.summary:
         if isinstance(state.summary, Episode):
-            summary_parts = []
-            if state.summary.title:
-                summary_parts.append(f"Title: {state.summary.title}")
-            if state.summary.summary:
-                summary_parts.append(f"Summary: {state.summary.summary}")
-            if state.summary.key_decisions:
-                summary_parts.append(f"Key decisions: {', '.join(state.summary.key_decisions)}")
-            if state.summary.key_findings:
-                summary_parts.append(f"Key findings: {', '.join(state.summary.key_findings)}")
-            if summary_parts:
+            summary_text = state.summary.to_context_text()
+            if summary_text:
                 parts.append("## Previous Context (Compressed)")
-                parts.extend(summary_parts)
+                parts.append(summary_text)
 
     if state.feedbacks:
         fb_ids = ",".join(getattr(fb, "feedback_id", "?")[:8] for fb in state.feedbacks)

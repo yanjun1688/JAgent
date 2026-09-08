@@ -79,7 +79,13 @@ def make_monitor(store: EventStore) -> RunMonitor:
 
 
 def make_cm(store: EventStore) -> ContextManager:
-    return ContextManager(store, token_limit=4000, compression_threshold_ratio=0.8, checkpoint_interval=5)
+    return ContextManager(
+        store,
+        token_limit=4000,
+        compression_threshold_ratio=0.8,
+        checkpoint_interval=5,
+        compression_cooldown_iterations=5,
+    )
 
 
 # ── Report ───────────────────────────────────────────────

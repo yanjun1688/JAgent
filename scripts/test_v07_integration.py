@@ -534,7 +534,7 @@ async def test_planner_executor_cycle() -> dict:
     await store.initialize()
     executor = ToolExecutor(store)
     reg = _init_registry()
-    cm = ContextManager(store, token_limit=5000, checkpoint_interval=20)
+    cm = ContextManager(store, token_limit=5000, checkpoint_interval=20, compression_cooldown_iterations=20)
     dag = DagExecutor(executor, store, reg)
 
     # Use MockLLMClient that returns a valid JSON plan
@@ -613,7 +613,7 @@ async def test_serial_step_execution() -> dict:
     await store.initialize()
     executor = ToolExecutor(store)
     reg = _init_registry()
-    cm = ContextManager(store, token_limit=5000, checkpoint_interval=20)
+    cm = ContextManager(store, token_limit=5000, checkpoint_interval=20, compression_cooldown_iterations=20)
     dag = DagExecutor(executor, store, reg)
 
     mock_llm = MockLLMClient(
@@ -682,7 +682,7 @@ async def test_planner_fallback() -> dict:
     await store.initialize()
     executor = ToolExecutor(store)
     reg = _init_registry()
-    cm = ContextManager(store, token_limit=5000, checkpoint_interval=20)
+    cm = ContextManager(store, token_limit=5000, checkpoint_interval=20, compression_cooldown_iterations=20)
     dag = DagExecutor(executor, store, reg)
 
     # MockLLMClient always returns invalid JSON → Planner will fail all retries
@@ -832,7 +832,7 @@ async def test_revise_continuation() -> dict:
     await store.initialize()
     executor = ToolExecutor(store)
     reg = _init_registry()
-    cm = ContextManager(store, token_limit=5000, checkpoint_interval=20)
+    cm = ContextManager(store, token_limit=5000, checkpoint_interval=20, compression_cooldown_iterations=20)
     dag = DagExecutor(executor, store, reg)
 
     mock_llm = MockLLMClient(

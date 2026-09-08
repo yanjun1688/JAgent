@@ -34,7 +34,13 @@ async def main():
     monitor = RunMonitor(store, max_tokens=50, token_warning_ratio=0.5)
     monitor.attach()
 
-    cm = ContextManager(store, token_limit=100, compression_threshold_ratio=0.5, checkpoint_interval=5)
+    cm = ContextManager(
+        store,
+        token_limit=100,
+        compression_threshold_ratio=0.5,
+        checkpoint_interval=5,
+        compression_cooldown_iterations=5,
+    )
 
     echo_def = ToolDefinition(
         name="echo",

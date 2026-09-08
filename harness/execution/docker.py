@@ -2,12 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import shlex
 import shutil
 from pathlib import Path
 from typing import Any
 
 from harness.execution.base import ExecutionBackend
+
+_DOCKER_LABEL_PREFIX = "harness"
+_LABEL_SAFE = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def _sanitize_label_value(value: str) -> str:
+    """Sanitize a string for use as a docker label value/key fragment.
+
+    Docker labels forbid whitespace and most punctuation; collapse anything
+    outside [A-Za-z0-9_.-] to '_'. Label identity used by the reaper relies only
+    on run_id (a uuid, always label-safe); the tenant label is diagnostic only.
+    """
+    return _LABEL_SAFE.sub("_", value)[:63] or "unknown"
 
 
 class SandboxUnavailableError(RuntimeError):
@@ -26,7 +40,15 @@ class CommandFailedError(RuntimeError):
 class DockerSandboxBackend(ExecutionBackend):
     """Docker backend skeleton; all file access is performed inside the mount."""
 
-    def __init__(self, image: str, host_src: str, mount: str = "/workspace") -> None:
+    def __init__(
+        self,
+        image: str,
+        host_src: str,
+        mount: str = "/workspace",
+        *,
+        run_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
         if shutil.which("docker") is None:
             raise SandboxUnavailableError("Docker CLI is not installed")
         self.image = image
@@ -35,6 +57,47 @@ class DockerSandboxBackend(ExecutionBackend):
         self.host_src = str(Path(host_src).expanduser().resolve())
         self.mount = mount
         self.container_id: str | None = None
+        # Run identity: stamped onto the container as labels so a restarted
+        # process (after a crash) can discover and reap leaked containers by
+        # inspecting `docker ps`. Without this cross-process identity the only
+        # cleanup path is the live scheduler's backend.close(), which never runs
+        # for orphaned runs -> the container leaks forever (sleep infinity +
+        # --rm only deletes on stop).
+        self.run_id = run_id
+        self.tenant_id = tenant_id
+
+    def _docker_run_args(self) -> list[str]:
+        """Arguments for `docker run -d ... <image> sleep infinity`.
+
+        When bound to a run, self-describing identity labels are attached so the
+        startup carrier reaper can correlate containers back to (possibly dead)
+        runs. Unbound backends (no run identity) are deliberately unmanaged: the
+        reaper never touches containers it cannot attribute.
+        """
+        args = [
+            "-d",
+            "--rm",
+            "-v",
+            f"{self.host_src}:{self.mount}",
+        ]
+        if self.run_id is not None:
+            args += [
+                "--label",
+                f"{_DOCKER_LABEL_PREFIX}.managed=1",
+                "--label",
+                f"{_DOCKER_LABEL_PREFIX}.run_id={_sanitize_label_value(self.run_id)}",
+            ]
+            if self.tenant_id is not None:
+                args += [
+                    "--label",
+                    f"{_DOCKER_LABEL_PREFIX}.tenant_id={_sanitize_label_value(self.tenant_id)}",
+                ]
+        args += [
+            self.image,
+            "sleep",
+            "infinity",
+        ]
+        return args
 
     @property
     def root(self) -> str:
@@ -51,13 +114,7 @@ class DockerSandboxBackend(ExecutionBackend):
         proc = await asyncio.create_subprocess_exec(
             "docker",
             "run",
-            "-d",
-            "--rm",
-            "-v",
-            f"{self.host_src}:{self.mount}",
-            self.image,
-            "sleep",
-            "infinity",
+            *self._docker_run_args(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

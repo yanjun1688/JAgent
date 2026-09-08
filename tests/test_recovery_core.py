@@ -72,20 +72,30 @@ class TestRebuildFromEvidence:
 
 
 class TestUnresolvedKnownBad:
+    """F-5 (A′ review fix): "known-bad action" = full (tool, normalized input) signature.
+
+    与退化修订守卫 (revision_guard.find_degenerate_revised_steps) 共享同一"同一动作"
+    定义：tool 或 input 任一变化 → 新的合法尝试，视为已修复；仅同 tool 且同 input
+    （无法取得原始 input 时保守退化为 tool-only）才判 unresolved。
+    """
+
+    def _ev(self, sid: str, tool: str = "http_request", state: str = "unsuccessful", error: str = "boom") -> StepEvidence:
+        return StepEvidence(step_id=sid, tool_name=tool, exec_state=state, error=error)
+
     def test_unaddressed_failed_browser_step_flagged(self):
         # e05087b6: s3 failed (browser env error), patch only carries s1/s2 (http).
         prev = {
-            "s1": StepEvidence(step_id="s1", tool_name="browser", exec_state="unsuccessful", error="browser unavailable"),
-            "s3": StepEvidence(step_id="s3", tool_name="browser", exec_state="unsuccessful", error="browser unavailable"),
+            "s1": self._ev("s1", tool="browser", error="browser unavailable"),
+            "s3": self._ev("s3", tool="browser", error="browser unavailable"),
         }
         patch_steps = [
-            {"step_id": "s1", "tool_name": "http_request"},
-            {"step_id": "s2", "tool_name": "http_request"},
+            {"step_id": "s1", "tool_name": "http_request", "input": {"url": "http://a"}},
+            {"step_id": "s2", "tool_name": "http_request", "input": {"url": "http://a"}},
         ]
-        unresolved = unresolved_known_bad_steps(prev, patch_steps)
-        assert "s3" in unresolved
-        # s1 was failed but the patch changes its tool → addressed, not flagged.
-        assert "s1" not in unresolved
+        original_inputs = {"s1": {"url": "http://a"}, "s3": {"url": "http://a"}}
+        unresolved = unresolved_known_bad_steps(prev, patch_steps, original_inputs=original_inputs)
+        assert "s3" in unresolved  # not covered by the patch at all → restored unchanged
+        assert "s1" not in unresolved  # tool switched → addressed, not flagged
 
     def test_retryable_failure_not_flagged(self):
         prev = {"s1": StepEvidence(step_id="s1", tool_name="http_request", exec_state="failed", error="ConnectionError: timeout")}
@@ -96,10 +106,41 @@ class TestUnresolvedKnownBad:
         prev = {"s1": StepEvidence(step_id="s1", tool_name="http_request", exec_state="completed")}
         assert unresolved_known_bad_steps(prev, []) == []
 
-    def test_patch_keeps_failed_step_but_same_tool_flagged(self):
-        # Patch includes s3 but keeps the same broken tool (browser) → still unaddressed.
-        prev = {"s3": StepEvidence(step_id="s3", tool_name="browser", exec_state="unsuccessful", error="browser unavailable")}
-        patch_steps = [{"step_id": "s3", "tool_name": "browser"}]
+    def test_patch_replays_same_tool_and_same_input_flagged(self):
+        # Patch keeps the SAME tool AND the SAME input → unchanged replay of the
+        # known-bad action (e05087b6 class) → still unaddressed.
+        prev = {"s3": self._ev("s3", tool="browser", error="browser unavailable")}
+        patch_steps = [{"step_id": "s3", "tool_name": "browser", "input": {"url": "http://a"}}]
+        original_inputs = {"s3": {"url": "http://a"}}
+        assert "s3" in unresolved_known_bad_steps(prev, patch_steps, original_inputs=original_inputs)
+
+    def test_same_tool_corrected_input_is_addressed(self):
+        # Review finding: same tool + corrected input (e.g. fixed a wrong URL/field)
+        # is a legitimate new attempt — NOT an unchanged replay → must not be flagged.
+        prev = {"s3": self._ev("s3", tool="http_request", error="404 — wrong url path")}
+        patch_steps = [{"step_id": "s3", "tool_name": "http_request", "input": {"url": "http://host/correct"}}]
+        original_inputs = {"s3": {"url": "http://host/typo"}}
+        assert unresolved_known_bad_steps(prev, patch_steps, original_inputs=original_inputs) == []
+
+    def test_input_normalization_is_key_order_independent(self):
+        # Semantically identical input differing only in key order is still the
+        # same action (shared canonical normalizer) → unchanged replay → flagged.
+        prev = {"s3": self._ev("s3", tool="http_request", error="boom")}
+        patch_steps = [
+            {
+                "step_id": "s3",
+                "tool_name": "http_request",
+                "input": {"headers": {"b": 2, "a": 1}, "url": "http://x"},
+            }
+        ]
+        original_inputs = {"s3": {"url": "http://x", "headers": {"a": 1, "b": 2}}}
+        assert "s3" in unresolved_known_bad_steps(prev, patch_steps, original_inputs=original_inputs)
+
+    def test_same_tool_without_original_input_stays_conservative(self):
+        # Caller cannot supply the originally-failed input → input correction cannot
+        # be proven → same tool remains unresolved (fail-closed, no false "addressed").
+        prev = {"s3": self._ev("s3", tool="browser", error="browser unavailable")}
+        patch_steps = [{"step_id": "s3", "tool_name": "browser", "input": {"url": "http://new"}}]
         assert "s3" in unresolved_known_bad_steps(prev, patch_steps)
 
 

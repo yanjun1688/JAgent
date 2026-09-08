@@ -80,6 +80,19 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         _logger.exception("Failed to mark orphan runs: %s", exc)
 
+    # Reap execution-carrier resources (Docker sandbox containers) leaked by the
+    # crashed process. Must run AFTER mark_orphans so dead runs have converged
+    # to a terminal event; the reaper then removes managed containers whose run
+    # is no longer active (ADR-011 browser pool reaps its own leases via events).
+    try:
+        from harness.execution.reaper import reap_orphaned_carriers
+
+        reaped = await reap_orphaned_carriers(api.raw_store)
+        if reaped:
+            _logger.info("Carrier reaper reclaimed %d orphaned container(s)", reaped)
+    except Exception as exc:
+        _logger.exception("Failed to reap orphaned carriers: %s", exc)
+
     # ── MCP servers ───────────────────────────────────────────
     mcp_config = MCPConfig.from_env()
     mcp_manager = MCPServerManager(mcp_config, registry=api.registry)

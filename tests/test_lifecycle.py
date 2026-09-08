@@ -6,6 +6,7 @@ from harness.core.fold import RunStatus, fold_events
 from harness.core.lifecycle import mark_orphans
 from harness.models.events import Event, EventType
 from harness.storage.event_store import EventStore
+from harness.storage.scoped import ScopedEventStore
 
 
 def _event(
@@ -283,3 +284,52 @@ class TestOrphanTermination:
         failed = next(e for e in events if e.event_type == EventType.RUN_FAILED)
         # The failure must be attributable to a restart and tell the user what to do.
         assert "restart" in failed.payload["final_error"].lower() or "orphan" in failed.payload["final_error"].lower()
+
+
+class TestOrphanMultiTenantAttribution:
+    """mark_orphans is a cross-tenant system maintenance routine invoked with
+    the raw store (no tenant context). The terminal events it appends MUST be
+    attributed to the run's owning tenant, not silently defaulted to
+    "default" — otherwise a non-default tenant's view never sees the run
+    terminate (Direction A convergence is invisible cross-tenant) and the WS
+    broadcast is filtered to the wrong tenant (deps.broadcast_event).
+    """
+
+    async def test_terminal_events_are_attributed_to_owning_tenant(self, store: EventStore):
+        await store.append_event(
+            "r-nondefault",
+            EventType.RUN_STARTED,
+            {"intent": "test", "context_snapshot": {}},
+            tenant_id="acme",
+            workspace_id="ws-acme",
+        )
+
+        await mark_orphans(store)
+
+        # The owning tenant's scoped view must see the terminal events.
+        acme_events = await ScopedEventStore(store, "acme").get_events("r-nondefault")
+        types = [e.event_type for e in acme_events]
+        assert EventType.RUN_ORPHANED in types
+        assert EventType.RUN_FAILED in types
+
+        # Every appended event carries the owning tenant + workspace columns.
+        for ev in acme_events:
+            assert ev.tenant_id == "acme", f"{ev.event_type} misattributed to {ev.tenant_id}"
+        for ev in acme_events:
+            if ev.event_type in (EventType.RUN_ORPHANED, EventType.RUN_FAILED):
+                assert ev.workspace_id == "ws-acme"
+
+        # The default tenant must NOT see another tenant's terminal events.
+        default_events = await ScopedEventStore(store, "default").get_events("r-nondefault")
+        assert default_events == []
+
+    async def test_default_tenant_unchanged(self, store: EventStore):
+        await store.append_event(
+            "r-default",
+            EventType.RUN_STARTED,
+            {"intent": "test", "context_snapshot": {}},
+        )
+        await mark_orphans(store)
+        events = await ScopedEventStore(store, "default").get_events("r-default")
+        assert EventType.RUN_FAILED in [e.event_type for e in events]
+        assert all(e.tenant_id == "default" for e in events)

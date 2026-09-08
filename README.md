@@ -201,7 +201,7 @@ scripts/
 ├── test_llm_dag.py            # Planner-Executor 集成测试
 └── test_real_llm_flow.py      # 真实 LLM 流测试
 
-tests/                         # 59 个测试文件，~1109 项测试全部通过
+tests/                         # 76 个测试文件，1433 项测试全部通过
 ```
 
 ## 开发进度
@@ -223,7 +223,7 @@ tests/                         # 59 个测试文件，~1109 项测试全部通�
 | V3.3 | Workspace 多租户 + 执行载体（directory / docker / remote） | ✓ 完成 |
 | Q01-Q08 | 质量门禁与执行依赖分离（ADR-009） | ✓ 完成 |
 
-**测试基线：1109 passed / 2 skipped**（`python -m pytest -q -p no:cacheprovider`，~52s）
+**测试基线：1433 passed / 2 skipped**（`python -m pytest -q -p no:cacheprovider`，~59s）
 
 ## 快速开始
 

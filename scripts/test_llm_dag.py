@@ -133,21 +133,6 @@ def _event_label(e) -> str:
     return t.value
 
 
-def _parse_layer_info(events: list) -> str:
-    """Extract DAG layer structure from events."""
-    for e in events:
-        if e.event_type == EventType.DAG_STEP_STARTED:
-            e.payload.get("dag_layer", e.payload.get("depends_on", "?"))
-            e.payload.get("step_id", "?")
-    # Build layer visualization from PlanCreated
-    for e in events:
-        if e.event_type == EventType.PLAN_CREATED:
-            lc = e.payload.get("layer_count", 0)
-            ss = e.payload.get("steps_summary", "")
-            return f"{lc} layers, {ss}"
-    return ""
-
-
 def dump_events(label: str, events: list, elapsed: float) -> None:
     state = fold_events(events)
     plan_events = [
@@ -234,7 +219,13 @@ async def run_scenario(name: str, intent: str, api_key: str, model: str, base_ur
     llm = OpenAILLMClient(api_key=api_key, model=model, base_url=base_url)
     planner = Planner(llm, reg, store, max_plan_retries=2)
     dag = DagExecutor(executor, store, reg)
-    cm = ContextManager(store, token_limit=5000, compression_threshold_ratio=0.5, checkpoint_interval=20)
+    cm = ContextManager(
+        store,
+        token_limit=5000,
+        compression_threshold_ratio=0.5,
+        checkpoint_interval=20,
+        compression_cooldown_iterations=20,
+    )
 
     p_sched = PlanningExecutorScheduler(
         store=store,

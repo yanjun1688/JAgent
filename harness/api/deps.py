@@ -145,7 +145,15 @@ class HarnessAPI:
             workspace = await scoped_store.get_workspace(workspace_id or "default")
             if workspace is None:
                 raise ValueError(f"Workspace not found: {workspace_id or 'default'}")
-            backend = await create_backend(workspace.scope.target) if workspace else None
+            backend = (
+                await create_backend(
+                    workspace.scope.target,
+                    run_id=run_id,
+                    tenant_id=scoped_store.tenant_id,
+                )
+                if workspace
+                else None
+            )
             if backend is not None:
                 self._run_backends[run_id] = backend
             dag = DagExecutor(run_executor, scoped_store, self.registry, workspace=workspace, backend=backend)

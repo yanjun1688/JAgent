@@ -334,3 +334,89 @@ PRD §0 要求本文必须包含：① 三条根因独立复核（可驳回，�
 
 - §10 决策点 1（新事件命名/白名单定稿）已随本节归档收敛；决策点 2（blob 载体：远端/沙盒抽象）本期仅本地实现，接口预留。
 - mypy 未装入 venv，静态门禁以 `ruff` 为准（`pytest` 全量 + `ruff` 双绿）。
+- **功能优化（code review 2026-09-08）**：F-5/F-6 只读判定把信任锚点落在工具 `side_effects` 声明（L5 注册层），建议后续加固——已记录 `JAgent-docs/plans/completion-semantics/JAGENT-2026-Completion-INDEX.md` §1.3 **L-05**，不在当前分支实现。
+
+### 11.5 review 修正（2026-09-08，分支 `review/code-review-fixes`）：F-5 "同一动作"粒度
+
+**问题（review #1）**：`unresolved_known_bad_steps` 原按 **tool-only** 判定"未覆盖坏步骤"，与退化修订守卫的 **(tool, 规范化 input) 全签名** 粒度不一致。LLM 同 tool 仅改 input 的合法修正会被守卫放行、却又被 F-5 判"未修复"并注入 "must switch tool or give up" 高优反馈；F-5 无上游感知，"上游已修、本步同签名"的修复亦会被误杀。
+
+**裁决（A′）**：与守卫**共享"同一动作"的唯一定义**——签名助手收敛到叶模块 `dag_types.action_input_signature / action_signature`（单一事实源）。F-5 改为**全签名比较**（同 tool 改 input ⇒ 已修复；同 tool 同 input 原样重放 ⇒ unresolved），**保留**瞬时排除与无闭包语义。**否决纯 A**（并入退化守卫"闭包无新步骤"条款）：会重新打开 e05087b6 的洞（merge 恢复的坏步骤上游被 LLM 替换成新步骤后，闭包含新签名 → 不再拦截）。两守卫互补而非等价：闭包条款回答"重跑可能成功吗"（乐观），F-5 回答"坏动作是否原样加回"（悲观）。
+
+**实现落点**：`dag_types.py` 共享签名助手；`revision_guard.step_signature` 委托之；`recovery.unresolved_known_bad_steps(..., original_inputs=...)` 全签名比较（原始 input 缺失 fail-closed 退回 tool-only）；`plan.py` 合并后传入 merge 前失败计划原始 input；反馈文案改 "same tool and same input"。
+
+**验证**：`pytest` 1417 passed / 2 skipped；`ruff` 0 error；`tests/test_recovery_core.py` 新增 4 用例（改 input=已修复 / key 序无关 / 原始 input 缺失保守回退 / 原样重放仍报），e05087b6 回归保持拦截。
+
+详见 review 记录：`JAgent-docs/reviews/review_20260908_recovery_f5_signature_granularity.md`。
+
+### 11.6 review 修正（2026-09-08，分支 `review/code-review-fixes`）：完成门判定收敛
+
+**问题（review #2）**：`scheduler/plan.py::_execute_plan` 的完成门判定有 **3 份内联 + 1 个单点 helper**（layer 失败后 revise 空 / unsuccessful revise 空 / 正常完成尾），与 reviewer 描述不同处在于 site1 空 steps 本已调用 `_finalize_or_fail_verdict`；真正的重复是成功尾把同一判定再次内联展开。已现 drift：site2 空事件先发 *"task complete"* 后却 RUN_FAILED；site1/site2 revise-空失败都不发 PLAN_FAILED；site1 revise-空成功不发 PLAN_COMPLETED。
+
+**裁决（B 治本收敛）**：把"完成门判定 + 终局收尾"收敛为单一分派，全部入口汇于同一条真源；A（只抽纯重复件、门逻辑留三处）被否决 —— C-02 fail-safe 判定必须一处定义。
+
+**实现落点**（`scheduler/plan.py`）：
+- `_emit_plan_revised`：PLAN_REVISED 事件 + step_tasks + trace 共享构造器；
+- `_dispose_completion_verdict`：单一完成门分派（替换 `_finalize_or_fail_verdict`）—— mechanical 不全 / deliverable failed → `PLAN_FAILED` + fail；通过 → [emit `PLAN_COMPLETED`] + maybe_compress + `_finalize_with_summary`；
+- `_settle_empty_revised`：site1/site2 共用的"revise 空 steps"分派（failed 声明 → 如实事件 + fail；否则过门 → 准确 summary → dispose）；
+- site2 的 PLAN_REVISED 仅在"仍有步骤继续"时于合并前落（文案如实）；成功尾复用 all_layers_ok 入口已算的 `verdict`，消除二次过门。
+
+**行为归一（实测两分支一致）**：失败 `PlanRevised(NOT complete…) → PlanFailed → RunFailed`；成功 `… → PlanCompleted → RunCompleted`。修复 site2 "task complete" 后 fail 的矛盾文案，revise-空失败路径与正常尾统一发 PLAN_FAILED。
+
+**验证**：`pytest` 1419 passed / 2 skipped；`ruff` 0 error；pin 测试见 `tests/test_completion_gate.py`，成功尾 deliverable-fail 端到端 pin 见 `tests/test_deliverable_gate.py::test_tail_deliverable_fail_emits_plan_failed_and_run_failed`。
+
+详见 review 记录：`JAgent-docs/reviews/review_20260908_completion_gate_duplication.md`。
+
+### 11.7 review 修正（2026-09-08，分支 `review/code-review-fixes`）：step_is_mutating 未知工具 fail-closed
+
+**问题（review #3）**：`planner/revision_invariants.py::step_is_mutating` 对未注册工具返回 `False`（判非 mutating）→ Q-06 反向覆盖（mutating 必须被契约覆盖）对未知工具步骤静默失效。与 `recovery._is_read_only_action`（未知工具默认非只读=当作有副作用）语义相反，是受信分类器唯一的乐观 outlier。当前无实洞（revision_guard invariants → guardrail.validate → dag_executor 三层兜底），但属不同文件受信校验器间的隐式顺序依赖：未来单独调用 invariants 即成真洞。
+
+**裁决（B1）**：A（仅注释/断言）否决——不使校验器独立成立；B2（未知工具作独立错误）否决——重复 guardrail 的 tool-existence 规则（受信规则两处实现会漂移）。B1 采纳：修在语义原语 —— 无法证明无副作用 ⇒ 视为 mutating ⇒ 必须被契约覆盖，与 `_is_read_only_action` 对齐，符合 C-02。
+
+**实现落点**：`step_is_mutating` 未知工具 → `return True`；Q-06 注释 + `revision_guard.py` 调用点 A-lite 注释（invariants ≠ PlanGuardrail 替代，真实合并后必由后者收口 tool 存在性/schema/probe）。
+
+**测试**：`tests/test_reviser_restriction.py` 新增 3 pin（未覆盖未知工具被拒——RED 实证、被同名契约覆盖放行、无契约 legacy 跳过）。
+
+**验证**：`pytest` 1422 passed / 2 skipped；`ruff` 0 error。
+
+详见 review 记录：`JAgent-docs/reviews/review_20260908_unknown_tool_q06_fail_closed.md`。
+
+### 11.8 review 清扫（2026-09-08，分支 `review/code-review-fixes`）：全项目死代码扫描
+
+**问题（review #4）**：`agent_kernel._is_stop_signal` 定义但从未调用（`_consume_response` 内联同谓词），
+系同批第三次"定义即死"辅助残留，建议全项目扫描。清扫见 `JAgent-docs/reviews/review_20260908_dead_code_sweep.md`：
+删除 5 处零引用私有符号；发现并修复 `evaluation/run_eval.py` **预置 import 顺序缺陷**（工具类引用
+`BaseTool` 早于其 import → 模块 import 即 NameError）；甄别 1 处误报（`intent._ensure_contract_id` 为
+pydantic validator，保留）。验证：全量 `pytest` 1422 passed / 2 skipped，`ruff`（harness+tests+scripts+evaluation）0 error。
+
+### 11.9 review 修正（2026-09-09，分支 `review/code-review-fixes`）：契约抽取重试 / 冷却解耦 / 高压缩档原文保留
+
+三处均由 reviewer 指认、决策拍板后 TDD 落地（RED → GREEN → 审计）。详见
+`JAgent-docs/reviews/review_20260909_context_review3_4_5.md`。
+
+**③ ContractExtractor.extract 对齐 Planner 重试语义**（`harness/core/contract_extractor.py`）：
+原实现只在 LLM 调用异常时重试，`_parse` 拿到坏 JSON/空列表即 return，`max_retries` 对格式错误无效。
+修法：`_parse` 区分三元结局 —— JSON 解析失败 / 列表非空但全部被结构校验丢弃 → 带原因经
+`_RETRY_HINT` 反馈给模型重试（镜像 Planner.plan/revise 的 parse+guardrail 双反馈循环）；
+`{"required_operations": []}`（无硬性交付）视为合法空**立即返回不重试**（镜像 revise 空=完成）；
+部分有效直接返回有效子集。预算用尽仍走 D-04（`[]` + unverified，不阻断 Run）；调用方
+`asyncio.wait_for` 超时上限不变。测试 `tests/test_contract_extractor.py`（6 例）。
+
+**④ ContextManager 冷却期与书签节拍解耦**（`harness/core/context_manager.py`）：原
+`checkpoint_interval` 同时驱动 `try_checkpoint`（每 N 轮写书签）与 `maybe_compress` 压缩冷却
+（cooldown），两语义被绑死。拆为独立参数：`checkpoint_interval` 只管书签，
+新增 `compression_cooldown_iterations`（默认 10）只管压缩冷却，行为默认不变。
+迁移：把"借用 checkpoint_interval 调冷却"的测试/脚本调用点逐一按语义迁移或镜像双参数
+（serve.py/scripts 镜像保证旧行为逐位一致）。测试新增解耦 pin（TestCompressionCooldownDecoupled）。
+
+**⑤ 高压缩档引入 importance 原文保留**：`lazy_clear` 用重要性分数细粒度剪除，但
+`episode_archive`/`emergency_compact` 此前纯按时间位置折叠，高分项（失败/超时/guardrail_blocked/
+unsuccessful、决策 thought）被与普通内容一视同仁压进摘要。修法（不含 LLM，确定性系统侧保留）：
+`Episode` 新增 `preserved_excerpts`（默认 []，向后兼容）；`_generate_episode` 对归档内容按
+`(importance≥0.6, score↓, seq↑)` 选取 ≤6 条、每条 ≤600 字原文片段放入 Episode。
+Episode→LLM 工作视图的渲染收敛为单一真源 `Episode.to_context_text()`（`agent_kernel` think 与
+`planner/prompts` answer 均调用它，消除两处字段重复渲染），新增 Episode 字段只需在此改一处。上限保证不破坏压缩收敛；原始事件仍在
+Event Store（ADR-012 证据投影不受影响），此改动只提升喂 LLM 工作视图的保真。默认行为：仅当存在
+≥阈值的归档项时新增内容，旧运行场景零漂移。
+
+**验证**：全量 `pytest` **1433 passed / 2 skipped**（净增 11 测试）；`ruff`（harness+tests+scripts+
+evaluation）0 error；默认路径行为逐位核销（冷却默认值、Episode 旧事件反序列化、无高分项场景）。

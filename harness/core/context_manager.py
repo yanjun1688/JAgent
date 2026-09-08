@@ -73,9 +73,13 @@ class ContextManager:
         token_counter: TokenCounter | None = None,
         token_limit: int | None = None,
         checkpoint_interval: int = 10,
+        compression_cooldown_iterations: int = 10,
         compression_threshold_ratio: float = 0.7,
         emergency_threshold_ratio: float = 0.9,
         lazy_clear_ratio: float = 0.5,
+        importance_preserve_threshold: float = 0.6,
+        preserved_excerpt_max_items: int = 6,
+        preserved_excerpt_max_chars: int = 600,
     ):
         self.store = store
         self.llm_client = llm_client
@@ -83,9 +87,14 @@ class ContextManager:
         # v3.4 (F-3): token_limit 外置 — 显式值 > env > 模型窗口×安全系数默认值。
         self.token_limit = resolve_context_token_limit(token_limit)
         self.checkpoint_interval = checkpoint_interval
+        self.compression_cooldown_iterations = compression_cooldown_iterations
         self.compression_threshold_ratio = compression_threshold_ratio
         self.emergency_threshold_ratio = emergency_threshold_ratio
         self.lazy_clear_ratio = lazy_clear_ratio
+        # ⑤: episode_archive/emergency_compact 档的高重要性原文保留参数
+        self.importance_preserve_threshold = importance_preserve_threshold
+        self.preserved_excerpt_max_items = preserved_excerpt_max_items
+        self.preserved_excerpt_max_chars = preserved_excerpt_max_chars
         self.compression_threshold = int(self.token_limit * compression_threshold_ratio)
         self.emergency_threshold = int(self.token_limit * emergency_threshold_ratio)
         self.lazy_clear_threshold = int(self.token_limit * lazy_clear_ratio)
@@ -141,7 +150,7 @@ class ContextManager:
             return
 
         last = self._last_compressed_iteration.get(run_id, 0)
-        cooldown = self.checkpoint_interval
+        cooldown = self.compression_cooldown_iterations
         if last > 0 and iteration - last < cooldown:
             _log_monitor.debug(
                 "COMPRESSION_SKIP %s",
@@ -397,6 +406,31 @@ class ContextManager:
 
         raise TypeError(f"Expected ThoughtEntry or ToolResult, got {type(entry).__name__}")
 
+    def _select_preserved_excerpts(self, thoughts: list, results: list) -> list[str]:
+        """⑤: 选出重要性 ≥ 阈值的事件，原文限长保留进 Episode。
+
+        Selection order: (score desc, seq asc) → deterministic; capped at
+        ``preserved_excerpt_max_items`` × ``preserved_excerpt_max_chars`` so the
+        retention never defeats the compression reclaim goal. Called by both
+        ``_archive_episode`` and ``_emergency_compact`` (via ``_generate_episode``).
+        """
+        candidates: list[tuple[float, int, str]] = []
+        threshold = self.importance_preserve_threshold
+        for t in thoughts:
+            score = self._score_event_importance(t)
+            if score >= threshold:
+                candidates.append((score, t.seq, t.thought))
+        for tr in results:
+            score = self._score_event_importance(tr)
+            if score >= threshold:
+                status_val = tr.status.value if hasattr(tr.status, "value") else str(tr.status)
+                raw = tr.error if tr.error else str(tr.output or "")
+                candidates.append((score, tr.event_seq, f"[{tr.tool_name} {status_val}] {raw}"))
+        candidates.sort(key=lambda c: (-c[0], c[1]))
+        limit = self.preserved_excerpt_max_items
+        max_chars = self.preserved_excerpt_max_chars
+        return [text[:max_chars] for _, _, text in candidates[:limit]]
+
     async def _select_low_importance_events(self, state: RunState) -> tuple[list[int], int]:
         """Select low-importance events for lazy_clear pruning.
 
@@ -454,6 +488,7 @@ class ContextManager:
         thoughts = compress_thoughts if compress_thoughts is not None else state.thought_history
         results = compress_results if compress_results is not None else state.tool_results
         refs = sorted(original_event_refs) if original_event_refs else []
+        preserved_excerpts = self._select_preserved_excerpts(thoughts, results)
 
         activity_lines = []
         for t in thoughts:
@@ -514,6 +549,7 @@ class ContextManager:
                 summary=activity_text[:500] if activity_text else "",
                 importance_score=self._compute_episode_importance(state),
                 format="legacy",
+                preserved_excerpts=preserved_excerpts,
             )
 
         _log_compress.info(
@@ -571,6 +607,7 @@ class ContextManager:
                 summary=response.strip()[:500],
                 importance_score=self._compute_episode_importance(state),
                 format="legacy",
+                preserved_excerpts=preserved_excerpts,
             )
 
         title = data.get("title", "") or "Episode summary"
@@ -593,6 +630,7 @@ class ContextManager:
             summary=summary_text,
             importance_score=self._compute_episode_importance(state),
             format="structured",
+            preserved_excerpts=preserved_excerpts,
         )
 
     def _compute_episode_importance(self, state: RunState) -> float:
