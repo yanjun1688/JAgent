@@ -57,7 +57,6 @@ class BrowserLease:
     _call_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _transport_cm: Any = field(default=None, repr=False)
     _session_cm: Any = field(default=None, repr=False)
-    _process: Any = field(default=None, repr=False)
     _profile_dir: Path | None = None
     _lock_file: Path | None = None
 

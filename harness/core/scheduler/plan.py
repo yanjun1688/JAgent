@@ -641,10 +641,14 @@ class PlanningExecutorScheduler(
                         # 用同一动作静默加回（e05087b6：s3 browser 失败，补丁只修 s1/s2，
                         # merge 后 s3 browser 用同幂等键重放再败）。检测未覆盖的非瞬时失败
                         # 步骤，注入高优反馈强制下一轮修复，而不是重放已知坏动作。
+                        # v3.4 review (A′): "同一动作"= (tool, 规范化 input) 全签名，与
+                        # 退化修订守卫共享定义 — 同 tool 改 input 的合法修正不再误判为未修复。
                         merged_patch_steps = plan_steps_to_payload(revised)
+                        original_inputs = {s.id: s.input for s in plan.steps}
                         unresolved = unresolved_known_bad_steps(
                             s.step_evidence,
                             merged_patch_steps,
+                            original_inputs=original_inputs,
                         )
                         if unresolved:
                             _sched_breaker.warning(
@@ -665,10 +669,11 @@ class PlanningExecutorScheduler(
                                     category=FeedbackCategory.TOOL_FAILURE,
                                     feedback_text=(
                                         f"Revision did NOT address {len(unresolved)} still-broken step(s): "
-                                        f"{', '.join(unresolved)}. These steps failed with the SAME action "
-                                        f"and will fail again if re-run unchanged. You MUST either switch "
-                                        f"them to a working tool/action or explicitly give them up; "
-                                        f"do not leave them on the failing tool. Details: {detail}"
+                                        f"{', '.join(unresolved)}. These steps re-add the SAME action "
+                                        f"(same tool and same input) that already failed, so a re-run "
+                                        f"unchanged will fail again. You MUST either switch them to a "
+                                        f"working tool/action or explicitly give them up; do not leave "
+                                        f"them on the failing tool. Details: {detail}"
                                     ),
                                     priority="high",
                                     error_type="unresolved_known_bad_steps",
@@ -681,74 +686,20 @@ class PlanningExecutorScheduler(
                             )
 
                     if not revised.steps:
-                        if revised.failed:
-                            _sched_think.error("[revise] LLM declares task cannot be completed: %s", revised.intent)
-                            await self._append_run_event(
-                                run_id,
-                                EventType.PLAN_REVISED,
-                                PlanRevisedPayload(
-                                    plan_id=plan_id,
-                                    revision_reason="step_failure_revised",
-                                    intent=revised.intent,
-                                    remaining_steps_summary=f"task failed: {revised.intent}",
-                                    steps=plan_steps_to_payload(revised),
-                                    step_tasks={
-                                        sid: r.task_state.value
-                                        for sid, r in results.items()
-                                        if isinstance(r, StepResult) and r.task_state != TaskState.UNKNOWN
-                                    },
-                                ).model_dump(),
-                            )
-                            self._trace_event(
-                                "PlanRevised",
-                                level="WARNING",
-                                metadata={"plan_id": plan_id, "reason": "task_failed", "intent": revised.intent[:120]},
-                            )
-                            await self._fail(run_id, f"Task cannot be completed: {revised.intent}")
-                            return await self._refresh_state(run_id), consecutive_failures
-
-                        # v2.2 (D5, U2 根治): revise 返回空 steps 不等于完成。
-                        # S06: 完成门 = 机械聚合 + 交付契约双维判定。
-                        verdict = self._completion_gate(root_plan, results, step_aliases, contracts)
-                        all_normal = verdict.mechanical_complete
-                        unmet = verdict.unmet_step_ids
-                        if all_normal:
-                            _sched_think.info("[revise] Task complete after revision (completion gate: all normal)")
-                        else:
-                            _sched_think.error(
-                                "[revise] Revise returned empty steps but %d step(s) NOT normal — %s",
-                                len(unmet),
-                                ", ".join(unmet),
-                            )
-                        await self._append_run_event(
+                        # v2.2 (D5, U2 根治) + S06 + v3.4 review #2: revise 空 steps 不等于
+                        # 完成。空步骤结局统一走 _settle_empty_revised（与 unsuccessful 分支
+                        # 同一条真源：failed 声明 / 完成门 / PLAN_FAILED / finalize 收敛一处）。
+                        return await self._settle_empty_revised(
                             run_id,
-                            EventType.PLAN_REVISED,
-                            PlanRevisedPayload(
-                                plan_id=plan_id,
-                                revision_reason="step_failure_revised",
-                                intent=revised.intent,
-                                remaining_steps_summary=(
-                                    "task complete" if all_normal else f"NOT complete — unmet: {', '.join(unmet)}"
-                                ),
-                                steps=plan_steps_to_payload(revised),
-                                step_tasks={
-                                    sid: r.task_state.value
-                                    for sid, r in results.items()
-                                    if isinstance(r, StepResult) and r.task_state != TaskState.UNKNOWN
-                                },
-                            ).model_dump(),
-                        )
-                        self._trace_event(
-                            "PlanRevised",
-                            metadata={
-                                "plan_id": plan_id,
-                                "reason": "step_failure_revised",
-                                "task_complete": all_normal,
-                            },
-                        )
-                        # fail-safe：宁可标未达成，绝不假绿（C-02）。
-                        return await self._finalize_or_fail_verdict(
-                            run_id, plan.intent, "Task completed after revision", verdict, consecutive_failures
+                            plan_id=plan_id,
+                            root_plan=root_plan,
+                            results=results,
+                            step_aliases=step_aliases,
+                            revised=revised,
+                            revision_reason="step_failure_revised",
+                            contracts=contracts,
+                            consecutive_failures=consecutive_failures,
+                            layer_count=len(layers),
                         )
 
                     _sched_think.info("[revise] Continuing with %d remaining steps", len(revised.steps))
@@ -757,29 +708,14 @@ class PlanningExecutorScheduler(
                         layer_idx,
                         len(revised.steps),
                     )
-                    await self._append_run_event(
+                    # v3.4 review #2: 事件经共享构造器，避免多处内联 PlanRevisedPayload。
+                    await self._emit_plan_revised(
                         run_id,
-                        EventType.PLAN_REVISED,
-                        PlanRevisedPayload(
-                            plan_id=plan_id,
-                            revision_reason="step_failure_revised",
-                            intent=revised.intent,
-                            remaining_steps_summary=f"{len(revised.steps)} steps remaining",
-                            steps=plan_steps_to_payload(revised),
-                            step_tasks={
-                                sid: r.task_state.value
-                                for sid, r in results.items()
-                                if isinstance(r, StepResult) and r.task_state != TaskState.UNKNOWN
-                            },
-                        ).model_dump(),
-                    )
-                    self._trace_event(
-                        "PlanRevised",
-                        metadata={
-                            "plan_id": plan_id,
-                            "reason": "step_failure_revised",
-                            "remaining_steps": len(revised.steps),
-                        },
+                        plan_id,
+                        revised,
+                        results,
+                        revision_reason="step_failure_revised",
+                        remaining_summary=f"{len(revised.steps)} steps remaining",
                     )
                     # v2.2 (E): 签名比对守卫已由 _revise_with_degenerate_guard 在
                     # revise 返回处拒绝退化修订，此处只需接受并继续自愈。
@@ -790,9 +726,9 @@ class PlanningExecutorScheduler(
 
             if all_layers_ok:
                 # v2.2 (D5) + S06: 完成门 — 机械聚合 + 交付契约双维判定。
+                # verdict 在此一次性计算；下方成功尾直接复用（v3.4 review #2 收敛，不再重复过门）。
                 verdict = self._completion_gate(root_plan, results, step_aliases, contracts)
                 all_normal = verdict.mechanical_complete
-                unmet = verdict.unmet_step_ids
                 total_ok = sum(
                     1
                     for sid in (s.id for s in plan.steps)
@@ -871,37 +807,19 @@ class PlanningExecutorScheduler(
                                 "[revise] Merged %d step_tasks from LLM assessment (unsuccessful)",
                                 merged,
                             )
-                        # v2.2 (D11): task_state 审计便签随 PLAN_REVISED 落事件。
-                        step_tasks = {
-                            sid: r.task_state.value
-                            for sid, r in results.items()
-                            if isinstance(r, StepResult) and r.task_state != TaskState.UNKNOWN
-                        }
-                        await self._append_run_event(
-                            run_id,
-                            EventType.PLAN_REVISED,
-                            PlanRevisedPayload(
-                                plan_id=plan_id,
-                                revision_reason="unsuccessful_revised",
-                                intent=revised.intent,
-                                remaining_steps_summary=(
-                                    f"{len(revised.steps)} steps remaining" if revised.steps else "task complete"
-                                ),
-                                steps=plan_steps_to_payload(revised),
-                                step_tasks=step_tasks,
-                            ).model_dump(),
-                        )
-                        self._trace_event(
-                            "PlanRevised",
-                            level="WARNING",
-                            metadata={
-                                "plan_id": plan_id,
-                                "reason": "unsuccessful_revised",
-                                "remaining_steps": len(revised.steps),
-                            },
-                        )
-                        # S08: 守卫已在不变量校验用的合并副本上验证；此处做真实合并。
+                        # v3.4 review #2: 事件只在 revise 仍有步骤继续时于此落（文案如实）；
+                        # revise 空 steps 的结局统一由 _settle_empty_revised 过门后判定并落准确
+                        # summary（消除旧 "task complete" 文案后紧跟 fail 的自相矛盾）。
                         if revised.steps:
+                            await self._emit_plan_revised(
+                                run_id,
+                                plan_id,
+                                revised,
+                                results,
+                                revision_reason="unsuccessful_revised",
+                                remaining_summary=f"{len(revised.steps)} steps remaining",
+                            )
+                            # S08: 守卫已在不变量校验用的合并副本上验证；此处做真实合并。
                             revised = self._merge_revised_plan(
                                 root_plan,
                                 plan,
@@ -924,98 +842,33 @@ class PlanningExecutorScheduler(
                             plan = revised
                             self_heal_count += 1
                             continue
-                        if revised.failed:
-                            _sched_think.error(
-                                "[revise] LLM declares task cannot be completed after unsuccessful: %s",
-                                revised.intent,
-                            )
-                            await self._fail(run_id, f"Task cannot be completed: {revised.intent}")
-                            return await self._refresh_state(run_id), consecutive_failures
-
-                        # v2.2 (D5, U2 根治) + S06: revise 空 steps 后仍须过完成门。
-                        verdict3 = self._completion_gate(root_plan, results, step_aliases, contracts)
-                        if not verdict3.mechanical_complete:
-                            _sched_think.error(
-                                "[revise] Unsuccessful revise returned empty steps but %d unmet — "
-                                "failing (no fake-green): %s",
-                                len(verdict3.unmet_step_ids),
-                                ", ".join(verdict3.unmet_step_ids),
-                            )
-                            error_msg = f"Steps not achieved: {', '.join(verdict3.unmet_step_ids)}"
-                            await self._fail(run_id, error_msg)
-                            return await self._refresh_state(run_id), consecutive_failures
-                        _sched_ctrl.info(
-                            "[revise] Unsuccessful revise returned empty steps — completion gate: all normal"
+                        # 空 steps → 与 site1（层失败 revise）共用同一条完成判定/收尾真源。
+                        return await self._settle_empty_revised(
+                            run_id,
+                            plan_id=plan_id,
+                            root_plan=root_plan,
+                            results=results,
+                            step_aliases=step_aliases,
+                            revised=revised,
+                            revision_reason="unsuccessful_revised",
+                            contracts=contracts,
+                            consecutive_failures=consecutive_failures,
+                            layer_count=len(layers),
                         )
 
                 # v2.2 (D5) + S06: 只有完成门通过（机械 + 交付）才 finalize 完成。
-                verdict = self._completion_gate(root_plan, results, step_aliases, contracts)
-                if not verdict.mechanical_complete:
-                    _sched_think.error(
-                        "[execute] Completion gate FAILED — %d unmet step(s): %s. Failing run (no fake-green).",
-                        len(verdict.unmet_step_ids),
-                        ", ".join(verdict.unmet_step_ids),
-                    )
-                    await self._append_run_event(
-                        run_id,
-                        EventType.PLAN_FAILED,
-                        PlanFailedPayload(
-                            plan_id=plan_id,
-                            completed_steps=total_ok,
-                            total_layers=len(layers),
-                            final_error=f"Steps not achieved: {', '.join(verdict.unmet_step_ids)}",
-                        ).model_dump(),
-                    )
-                    await self._fail(run_id, f"Steps not achieved: {', '.join(verdict.unmet_step_ids)}")
-                    return await self._refresh_state(run_id), consecutive_failures
-                if verdict.deliverable_status == "failed":
-                    # 契约存在但未达成 → 绝不宣称交付达成（C-02），fail run。
-                    unmet_contracts = [v.contract_id for v in verdict.deliverables if v.status != "met"]
-                    _sched_think.error(
-                        "[execute] Deliverable gate FAILED — %d contract(s) unmet: %s. Failing run (no fake-green).",
-                        len(unmet_contracts),
-                        ", ".join(unmet_contracts),
-                    )
-                    await self._append_run_event(
-                        run_id,
-                        EventType.PLAN_FAILED,
-                        PlanFailedPayload(
-                            plan_id=plan_id,
-                            completed_steps=total_ok,
-                            total_layers=len(layers),
-                            final_error=f"Deliverable not met: {', '.join(unmet_contracts)}",
-                        ).model_dump(),
-                    )
-                    await self._fail(run_id, f"Deliverable not met: {', '.join(unmet_contracts)}")
-                    return await self._refresh_state(run_id), consecutive_failures
-
-                root_total = len(root_plan.steps)
-                root_completed = root_total - len(verdict.unmet_step_ids)
-                _sched_iter.info("[plan] PlanCompleted %s: %d/%d root steps", plan_id, root_completed, root_total)
-                await self._append_run_event(
+                # v3.4 review #2: 判定/收尾统一走 _dispose_completion_verdict（与 revise-空同源），
+                # 消除此处第 3 份内联完成门。verdict 于 all_layers_ok 入口已计算，此处不再重复过门。
+                return await self._dispose_completion_verdict(
                     run_id,
-                    EventType.PLAN_COMPLETED,
-                    PlanCompletedPayload(
-                        plan_id=plan_id,
-                        completed_steps=root_completed,
-                        total_layers=len(layers),
-                        summary=f"Completed {root_completed}/{root_total} root steps",
-                    ).model_dump(),
+                    intent=plan.intent,
+                    root_plan=root_plan,
+                    plan_id=plan_id,
+                    verdict=verdict,
+                    consecutive_failures=consecutive_failures,
+                    layer_count=len(layers),
+                    fallback_summary="Task completed successfully",
                 )
-                if self.context_manager:
-                    state = await self._refresh_state(run_id)
-                    await self.context_manager.maybe_compress(run_id, state.seq, state)
-
-                consecutive_failures = 0
-                await self._finalize_with_summary(
-                    run_id,
-                    plan.intent,
-                    "Task completed successfully",
-                    all_normal=True,
-                    unmet_step_ids=[],
-                    completion=verdict,
-                )
-                return await self._refresh_state(run_id), consecutive_failures
 
     async def _generate_answer(
         self,
@@ -1078,31 +931,193 @@ class PlanningExecutorScheduler(
             _sched_think.warning("[finalize] Summary generation failed: %s — using fallback", exc)
             await self._complete(run_id, fallback_summary, completion=completion)
 
-    async def _finalize_or_fail_verdict(
+    async def _emit_plan_revised(
         self,
         run_id: str,
-        intent: str,
-        fallback_summary: str,
-        verdict: CompletionVerdict,
-        consecutive_failures: int = 0,
-    ) -> tuple[RunState, int]:
-        """S06: 完成门判定落点 — 绝不宣称交付达成（C-02 fail-safe）。
+        plan_id: str,
+        revised: DagPlan,
+        results: dict[str, StepResult],
+        *,
+        revision_reason: str,
+        remaining_summary: str,
+    ) -> None:
+        """PlanRevised 事件 + trace 共享构造器（v3.4 review #2 收敛：消灭多处内联 payload）。
 
-        机械不全 → fail；契约存在但未达成 → fail；无契约（unverified）或
-        全部达成 → RunCompleted 携带显式 deliverable 标记（D-04）。
+        注意：调用方需在 results 处于"该事件应反映的时点"传入（合并前/后由调用方决定），
+        以保证 step_tasks 便签与剩余步骤数与调用方语义一致。
         """
+        step_tasks = {
+            sid: r.task_state.value
+            for sid, r in results.items()
+            if isinstance(r, StepResult) and r.task_state != TaskState.UNKNOWN
+        }
+        await self._append_run_event(
+            run_id,
+            EventType.PLAN_REVISED,
+            PlanRevisedPayload(
+                plan_id=plan_id,
+                revision_reason=revision_reason,
+                intent=revised.intent,
+                remaining_steps_summary=remaining_summary,
+                steps=plan_steps_to_payload(revised),
+                step_tasks=step_tasks,
+            ).model_dump(),
+        )
+        self._trace_event(
+            "PlanRevised",
+            metadata={
+                "plan_id": plan_id,
+                "reason": revision_reason,
+                "remaining_steps": len(revised.steps),
+            },
+        )
+
+    async def _dispose_completion_verdict(
+        self,
+        run_id: str,
+        *,
+        intent: str,
+        root_plan: DagPlan,
+        plan_id: str,
+        verdict: CompletionVerdict,
+        consecutive_failures: int,
+        layer_count: int,
+        fallback_summary: str,
+    ) -> tuple[RunState, int]:
+        """S06 完成门单一分派（v3.4 review #2 收敛）—— 全路径同一条判定/收尾真源。
+
+        mechanical 不全 → PLAN_FAILED + fail；deliverable failed → PLAN_FAILED + fail；
+        通过 → emit PLAN_COMPLETED + maybe_compress + _finalize_with_summary。
+        正常完成尾 / 层失败后 revise 空 / unsuccessful revise 空全部汇于此，杜绝完成门
+        规则在多处内联导致漏改一处、行为漂移。fail-safe：绝不假绿（C-02）。
+        通过路径一律发 PLAN_COMPLETED（任何到达此处的收尾都是完成判定通过）。
+        """
+        root_total = len(root_plan.steps)
         if not verdict.mechanical_complete:
-            error_msg = f"Steps not achieved: {', '.join(verdict.unmet_step_ids)}"
-            await self._fail(run_id, error_msg)
+            final_error = f"Steps not achieved: {', '.join(verdict.unmet_step_ids)}"
+            _sched_think.error(
+                "[execute] Completion gate FAILED — %d unmet step(s): %s. Failing run (no fake-green).",
+                len(verdict.unmet_step_ids),
+                ", ".join(verdict.unmet_step_ids),
+            )
+            await self._append_run_event(
+                run_id,
+                EventType.PLAN_FAILED,
+                PlanFailedPayload(
+                    plan_id=plan_id,
+                    completed_steps=root_total - len(verdict.unmet_step_ids),
+                    total_layers=layer_count,
+                    final_error=final_error,
+                ).model_dump(),
+            )
+            await self._fail(run_id, final_error)
             return await self._refresh_state(run_id), consecutive_failures
         if verdict.deliverable_status == "failed":
+            # 契约存在但未达成 → 绝不宣称交付达成（C-02），fail run。
             unmet_contracts = [v.contract_id for v in verdict.deliverables if v.status != "met"]
-            await self._fail(run_id, f"Deliverable not met: {', '.join(unmet_contracts)}")
+            final_error = f"Deliverable not met: {', '.join(unmet_contracts)}"
+            _sched_think.error(
+                "[execute] Deliverable gate FAILED — %d contract(s) unmet: %s. Failing run (no fake-green).",
+                len(unmet_contracts),
+                ", ".join(unmet_contracts),
+            )
+            await self._append_run_event(
+                run_id,
+                EventType.PLAN_FAILED,
+                PlanFailedPayload(
+                    plan_id=plan_id,
+                    completed_steps=root_total - len(verdict.unmet_step_ids),
+                    total_layers=layer_count,
+                    final_error=final_error,
+                ).model_dump(),
+            )
+            await self._fail(run_id, final_error)
             return await self._refresh_state(run_id), consecutive_failures
+        root_completed = root_total - len(verdict.unmet_step_ids)
+        _sched_iter.info("[plan] PlanCompleted %s: %d/%d root steps", plan_id, root_completed, root_total)
+        await self._append_run_event(
+            run_id,
+            EventType.PLAN_COMPLETED,
+            PlanCompletedPayload(
+                plan_id=plan_id,
+                completed_steps=root_completed,
+                total_layers=layer_count,
+                summary=f"Completed {root_completed}/{root_total} root steps",
+            ).model_dump(),
+        )
+        if self.context_manager:
+            state = await self._refresh_state(run_id)
+            await self.context_manager.maybe_compress(run_id, state.seq, state)
         await self._finalize_with_summary(
             run_id, intent, fallback_summary, all_normal=True, unmet_step_ids=[], completion=verdict
         )
-        return await self._refresh_state(run_id), consecutive_failures
+        return await self._refresh_state(run_id), 0
+
+    async def _settle_empty_revised(
+        self,
+        run_id: str,
+        *,
+        plan_id: str,
+        root_plan: DagPlan,
+        results: dict[str, StepResult],
+        step_aliases: dict[str, str],
+        revised: DagPlan,
+        revision_reason: str,
+        contracts: list[Any] | None,
+        consecutive_failures: int,
+        layer_count: int,
+    ) -> tuple[RunState, int]:
+        """revise 返回空 steps 的唯一分派（site1/site2 共用，v3.4 review #2 收敛）。
+
+        revised.failed（LLM 声明任务不可完成）→ 如实落 "task failed" PLAN_REVISED + fail；
+        否则过完成门 → 按结果落准确 summary 的 PLAN_REVISED → _dispose_completion_verdict
+        （mechanical / deliverable / 成功三态与正常完成路径同源，绝不假绿 C-02）。
+        """
+        if revised.failed:
+            _sched_think.error("[revise] LLM declares task cannot be completed: %s", revised.intent)
+            await self._emit_plan_revised(
+                run_id,
+                plan_id,
+                revised,
+                results,
+                revision_reason=revision_reason,
+                remaining_summary=f"task failed: {revised.intent}",
+            )
+            await self._fail(run_id, f"Task cannot be completed: {revised.intent}")
+            return await self._refresh_state(run_id), consecutive_failures
+
+        # v2.2 (D5, U2 根治): revise 返回空 steps 不等于完成。
+        # S06: 完成门 = 机械聚合 + 交付契约双维判定。
+        verdict = self._completion_gate(root_plan, results, step_aliases, contracts)
+        all_normal = verdict.mechanical_complete
+        if all_normal:
+            _sched_think.info("[revise] Task complete after revision (completion gate: all normal)")
+        else:
+            _sched_think.error(
+                "[revise] Revise returned empty steps but %d step(s) NOT normal — %s",
+                len(verdict.unmet_step_ids),
+                ", ".join(verdict.unmet_step_ids),
+            )
+        await self._emit_plan_revised(
+            run_id,
+            plan_id,
+            revised,
+            results,
+            revision_reason=revision_reason,
+            remaining_summary=(
+                "task complete" if all_normal else f"NOT complete — unmet: {', '.join(verdict.unmet_step_ids)}"
+            ),
+        )
+        return await self._dispose_completion_verdict(
+            run_id,
+            intent=revised.intent,
+            root_plan=root_plan,
+            plan_id=plan_id,
+            verdict=verdict,
+            consecutive_failures=consecutive_failures,
+            layer_count=layer_count,
+            fallback_summary="Task completed after revision",
+        )
 
     async def _get_or_fallback(
         self,

@@ -14,10 +14,9 @@ mechanical; the LLM's own task assessment (``step_tasks``) is audit-only.
 from __future__ import annotations
 
 import copy
-import json
 from typing import Any
 
-from harness.core.dag_types import ExecState, StepResult, TaskState
+from harness.core.dag_types import ExecState, StepResult, TaskState, action_signature
 from harness.core.logger import guard_logger
 from harness.core.planner import revision_invariant_feedback, validate_revision_invariants
 from harness.models.plan import DagPlan, DagStep
@@ -25,14 +24,13 @@ from harness.models.plan import DagPlan, DagStep
 _sched_breaker = guard_logger("scheduler.breaker")
 
 
-def _normalize_input(inp: dict[str, Any]) -> str:
-    """规范化工具输入，用于退化修订守卫的签名比对。"""
-    return json.dumps(inp or {}, sort_keys=True, default=str)
-
-
 def step_signature(step: DagStep) -> tuple[str, str]:
-    """步骤动作签名：(tool, 规范化 input)。退化修订守卫据此比对。"""
-    return (step.tool, _normalize_input(step.input))
+    """步骤动作签名：(tool, 规范化 input)。
+
+    委托 dag_types.action_signature —— 与 F-5 recovery.unresolved_known_bad_steps 共享
+    "同一动作"的唯一定义（v3.4 review A′），防止两守卫再次漂移。
+    """
+    return action_signature(step.tool, step.input)
 
 
 def find_degenerate_revised_steps(
@@ -309,6 +307,10 @@ class RevisionGuardMixin:
                 merged_check = self._merge_revised_plan(
                     root_plan, current_plan, revised, check_results, check_aliases
                 )
+                # 受信校验分层：validate_revision_invariants 只管"交付不变量 + Q-06 覆盖"
+                # （未知工具已 fail-closed 视为 mutating）。它不校验 tool 存在性/schema/probe
+                # —— 那是 PlanGuardrail.validate 的职责，真实合并后必由其收口。任何新增调用点
+                # 都不得只跑本校验而跳过 PlanGuardrail（v3.4 review 注记）。
                 invariant_errors = validate_revision_invariants(
                     list(root_contracts or ()),
                     intent_raw,

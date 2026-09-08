@@ -43,7 +43,6 @@ _TOOL_SIGNAL_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 # 上述模式内的词语 —— 纯闲聊也可能出现，故需"强信号"独立判定。
 # 若只匹配到这些弱词，仍交由 LLM 决定（但最终仍以 needs_tools 保守为准）。
-_WEAK_TOOL_SIGNALS: tuple[str, ...] = ("file", "write", "read", "create", "search", "list")
 
 
 def intent_requires_tools(intent: str) -> bool:

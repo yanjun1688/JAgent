@@ -227,7 +227,12 @@ api.llm_client = client
 
 # v3.4 (F-3): token_limit 外置（env HARNESS_CONTEXT_TOKEN_LIMIT / 默认模型窗口×0.7），
 # 不再硬编码 3000（曾导致压缩阈值被压低、频繁误触发，见 run e05087b6）。
-cm = ContextManager(store, llm_client=client if USE_REAL_LLM else None, checkpoint_interval=10)
+cm = ContextManager(
+    store,
+    llm_client=client if USE_REAL_LLM else None,
+    checkpoint_interval=10,
+    compression_cooldown_iterations=10,
+)
 api.context_manager = cm
 
 

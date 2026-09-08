@@ -223,6 +223,35 @@ class Episode(BaseModel):
     embedding: list[float] | None = None
     parent_episode_id: str | None = None
     format: str = "structured"
+    # ⑤: 高重要性项（失败/超时/guardrail_blocked/unsuccessful、决策 thought）的
+    # 原文限长片段 —— 折叠为摘要时保留关键原始措辞，供 LLM 工作视图使用。
+    preserved_excerpts: list[str] = Field(default_factory=list)
+
+    def to_context_text(self) -> str:
+        """Canonical single-source Episode → LLM working-view text.
+
+        Used by every consumer that folds an Episode summary into model context
+        (agent_kernel think, planner answer/revise builders). Adding an Episode
+        field here — and only here — keeps all render sites in sync.
+        """
+        parts: list[str] = []
+        if self.title:
+            parts.append(f"Title: {self.title}")
+        if self.summary:
+            parts.append(f"Summary: {self.summary}")
+        if self.key_decisions:
+            parts.append(f"Key decisions: {', '.join(self.key_decisions)}")
+        if self.tools_used:
+            parts.append(f"Tools used: {', '.join(self.tools_used)}")
+        if self.key_findings:
+            parts.append(f"Key findings: {', '.join(self.key_findings)}")
+        if self.errors_encountered:
+            parts.append(f"Errors: {', '.join(self.errors_encountered)}")
+        if self.current_plan:
+            parts.append(f"Current plan: {self.current_plan}")
+        if self.preserved_excerpts:
+            parts.append("Preserved verbatim excerpts:\n- " + "\n- ".join(self.preserved_excerpts))
+        return "\n".join(parts)
 
 
 class ContextCompressedPayload(BaseModel):

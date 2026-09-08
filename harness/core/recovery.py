@@ -9,7 +9,9 @@ failed steps. Nothing here calls an LLM or performs side effects.
   ``results`` map from the trusted :class:`~harness.core.fold.StepEvidence`
   projection so a resumed/crashed run does not re-run completed steps.
 - F-5: :func:`unresolved_known_bad_steps` catches the e05087b6 defect where a
-  revision silently re-adds a failed step with the same broken action.
+  revision silently re-adds a failed step with the same broken action. "Same broken
+  action" = identical (tool, normalized input) signature — shared with the
+  degenerate-revision guard (v3.4 review A′).
 - F-6: :class:`RecoveryBudget` / :func:`validate_local_repair` bound the
   step-local think-act loop (rounds, tool whitelist, no new side effects).
 """
@@ -18,8 +20,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
-from harness.core.dag_types import ExecState, StepResult
+from harness.core.dag_types import ExecState, StepResult, action_input_signature
 from harness.core.fold import StepEvidence
 
 # ── F-4: rebuild in-memory results from the trusted evidence projection ──
@@ -77,11 +80,8 @@ _TRANSIENT_PATTERNS = re.compile(
 )
 
 # Infrastructure/tool-unavailable errors are not fixed by re-running the same action.
-_TOOL_UNAVAILABLE_PATTERNS = re.compile(
-    r"browser unavailable|event loop|not supported|tool .* unavailable|no handler|"
-    r"module not found|not installed|environment",
-    re.IGNORECASE,
-)
+# (Removed unused _TOOL_UNAVAILABLE_PATTERNS in review audit 2026-09-08 — dead code;
+#  re-add with its consumer if a tool-unavailable exclusion is ever needed.)
 
 
 def _is_transient(error: str | None) -> bool:
@@ -91,14 +91,25 @@ def _is_transient(error: str | None) -> bool:
 def unresolved_known_bad_steps(
     prev_evidence: dict[str, StepEvidence],
     patch_steps: list[dict],
+    *,
+    original_inputs: dict[str, dict[str, Any] | None] | None = None,
 ) -> list[str]:
     """Return failed (non-transient) step ids that a revision patch fails to address.
 
-    A previously failed step is "addressed" only if the patch changes its *tool*
-    (a genuinely different action). Keeping the same tool means the same broken
-    action would be replayed — the e05087b6 defect (s3 browser re-run with the same
-    idempotency key). Transient failures (timeouts) are excluded: they belong to
-    tool-level retry, not revision coverage.
+    A previously failed step is "addressed" iff the merged revision changes its
+    **action signature** — tool OR normalized input (shared canonical definition
+    ``dag_types.action_input_signature``, same as the degenerate-revision guard,
+    v3.4 review A′). Tool change, or a same-tool input correction (e.g. a fixed
+    URL/field), is a legitimate new attempt and is NOT flagged. Only re-adding the
+    step with the *identical* tool+input is an unchanged replay of the known-bad
+    action (the e05087b6 defect: s3 browser re-run with the same idempotency key).
+
+    ``original_inputs`` maps the failed step id to the input that actually ran;
+    it is required to prove an input correction. When it is absent for a step
+    (caller could not supply the original input) the check fails closed to the
+    conservative tool-only rule so a corrected input is never silently assumed.
+    Transient failures (timeouts) are excluded: they belong to tool-level retry,
+    not revision coverage.
     """
     patch_by_id = {str(s.get("step_id")): s for s in patch_steps if s.get("step_id")}
     unresolved: list[str] = []
@@ -113,8 +124,16 @@ def unresolved_known_bad_steps(
             continue
         patched_tool = str(patch.get("tool_name") or "")
         if patched_tool and patched_tool != ev.tool_name:
-            continue  # tool switched → a different action, considered addressed
-        # Same tool (or no tool declared) on a non-transient failure → still bad.
+            continue  # tool switched → a genuinely different action, considered addressed
+        orig_input = (original_inputs or {}).get(sid)
+        if (
+            patched_tool
+            and isinstance(orig_input, dict)
+            and action_input_signature(patch.get("input")) != action_input_signature(orig_input)
+        ):
+            continue  # same tool, corrected input → a new attempt, considered addressed
+        # Same tool with same input (or original input unknown / no tool declared)
+        # on a non-transient failure → the known-bad action would be replayed.
         unresolved.append(sid)
     return sorted(unresolved)
 

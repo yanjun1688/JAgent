@@ -188,7 +188,7 @@ class TestContextManagerIntegration:
 
     async def test_maybe_compress_writes_event(self, store):
         """CW-C1: When over threshold, EPISODE_ARCHIVED event is written."""
-        cm = ContextManager(store=store, token_limit=500, checkpoint_interval=100)
+        cm = ContextManager(store=store, token_limit=500, compression_cooldown_iterations=100)
         state = RunState(run_id="r1")
         state.thought_history = [ThoughtEntry(seq=i, thought="A" * 200, tool_choice="echo") for i in range(1, 16)]
         await cm.maybe_compress("r1", iteration=1, state=state)
@@ -198,7 +198,7 @@ class TestContextManagerIntegration:
 
     async def test_maybe_compress_cooldown(self, store):
         """CW-C2: Cooldown prevents repeated compression."""
-        cm = ContextManager(store=store, token_limit=500, checkpoint_interval=5)
+        cm = ContextManager(store=store, token_limit=500, compression_cooldown_iterations=5)
         state = RunState(run_id="r1")
         state.thought_history = [ThoughtEntry(seq=i, thought="A" * 200, tool_choice="echo") for i in range(1, 16)]
         await cm.maybe_compress("r1", iteration=1, state=state)

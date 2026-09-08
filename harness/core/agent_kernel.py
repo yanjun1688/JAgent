@@ -22,10 +22,6 @@ _logger = agent_logger("kernel")
 _STOP_MARKER = "<STOP>"
 
 
-def _is_stop_signal(text: str) -> bool:
-    return _STOP_MARKER in text or "ANSWER:" in text
-
-
 def _extract_answer(text: str) -> str | None:
     idx = text.find("ANSWER:")
     if idx < 0:
@@ -213,22 +209,7 @@ class LLMAgentKernel(AgentKernel):
 
         if state.summary:
             if isinstance(state.summary, Episode):
-                parts = []
-                if state.summary.title:
-                    parts.append(f"Title: {state.summary.title}")
-                if state.summary.summary:
-                    parts.append(f"Summary: {state.summary.summary}")
-                if state.summary.key_decisions:
-                    parts.append(f"Key decisions: {', '.join(state.summary.key_decisions)}")
-                if state.summary.tools_used:
-                    parts.append(f"Tools used: {', '.join(state.summary.tools_used)}")
-                if state.summary.key_findings:
-                    parts.append(f"Key findings: {', '.join(state.summary.key_findings)}")
-                if state.summary.errors_encountered:
-                    parts.append(f"Errors: {', '.join(state.summary.errors_encountered)}")
-                if state.summary.current_plan:
-                    parts.append(f"Current plan: {state.summary.current_plan}")
-                summary_text = "\n".join(parts)
+                summary_text = state.summary.to_context_text()
             else:
                 summary_text = state.summary
             messages.append({"role": "system", "content": f"Previous context summary:\n{summary_text}"})

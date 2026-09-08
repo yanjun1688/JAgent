@@ -4,10 +4,36 @@ import time
 
 from harness.core.fold import RunStatus, fold_events
 from harness.core.logger import guard_logger
-from harness.models.events import EventType, RunFailedPayload, RunOrphanedPayload
+from harness.models.events import Event, EventType, RunFailedPayload, RunOrphanedPayload
 from harness.storage.event_store import EventStore
 
 _log = guard_logger("lifecycle")
+
+
+def _derive_run_tenant(events: list[Event]) -> str:
+    """Derive the owning tenant of a run from its own event stream.
+
+    A run_id is globally unique and all of its events must belong to one
+    tenant; if the stream ever contains more than one tenant that is an
+    invariant violation. We fail safe by attributing terminal events to the
+    majority tenant (never silently to "default") and logging the anomaly.
+    """
+    tenants = [e.tenant_id for e in events if getattr(e, "tenant_id", None)]
+    if not tenants:
+        return "default"
+    counts: dict[str, int] = {}
+    for t in tenants:
+        counts[t] = counts.get(t, 0) + 1
+    chosen = max(counts, key=counts.get)
+    if len(counts) > 1:
+        _log.error(
+            "Run %s has events spanning multiple tenants %s; attributing orphan terminal events to %s",
+            events[0].run_id,
+            counts,
+            chosen,
+        )
+    return chosen
+
 
 
 async def mark_orphans(store: EventStore) -> int:
@@ -58,6 +84,16 @@ async def mark_orphans(store: EventStore) -> int:
             # the two appends below idempotent across repeated startup scans.
             continue
 
+        # Cross-tenant maintenance routine: this runs with the raw store (no
+        # request tenant context), so append_event would otherwise default the
+        # tenant column to "default". Derive the run's owning tenant / workspace
+        # deterministically from its own event stream so the terminal events are
+        # visible to the owning tenant's scoped view and broadcast to the right
+        # WS clients. A run_id is globally unique; its events must share one
+        # tenant (any divergence is anomalous and logged).
+        tenant_id = _derive_run_tenant(events)
+        workspace_id = next((e.workspace_id for e in events if e.workspace_id), None)
+
         # 1) Diagnostic flag (idempotent across restarts).
         await store.append_event(
             run_id,
@@ -67,6 +103,8 @@ async def mark_orphans(store: EventStore) -> int:
                 detected_at=now,
             ).model_dump(),
             idempotency_key=f"orphan_detect_{run_id}",
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
         )
 
         # 2) Terminal convergence (idempotent): the run is dead with the
@@ -86,9 +124,16 @@ async def mark_orphans(store: EventStore) -> int:
                 user_facing_message="任务因服务重启而中断，请重新发起该任务；已完成的步骤不会重复执行。",
             ).model_dump(),
             idempotency_key=f"orphan_fail_{run_id}",
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
         )
         marked += 1
-        _log.info("Terminated orphan run %s as FAILED (was status=%s)", run_id, state.status.value)
+        _log.info(
+            "Terminated orphan run %s as FAILED (was status=%s, tenant=%s)",
+            run_id,
+            state.status.value,
+            tenant_id,
+        )
 
     if marked:
         _log.info("Orphan detection complete: %d run(s) terminated as FAILED", marked)

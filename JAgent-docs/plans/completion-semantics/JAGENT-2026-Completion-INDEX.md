@@ -52,6 +52,7 @@
 - **L-02 内容匹配**：D-03 决定的 deferred 内容校验，历史契约的 `content` 已存底，未来可补。
 - **L-03 晚到事件拦截范围**：只对 **run 事件流**（RUN_STARTED..终态）生效，**禁止**改为 EventStore 全局 append 拒绝——workspace 审计事件复用同一表（`run_id=workspace_id`），全局拦截会误伤。
 - **L-04 真实 LLM 测试**：独立 opt-in 脚本（沿用 `scripts/test_real_llm_flow.py` 模式），不进 CI 确定性套件。
+- **L-05 side_effects 声明信任锚点（功能优化，code review 2026-09-08 提出）**：F-5/F-6 的只读自动重跑/局部修复边界完全建立在"工具作者正确声明 `side_effects`"上——`read_only_tool_map()`（`scheduler/local_repair.py`）把 `side_effects==[]` 且全 op 无副作用的工具整把纳入只读集，作为 `recovery._is_read_only_action` 的 `explicit` 覆盖（声明即授权，fail-open）。静态白名单 `_READ_ONLY_TOOLS`/`_READ_ONLY_OPERATIONS` 只兜住已人审的已知工具。**单点落在工具注册/审查层（L5）**，不在 local_repair/recovery 本身（二者在声明正确前提下已 fail-closed）。建议后续按 L5 实现：①注册期一致性校验（tool 级 vs op 级副作用不得矛盾；静态可判定 op 如 http GET / 文件只读不得漏标副作用）；②新工具/新 op 契约默认不被信任（空 `side_effects` 走人工审查清单后再生效，fail-closed onboarding）；③runtime 不一致检测可选。**不在当前 review-fix 分支实现**，需单独立项。
 
 ---
 

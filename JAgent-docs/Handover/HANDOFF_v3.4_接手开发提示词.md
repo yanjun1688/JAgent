@@ -59,6 +59,11 @@
 - F-5 已部分接线：`_execute_plan` 修订合并后调用 `unresolved_known_bad_steps()`，
   若有未覆盖坏步骤则注入 high 优先级 FeedbackInjected（error_type=unresolved_known_bad_steps）
   强制下轮修复，不静默重放。
+  > **2026-09-08 review 修正（A′）**：`unresolved_known_bad_steps` 已由 tool-only 改为
+  > **(tool, 规范化 input) 全签名**比较，与退化修订守卫共享 `dag_types.action_signature`
+  > 定义；同 tool 改 input 视为已修复。原始 input 经 `original_inputs=` 传入（merge 前失败计划）。
+  > 详见 `JAgent-docs/reviews/review_20260908_recovery_f5_signature_granularity.md` 与
+  > DESIGN §11.5。以下"待完成"第 3 项提及的失败分级接线不受影响。
 
 【待完成（按 DESIGN §9 顺序，继续做）】
 1. 先跑全量 `pytest tests/ -q` 确认当前无回归（上一次全量跑被人工中断，未看到最终结果）；

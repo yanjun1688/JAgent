@@ -182,7 +182,7 @@ class TestCompressionTrigger:
     async def test_compression_cooldown_prevents_repeat(self, store):
         tc = HeuristicTokenCounter()
         cm = ContextManagerCls(
-            store, token_counter=tc, token_limit=20, compression_threshold_ratio=0.5, checkpoint_interval=3
+            store, token_counter=tc, token_limit=20, compression_threshold_ratio=0.5, compression_cooldown_iterations=3
         )
         state = RunState(run_id="r")
         state.seq = 99
@@ -228,6 +228,40 @@ class TestCompressionTrigger:
 
 
 # ── Checkpoint ──────────────────────────────────────────────────────
+
+class TestCompressionCooldownDecoupled:
+    """④: checkpoint 书签节拍与压缩冷却期解耦（各自独立参数，默认值均为 10）。"""
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_interval_independent_of_compression_cooldown(self, store):
+        tc = HeuristicTokenCounter()
+        cm = ContextManagerCls(
+            store,
+            token_counter=tc,
+            token_limit=20,
+            compression_threshold_ratio=0.5,
+            checkpoint_interval=2,  # 书签：每 2 轮写一次
+            compression_cooldown_iterations=10_000,  # 冷却：极长
+        )
+        state = RunState(run_id="r")
+        state.seq = 99
+        state.plan_boundary_seqs = [99]
+        from harness.core.fold import ThoughtEntry
+
+        state.thought_history.append(ThoughtEntry(seq=1, thought="x" * 100))
+
+        # checkpoint 在 iteration 2 照常写（不受冷却参数影响）
+        await cm.try_checkpoint("run-dec1", 2, state)
+        events = await store.get_events("run-dec1")
+        assert any(e.event_type == EventType.CONTEXT_CHECKPOINTED for e in events)
+
+        # 冷却独立：iteration1 压缩后，iteration2 仍在冷却内（差 1 < 10000）→ 不重复压缩
+        await cm.maybe_compress("run-dec2", 1, state)
+        await cm.maybe_compress("run-dec2", 2, state)
+        events = await store.get_events("run-dec2")
+        archived = [e for e in events if e.event_type == EventType.EPISODE_ARCHIVED]
+        assert len(archived) == 1
+
 
 
 async def _state_from_store(store, run_id):
@@ -345,10 +379,15 @@ class TestSchedulerIntegration:
         """When token limit is low, ContextManager triggers compression during run."""
         tc = HeuristicTokenCounter()
         cm = ContextManagerCls(
-            store, token_counter=tc, token_limit=100, compression_threshold_ratio=0.5, checkpoint_interval=1
+            store,
+            token_counter=tc,
+            token_limit=100,
+            compression_threshold_ratio=0.5,
+            checkpoint_interval=1,
+            compression_cooldown_iterations=1,
         )
         # 8 tool responses: by iter 4, 3 thoughts have accumulated → archive_episode
-        # checkpoint_interval=1 avoids cooldown blocking the 2nd compression attempt
+        # checkpoint_interval=1 / cooldown=1 avoid the cooldown blocking a 2nd compression
         resp = [ThinkResult(thought="x" * 100, tool_name="echo", tool_input={}) for _ in range(8)]
         resp.append(ThinkResult(thought="done"))
         await _run_with_responses(store, resp, context_manager=cm)
@@ -362,7 +401,12 @@ class TestSchedulerIntegration:
         """Compression events are written; run completes normally."""
         tc = HeuristicTokenCounter()
         cm = ContextManagerCls(
-            store, token_counter=tc, token_limit=80, compression_threshold_ratio=0.5, checkpoint_interval=2
+            store,
+            token_counter=tc,
+            token_limit=80,
+            compression_threshold_ratio=0.5,
+            checkpoint_interval=2,
+            compression_cooldown_iterations=2,
         )
         resp = [ThinkResult(thought="x" * 80, tool_name="echo", tool_input={}) for _ in range(5)]
         resp.append(ThinkResult(thought="done"))
@@ -913,6 +957,128 @@ class TestEpisodeGeneration:
         assert len(archived) >= 1
         p = EpisodeArchivedPayload.model_validate(archived[0].payload)
         assert "Plain text summary" in p.episode.current_plan
+
+
+# ── ⑤: High-tier (archive/emergency) preserved excerpts ────────────
+
+
+class TestPreservedExcerpts:
+    """⑤: 高重要性原文在 episode_archive/emergency 折叠时保留进 Episode。
+
+    失败/timeout/guardrail_blocked/unsuccessful 结果与"决策"thought 的原文
+    （限长、限量）被保留在 Episode.preserved_excerpts；普通成功项只进摘要。
+    """
+
+    def test_score_gating(self):
+        cm = ContextManagerCls(None)
+        assert cm.importance_preserve_threshold == 0.6
+        assert cm.preserved_excerpt_max_chars > 0
+        assert cm.preserved_excerpt_max_items > 0
+
+    @pytest.mark.asyncio
+    async def test_generate_episode_preserves_high_importance_excerpts(self):
+        from harness.core.fold import ThoughtEntry, ToolResult, ToolResultStatus
+
+        cm = ContextManagerCls(None)
+        thoughts = [
+            ThoughtEntry(seq=1, thought="I decided to retry with a different tool"),  # 0.7 → 保留
+            ThoughtEntry(seq=2, thought="still processing normally"),  # 0.5 → 不保留
+        ]
+        results = [
+            ToolResult(
+                tool_call_id="t1", tool_name="http_request", status=ToolResultStatus.FAILED,
+                error="boom: connection reset", event_seq=10,
+            ),  # 0.8 → 保留
+            ToolResult(
+                tool_call_id="t2", tool_name="echo", status=ToolResultStatus.COMPLETED,
+                output="ok data", event_seq=11,
+            ),  # 0.2 → 不保留
+        ]
+        episode = await cm._generate_episode(
+            RunState(run_id="r"),
+            episode_range=(1, 11),
+            original_event_refs=[1, 2, 10, 11],
+            original_tokens=1000,
+            compress_thoughts=thoughts,
+            compress_results=results,
+        )
+        assert episode.preserved_excerpts, "高重要性项必须被原文保留"
+        text = "\n".join(episode.preserved_excerpts)
+        assert "connection reset" in text, "失败原因原文应保留"
+        assert "decided to retry" in text, "决策 thought 原文应保留"
+        assert "still processing normally" not in text, "普通 thought 不应保留"
+        assert "ok data" not in text, "成功 output 不应保留"
+
+    @pytest.mark.asyncio
+    async def test_archive_via_maybe_compress_carries_excerpts(self, store):
+        """episode_archive 与 emergency_compact 两档都把高重要性原文带进 Episode。"""
+        from harness.core.fold import ThoughtEntry, ToolResult, ToolResultStatus
+
+        cm = ContextManagerCls(store)
+        state = RunState(run_id="r")
+        state.seq = 99
+        state.plan_boundary_seqs = [99]
+        for i in range(6):
+            state.thought_history.append(ThoughtEntry(seq=i, thought="x" * 60))  # 0.5，不保留
+        results = [
+            ToolResult(
+                tool_call_id=f"ok{i}", tool_name="echo", status=ToolResultStatus.COMPLETED,
+                output=f"data{i}", event_seq=200 + i,
+            )
+            for i in range(4)
+        ]
+        results.insert(
+            1,
+            ToolResult(
+                tool_call_id="f1", tool_name="http_request", status=ToolResultStatus.FAILED,
+                error="archive-excerpt-failure", event_seq=500,
+            ),
+        )
+        state.tool_results.extend(results)
+
+        # 中档：episode_archive（keep=2）→ 归档 thoughts[:-2] + results[:-2]（含 FAIL）
+        await cm._archive_episode("run-pres1", state, token_count=999)
+        events = await store.get_events("run-pres1")
+        p = EpisodeArchivedPayload.model_validate(
+            [e for e in events if e.event_type == EventType.EPISODE_ARCHIVED][0].payload
+        )
+        assert p.episode.preserved_excerpts
+        assert any("archive-excerpt-failure" in x for x in p.episode.preserved_excerpts)
+        assert not any("data3" in x for x in p.episode.preserved_excerpts), "近期成功 output 不保留"
+
+        # 高档：emergency_compact（keep=3）
+        await cm._emergency_compact("run-pres2", state, token_count=999)
+        events = await store.get_events("run-pres2")
+        p = EpisodeArchivedPayload.model_validate(
+            [e for e in events if e.event_type == EventType.EPISODE_ARCHIVED][0].payload
+        )
+        assert any("archive-excerpt-failure" in x for x in p.episode.preserved_excerpts)
+
+    @pytest.mark.asyncio
+    async def test_kernel_working_view_includes_preserved_excerpts(self):
+        """state.summary(为 Episode) 时，kernel 系统提示带上 Preserved verbatim excerpts。"""
+        from harness.core.agent_kernel import LLMAgentKernel
+
+        mock_llm = MockLLMClient(["THOUGHT: using summary\n<STOP>"])
+        kernel = LLMAgentKernel(mock_llm)
+        ep = Episode(
+            title="T",
+            episode_range=(1, 5),
+            original_tokens=100,
+            compressed_tokens=10,
+            key_decisions=["d"],
+            tools_used=["t"],
+            key_findings=["f"],
+            errors_encountered=[],
+            current_plan="plan",
+            original_event_refs=[1],
+            preserved_excerpts=["[http_request failed] boom: connection reset"],
+        )
+        state = RunState(run_id="r", summary=ep, keep_recent_count=2)
+        await kernel.think("test task", [_make_tool("echo")], state)
+        all_text = "\n".join(m["content"] for m in mock_llm.calls[-1]["messages"])
+        assert "Preserved verbatim excerpts" in all_text
+        assert "boom: connection reset" in all_text
 
 
 # ── V3.0 Phase 1: fold.py new event types ──────────────────────

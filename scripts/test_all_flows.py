@@ -64,7 +64,13 @@ async def scenario_normal(api_key: str, model: str, base_url: str):
     store = EventStore(":memory:")
     await store.initialize()
     executor = ToolExecutor(store)
-    cm = ContextManager(store, token_limit=200, compression_threshold_ratio=0.5, checkpoint_interval=20)
+    cm = ContextManager(
+        store,
+        token_limit=200,
+        compression_threshold_ratio=0.5,
+        checkpoint_interval=20,
+        compression_cooldown_iterations=20,
+    )
     monitor = RunMonitor(store, max_tokens=200, token_warning_ratio=0.5)
     monitor.attach()
 
@@ -123,7 +129,13 @@ async def scenario_error(api_key: str, model: str, base_url: str):
     store = EventStore(":memory:")
     await store.initialize()
     executor = ToolExecutor(store)
-    cm = ContextManager(store, token_limit=200, compression_threshold_ratio=0.5, checkpoint_interval=20)
+    cm = ContextManager(
+        store,
+        token_limit=200,
+        compression_threshold_ratio=0.5,
+        checkpoint_interval=20,
+        compression_cooldown_iterations=20,
+    )
     monitor = RunMonitor(store, max_tokens=200, token_warning_ratio=0.5)
     monitor.attach()
 
@@ -181,7 +193,13 @@ async def scenario_monitor():
     store = EventStore(":memory:")
     await store.initialize()
     executor = ToolExecutor(store)
-    cm = ContextManager(store, token_limit=200, compression_threshold_ratio=0.8, checkpoint_interval=20)
+    cm = ContextManager(
+        store,
+        token_limit=200,
+        compression_threshold_ratio=0.8,
+        checkpoint_interval=20,
+        compression_cooldown_iterations=20,
+    )
     monitor = RunMonitor(store, max_tokens=50, token_warning_ratio=0.8)
     monitor.attach()
 

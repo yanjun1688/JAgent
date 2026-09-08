@@ -44,34 +44,39 @@ from harness.models.tools import (  # noqa: E402
     Guardrail,
     RetryPolicy,
     SideEffect,
-    ToolDefinition,
 )
 
-# ── Eval-only tool: exec (requires confirmation) ────────────────────────
-# Not part of the production registry — registered only inside the eval
-# engine so the 确认流程 scenario can be exercised end-to-end.
 
-_EXEC_CONFIRM_DEF = ToolDefinition(
-    name="exec",
-    description="Execute an arbitrary shell command (requires operator confirmation).",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "command": {"type": "string", "description": "Shell command to execute"},
-        },
-        "required": ["command"],
-    },
-    output_schema={
-        "type": "object",
-        "properties": {"stdout": {"type": "string"}},
-    },
-    idempotency_key_fields=["command"],
-    side_effects=[SideEffect.EXTERNAL],
-    requires_confirmation=True,
-    timeout_ms=30000,
-    retry_policy=RetryPolicy(max_retries=0),
-)
+def _expand_placeholders(value: Any) -> Any:
+    """Recursively replace ``@project@`` with the repo root.
 
+    Used by both mock_actions and mock_plan so scenarios can reference absolute
+    project paths without hard-coding them.
+    """
+    if isinstance(value, str):
+        return value.replace("@project@", str(ROOT))
+    if isinstance(value, dict):
+        return {k: _expand_placeholders(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_placeholders(v) for v in value]
+    return value
+from harness.core.dag_executor import DagExecutor  # noqa: E402
+from harness.core.fold import fold_events  # noqa: E402
+from harness.core.llm_client import OpenAILLMClient  # noqa: E402
+from harness.core.planner import Planner  # noqa: E402
+from harness.core.scheduler import PlanningExecutorScheduler, SchedulerConfig  # noqa: E402
+from harness.core.scheduler.base import ThinkResult  # noqa: E402
+from harness.core.scheduler.loop import AgentLoopScheduler  # noqa: E402
+from harness.monitoring.langfuse_tracer import LangfuseTracer  # noqa: E402
+from harness.storage.event_store import EventStore  # noqa: E402
+from harness.tools.base import BaseTool  # noqa: E402
+from harness.tools.executor import ToolExecutor  # noqa: E402
+from harness.tools.file_op import FileOpTool  # noqa: E402
+from harness.tools.http_request import HttpRequestTool  # noqa: E402
+from harness.tools.mcp_call import McpCallTool  # noqa: E402
+from harness.tools.registry import ToolRegistry  # noqa: E402
+
+# ── Eval-only tools (need harness imports above) ────────────────────────
 
 async def _exec_confirm_fn(input: dict[str, Any]) -> dict[str, Any]:
     return {"stdout": f"(eval) simulated exec: {input.get('command', '')[:100]}"}
@@ -105,29 +110,6 @@ class _ExecConfirmTool(BaseTool):
 # rate-limit scenario uses this eval-only definition to exercise the trusted
 # RateLimitGuardrail deterministically.
 
-_HTTP_RATE_LIMIT_DEF = ToolDefinition(
-    name="http_request_rl",
-    description="Send an HTTP request (eval-only, rate limited to 3 calls).",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "url": {"type": "string"},
-            "method": {"type": "string", "enum": ["GET", "POST"], "default": "GET"},
-        },
-        "required": ["url"],
-    },
-    output_schema={
-        "type": "object",
-        "properties": {"status": {"type": "integer"}},
-    },
-    idempotency_key_fields=["url", "method"],
-    side_effects=[SideEffect.EXTERNAL],
-    guardrails=[Guardrail(guardrail_type="rate_limit", config={"max_calls": 3})],
-    timeout_ms=30000,
-    retry_policy=RetryPolicy(max_retries=0),
-)
-
-
 async def _http_rate_limit_fn(input: dict[str, Any]) -> dict[str, Any]:
     return {"status": 200}
 
@@ -155,35 +137,6 @@ class _HttpRateLimitTool(BaseTool):
     async def run(self, input: dict) -> dict:
         return await _http_rate_limit_fn(input)
 
-
-def _expand_placeholders(value: Any) -> Any:
-    """Recursively replace ``@project@`` with the repo root.
-
-    Used by both mock_actions and mock_plan so scenarios can reference absolute
-    project paths without hard-coding them.
-    """
-    if isinstance(value, str):
-        return value.replace("@project@", str(ROOT))
-    if isinstance(value, dict):
-        return {k: _expand_placeholders(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_expand_placeholders(v) for v in value]
-    return value
-from harness.core.dag_executor import DagExecutor  # noqa: E402
-from harness.core.fold import fold_events  # noqa: E402
-from harness.core.llm_client import OpenAILLMClient  # noqa: E402
-from harness.core.planner import Planner  # noqa: E402
-from harness.core.scheduler import PlanningExecutorScheduler, SchedulerConfig  # noqa: E402
-from harness.core.scheduler.base import ThinkResult  # noqa: E402
-from harness.core.scheduler.loop import AgentLoopScheduler  # noqa: E402
-from harness.monitoring.langfuse_tracer import LangfuseTracer  # noqa: E402
-from harness.storage.event_store import EventStore  # noqa: E402
-from harness.tools.base import BaseTool  # noqa: E402
-from harness.tools.executor import ToolExecutor  # noqa: E402
-from harness.tools.file_op import FileOpTool  # noqa: E402
-from harness.tools.http_request import HttpRequestTool  # noqa: E402
-from harness.tools.mcp_call import McpCallTool  # noqa: E402
-from harness.tools.registry import ToolRegistry  # noqa: E402
 
 # ── CLI ────────────────────────────────────────────────────────────────
 
