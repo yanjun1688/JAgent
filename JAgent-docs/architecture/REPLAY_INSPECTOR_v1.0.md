@@ -76,3 +76,28 @@
 2. 时间线一次性拉取（`limit<=1000`，默认 1000）；超千条事件的 Run 暂未做无限滚动（游标字段已就绪）。
 3. 状态视图为调试投影，非全量 `RunState`（省略 context_snapshot、thought 正文等大字段，仅给计数/摘要）；需要原始 payload 时可展开时间线事件查看。
 4. 只读边界靠"全 GET + 导入白名单测试"约束；若未来有人在 `harness/replay/` 内引入写入 import，CI 的静态守卫测试会失败。
+
+## 7. 崩溃恢复（孤儿 run）：当前策略与"自动续跑"未来接入点
+
+### 7.1 当前策略（方向 A：孤儿即终态，不自动续跑）
+
+进程崩溃/重启时，调度器内存态（`_running_tasks` / `_pause_events` / `_confirm_events` / `_deadlines` 等 `dict[run_id, ...]`）全部丢失，但事件流里这些 run 仍是 RUNNING/PAUSED——成为"事件流在跑、无人推进"的孤儿。启动时 `harness/core/lifecycle.py::mark_orphans` 扫描全部 run，对 RUNNING/PAUSED 的孤儿**追加两个事件收敛为终态**：
+
+1. `RUN_ORPHANED` —— 诊断旗标（fold 置 `state.orphaned=True`），供 UI 徽标、归因、资源回收器订阅（浏览器池据此释放租约）；
+2. `RUN_FAILED` —— 终态收敛，payload 明确"因服务重启中断、请重新发起任务、已完成步骤不会重复执行"。
+
+**本期明确不做崩溃后自动断点续跑**。操作员对中断任务的处理方式是**基于事件溯源重新发起一次任务**：幂等键 + F-4 证据重建（`harness/core/recovery.py::rebuild_results_from_evidence`）保证重跑时已完成步骤不重复执行、副作用不重放。相应地，控制接口在"无活 scheduler"时 fail-closed：`POST /runs/{id}/pause` 与 `/resume` 返回 409，不再写入无人执行的 `RunPaused`/`RunResumed`（那会制造假 PAUSED / 假 RUNNING 僵尸）；`/confirm` 因 run 已 FAILED 被既有 `status != PAUSED` 守卫拒绝。
+
+### 7.2 为什么"自动续跑"能力已铺好路但未接线
+
+- `rebuild_results_from_evidence`（F-4）已能从受信 `step_evidence` 投影重建 DAG `results`：终态步骤跳过、崩溃时在飞/未启动步骤复原为 PENDING 重跑；`ContextManager.find_resume_seq` 提供上下文 checkpoint。
+- 但这些目前只服务于**同进程内** revise 重入；崩溃后**没有任何代码为孤儿 run 重建 scheduler / execution backend / 确认窗口**——"最后一公里"接线（启动时 rehydrate scheduler）不存在。
+
+### 7.3 未来"自动续跑"接入点（本期保留，不实现）
+
+若未来要做崩溃后自动续跑，需新增（与本只读调试器物理分离的写入/执行路径）：
+- 启动时为每个 **PAUSED 等待确认** 的孤儿重建 scheduler 并挂起等待确认；RUNNING 孤儿回滚到上一个 `find_resume_seq` checkpoint 后，经 `_execute_plan` 的证据重建（plan.py:430-461 已就位）续跑。
+- execution backend（Docker/SSH/目录）的重建与孤儿容器/连接 reaper（当前 backend 清理只走 scheduler 终态回调，孤儿载体资源需独立回收器）。
+- 明确并发归属：一个 run 同时只能被一个 scheduler 驱动，需受信租约/ fencing 防止重启竞态双驱动。
+- 该能力属独立里程碑，不应作为补丁塞进 `mark_orphans`；届时孤儿策略从"即终态"切换为"可续跑"需同步修订本节与 lifecycle 注释。
+

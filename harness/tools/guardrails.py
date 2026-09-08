@@ -184,11 +184,22 @@ class ToolWhitelistGuardrail:
         **_kwargs: Any,
     ) -> GuardrailResult:
         allowed = workspace_scope.allowed_tools if workspace_scope else None
-        if allowed is not None and tool_def.name not in allowed:
+        if allowed is not None and not ToolWhitelistGuardrail.is_allowed(allowed, tool_def.name):
             return GuardrailResult(
                 False, ToolWhitelistGuardrail.GUARDRAIL_ID, f"Tool '{tool_def.name}' not allowed in this workspace"
             )
         return GuardrailResult(True, ToolWhitelistGuardrail.GUARDRAIL_ID, "")
+
+    @staticmethod
+    def is_allowed(allowed_tools: list[str], tool_name: str) -> bool:
+        """Exact match or ``prefix*`` glob (ADR-011: ``browser_*`` covers all
+        first-class playwright-mcp tools without enumerating 22 names)."""
+        if tool_name in allowed_tools:
+            return True
+        return any(
+            entry.endswith("*") and tool_name.startswith(entry[:-1])
+            for entry in allowed_tools
+        )
 
 
 # ── 7.2 RateLimitGuardrail ────────────────────────────────────────
@@ -357,6 +368,67 @@ class DependencyGuardrail:
             return tool_def.depends_on
         required = config.get("required_events", [])
         return [DependencyConstraint(event_type=ev) for ev in required]
+
+
+# ── Registration-time fail-closed validation (trusted) ────────────
+
+# Declaration keys used in ``Guardrail(guardrail_type=...)``. These are the
+# keys of GuardrailRunner._registry; note "destructive" differs from
+# DestructiveOpGuardrail.GUARDRAIL_ID ("destructive_op", used in results and
+# GuardrailTriggered events) for historical reasons.
+_GUARDRAIL_TYPE_DESTRUCTIVE = "destructive"
+_GUARDRAIL_TYPE_SCOPE = ScopeGuardrail.GUARDRAIL_ID  # "scope"
+
+
+def validate_registration_safety(tool_def: ToolDefinition) -> list[str]:
+    """Fail-closed checks run when a tool is registered (trusted boundary).
+
+    Returns a list of human-readable violation messages; an empty list means
+    the tool is allowed to register. Guardrails are opt-in on the tool
+    contract, so without this check a tool that declares a dangerous
+    capability while forgetting the guardrail that enforces it would be
+    silently allowed at runtime — a "missing configuration" class of bug that
+    no runtime path can detect.
+
+    Rules:
+    - SideEffect.DELETE (tool-level or on any operation) requires the
+      ``destructive`` guardrail. DestructiveOpGuardrail is the sole translator
+      from a DELETE side effect to a confirmation request; the ToolExecutor
+      never reads ``side_effects`` for the confirmation decision, so without
+      the guardrail a deletion executes with no human confirmation.
+    - Non-empty ``scope_targets`` requires the ``scope`` guardrail. Scope
+      targets are enforced only by ScopeGuardrail; declaring targets without
+      it leaves the whitelist with no enforcer — and an empty whitelist itself
+      means "no restriction", making the gap doubly silent.
+
+    SideEffect.WRITE / EXTERNAL deliberately carry no required-guardrail rule
+    here: every current WRITE tool declares a path scope target (covered by
+    the scope_targets rule), and EXTERNAL is too broad for a universal
+    guardrail requirement. Add a rule here when a concrete unguarded case
+    appears rather than speculatively.
+    """
+    violations: list[str] = []
+    declared = {g.guardrail_type for g in (tool_def.guardrails or [])}
+
+    has_delete = SideEffect.DELETE in tool_def.side_effects or any(
+        SideEffect.DELETE in op.side_effects for op in tool_def.operations
+    )
+    if has_delete and _GUARDRAIL_TYPE_DESTRUCTIVE not in declared:
+        violations.append(
+            f"Tool '{tool_def.name}' declares SideEffect.DELETE (tool-level or on an operation) "
+            f"but does not attach the '{_GUARDRAIL_TYPE_DESTRUCTIVE}' guardrail: "
+            "deletions would execute without human confirmation. "
+            f"Add Guardrail(guardrail_type='{_GUARDRAIL_TYPE_DESTRUCTIVE}') to the tool's guardrails list."
+        )
+
+    if tool_def.scope_targets and _GUARDRAIL_TYPE_SCOPE not in declared:
+        violations.append(
+            f"Tool '{tool_def.name}' declares scope_targets but does not attach the "
+            f"'{_GUARDRAIL_TYPE_SCOPE}' guardrail: the whitelist would have no enforcer. "
+            f"Add Guardrail(guardrail_type='{_GUARDRAIL_TYPE_SCOPE}') to the tool's guardrails list."
+        )
+
+    return violations
 
 
 # ── GuardrailRunner (V0.4: async, store-aware) ────────────────────

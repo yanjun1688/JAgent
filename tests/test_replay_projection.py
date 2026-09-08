@@ -207,6 +207,184 @@ class TestProjectStateView:
         assert view.status == "running"
 
 
+class TestStepEvidenceProjection:
+    """F-1/L6-L7 (v3.4, ADR-011): Replay 视图暴露受信执行态证据投影。
+
+    ``RunState.step_evidence`` 由 PLAN_*/DAG_STEP_*/TOOL_* 事件折叠，独立于 LLM
+    工作视图。时间旅行视图必须能展示它 —— 且压缩事件（EpisodeArchived /
+    ContextPruned）只裁工作视图，**不得让证据投影消失**（AC-5）。
+    """
+
+    def test_view_exposes_completed_and_unsuccessful_evidence(self):
+        # Given a plan run where s1 completed (with a blob output_ref) and s2
+        # ended UNSUCCESSFUL (semantic failure)
+        events = [
+            _event("r", 1, EventType.RUN_STARTED, {"intent": "do", "context_snapshot": {}}),
+            _event(
+                "r",
+                2,
+                EventType.PLAN_CREATED,
+                {
+                    "plan_id": "p1",
+                    "intent": "do",
+                    "steps_summary": "s1 read; s2 fetch",
+                    "layer_count": 1,
+                    "steps": [
+                        {"step_id": "s1", "tool_name": "read", "status": "pending"},
+                        {"step_id": "s2", "tool_name": "http_request", "status": "pending"},
+                    ],
+                },
+            ),
+            _event("r", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "read"}),
+            _event("r", 4, EventType.TOOL_CALLED, {"tool_call_id": "tc1", "tool_name": "read", "input": {"x": 1}}),
+            _event(
+                "r",
+                5,
+                EventType.TOOL_COMPLETED,
+                {
+                    "tool_call_id": "tc1",
+                    "tool_name": "read",
+                    "output": {"ref": "a" * 64 + ".json", "sha256": "abc", "summary": "big", "bytes": 5, "truncated": False},
+                    "duration_ms": 3,
+                    "step_id": "s1",
+                },
+            ),
+            _event(
+                "r",
+                6,
+                EventType.DAG_STEP_COMPLETED,
+                {"plan_id": "p1", "step_id": "s1", "output_summary": "big", "status": "completed", "tool_call_id": "tc1"},
+            ),
+            _event("r", 7, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s2", "tool_name": "http_request"}),
+            _event("r", 8, EventType.TOOL_CALLED, {"tool_call_id": "tc2", "tool_name": "http_request", "input": {}}),
+            _event(
+                "r",
+                9,
+                EventType.TOOL_COMPLETED,
+                {
+                    "tool_call_id": "tc2",
+                    "tool_name": "http_request",
+                    "output": {"status_code": 503},
+                    "duration_ms": 5,
+                    "result_type": "unsuccessful",
+                    "error": "upstream 503",
+                    "step_id": "s2",
+                },
+            ),
+            _event(
+                "r",
+                10,
+                EventType.DAG_STEP_COMPLETED,
+                {
+                    "plan_id": "p1",
+                    "step_id": "s2",
+                    "output_summary": "",
+                    "status": "unsuccessful",
+                    "error": "upstream 503",
+                    "tool_call_id": "tc2",
+                },
+            ),
+        ]
+        view = project_state_view(events, at_seq=10, latest_seq=10)
+        # Then the evidence projection is exposed as a first-class surface
+        by_id = {ev.step_id: ev for ev in view.step_evidence}
+        assert set(by_id) == {"s1", "s2"}
+
+        s1 = by_id["s1"]
+        assert s1.exec_state == "completed"
+        assert s1.step_normal is True
+        assert s1.tool_call_id == "tc1"
+        assert s1.output_ref == "a" * 64 + ".json"
+        assert s1.output_summary == "big"
+
+        s2 = by_id["s2"]
+        assert s2.exec_state == "unsuccessful"
+        assert s2.step_normal is False
+        assert s2.tool_call_id == "tc2"
+        assert s2.error == "upstream 503"
+
+    def test_evidence_survives_context_prune_of_working_view(self):
+        # Given a run whose early TOOL events were pruned by ContextPruned
+        # (compression trims only the LLM working view: tool_results/thoughts)
+        events = [
+            _event("r", 1, EventType.RUN_STARTED, {"intent": "do", "context_snapshot": {}}),
+            _event(
+                "r",
+                2,
+                EventType.PLAN_CREATED,
+                {
+                    "plan_id": "p1",
+                    "intent": "do",
+                    "steps_summary": "s1",
+                    "layer_count": 1,
+                    "steps": [{"step_id": "s1", "tool_name": "read", "status": "pending"}],
+                },
+            ),
+            _event("r", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "read"}),
+            _event("r", 4, EventType.TOOL_CALLED, {"tool_call_id": "tc1", "tool_name": "read", "input": {"x": 1}}),
+            _event(
+                "r",
+                5,
+                EventType.TOOL_COMPLETED,
+                {"tool_call_id": "tc1", "tool_name": "read", "output": "content", "duration_ms": 2, "step_id": "s1"},
+            ),
+            _event(
+                "r",
+                6,
+                EventType.DAG_STEP_COMPLETED,
+                {"plan_id": "p1", "step_id": "s1", "output_summary": "ok", "status": "completed", "tool_call_id": "tc1"},
+            ),
+            _event(
+                "r",
+                7,
+                EventType.CONTEXT_PRUNED,
+                {"pruned_event_refs": [4, 5], "pruned_token_count": 900, "pruned_seq_count": 2},
+            ),
+            _event("r", 8, EventType.RUN_COMPLETED, {"result_summary": "done"}),
+        ]
+        # When projected after the prune at latest seq
+        view = project_state_view(events, at_seq=8, latest_seq=8)
+        # Then the working view (tool_results) was pruned...
+        assert view.tool_results == []
+        # ...but the trusted evidence projection is NOT trimmed (AC-5): the step
+        # still shows completed with its tool_call_id and attached output.
+        assert len(view.step_evidence) == 1
+        ev = view.step_evidence[0]
+        assert ev.step_id == "s1"
+        assert ev.exec_state == "completed"
+        assert ev.step_normal is True
+        assert ev.tool_call_id == "tc1"
+        assert ev.output == "content"
+
+    def test_evidence_at_midpoint_shows_running_not_terminal(self):
+        # Given reconstruction as-of the step-started event (before completion)
+        events = [
+            _event("r", 1, EventType.RUN_STARTED, {"intent": "do", "context_snapshot": {}}),
+            _event(
+                "r",
+                2,
+                EventType.PLAN_CREATED,
+                {
+                    "plan_id": "p1",
+                    "intent": "do",
+                    "steps_summary": "s1",
+                    "layer_count": 1,
+                    "steps": [{"step_id": "s1", "tool_name": "read", "status": "pending"}],
+                },
+            ),
+            _event("r", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "read"}),
+        ]
+        view = project_state_view(events, at_seq=3, latest_seq=3)
+        assert len(view.step_evidence) == 1
+        assert view.step_evidence[0].exec_state == "running"
+        assert view.step_evidence[0].step_normal is False
+
+    def test_view_without_steps_has_empty_evidence(self):
+        events = [_event("r", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}})]
+        view = project_state_view(events, at_seq=1, latest_seq=1)
+        assert view.step_evidence == []
+
+
 class TestDiffStates:
     def test_diff_highlights_status_transition_and_failed_step(self):
         # Given a healthy midpoint (seq 6) and the failed terminal (seq 11)

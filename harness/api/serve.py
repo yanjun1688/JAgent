@@ -170,6 +170,13 @@ if USE_REAL_LLM:
         # revise 可无界拖长，见 P1-13 15.8）。默认 10min，watchdog 到期强制
         # RunFailed("run_timed_out")，避免 run 无限等待 LLM。
         run_timeout_ms=int(os.environ.get("HARNESS_RUN_TIMEOUT_MS", "600000")),
+        # F-6 (v3.4)：步骤级本地修复开关。默认关；经 env 开启（.env:
+        # HARNESS_LOCAL_REPAIR=1, HARNESS_LOCAL_REPAIR_TOOLS=http_request）。
+        # 只作用于非交付契约绑定、非瞬态、白名单内只读步骤。
+        local_repair_enabled=os.environ.get("HARNESS_LOCAL_REPAIR", "0") == "1",
+        local_repair_allowed_tools=tuple(
+            s for s in os.environ.get("HARNESS_LOCAL_REPAIR_TOOLS", "").split(",") if s
+        ),
     )
     monitor = RunMonitor(store)
     monitor.attach()
@@ -197,12 +204,15 @@ else:
 # 走同一受信 invoker 路径（D-03 依赖注入）；生产代码不再直调私有 _register。
 registry = ToolRegistry()
 if USE_REAL_LLM:
-    from harness.tools.browser_tool import BrowserTool
+    from harness.tools.fetch_output import FetchOutputTool
     from harness.tools.file_op import FileOpTool
     from harness.tools.http_request import HttpRequestTool
     from harness.tools.mcp_call import McpCallTool
 
-    for tool in (FileOpTool(), HttpRequestTool(), BrowserTool(), McpCallTool()):
+    # ADR-011: browser capabilities are provided exclusively by playwright-mcp
+    # (first-class browser_* tools registered in lifespan via BrowserPool).
+    # v3.4 (F-2): fetch_output retrieves large outputs offloaded to workspace blobs.
+    for tool in (FileOpTool(), HttpRequestTool(), McpCallTool(), FetchOutputTool()):
         registry.register_tool(tool)
 else:
     registry.register_tool(_EchoTool())
@@ -215,7 +225,9 @@ api.llm_client = client
 
 # ── 3. 装配 ContextManager ─────────────────────────────────
 
-cm = ContextManager(store, llm_client=client if USE_REAL_LLM else None, token_limit=3000, checkpoint_interval=10)
+# v3.4 (F-3): token_limit 外置（env HARNESS_CONTEXT_TOKEN_LIMIT / 默认模型窗口×0.7），
+# 不再硬编码 3000（曾导致压缩阈值被压低、频繁误触发，见 run e05087b6）。
+cm = ContextManager(store, llm_client=client if USE_REAL_LLM else None, checkpoint_interval=10)
 api.context_manager = cm
 
 

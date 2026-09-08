@@ -722,7 +722,7 @@ class TestFeedbackSuggestion:
         return state.feedbacks[-1] if state.feedbacks else None
 
     @pytest.mark.asyncio
-    async def test_browser_not_implemented_includes_suggestion(self, store: EventStore):
+    async def test_browser_failure_includes_suggestion(self, store: EventStore):
         monitor = RunMonitor(store)
         monitor.attach()
         for i in range(3):
@@ -732,15 +732,15 @@ class TestFeedbackSuggestion:
                 EventType.TOOL_FAILED,
                 {
                     "tool_call_id": f"t{i}",
-                    "tool_name": "browser",
-                    "error": "NotImplementedError: xyz",
+                    "tool_name": "browser_navigate",
+                    "error": "TimeoutError: action timed out",
                     "retryable": False,
                 },
             )
         fb = await self._last_feedback(store)
         assert fb is not None
-        assert fb.suggestion is not None, "P2: browser NotImplementedError should have suggestion"
-        assert "http_request" in fb.suggestion
+        assert fb.suggestion is not None, "P2: browser_* failure should have a suggestion"
+        assert "browser_snapshot" in fb.suggestion
 
     @pytest.mark.asyncio
     async def test_unknown_error_type_has_no_suggestion(self, store: EventStore):
@@ -753,7 +753,7 @@ class TestFeedbackSuggestion:
                 EventType.TOOL_FAILED,
                 {
                     "tool_call_id": f"t{i}",
-                    "tool_name": "browser",
+                    "tool_name": "custom_thing",
                     "error": "SomeUnknownError: something",
                     "retryable": False,
                 },

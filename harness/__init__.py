@@ -60,10 +60,8 @@ from harness.models.tools import (
 from harness.monitoring.run_monitor import RunMonitor
 from harness.storage.event_store import EventStore, SequenceConflictError
 from harness.tools import (
-    BROWSER_DEF,
     HTTP_REQUEST_DEF,
     MCP_CALL_DEF,
-    BrowserManager,
     ExecutionStatus,
     GuardrailResult,
     GuardrailRunner,
@@ -76,7 +74,6 @@ from harness.tools import (
     ToolExecutionResult,
     ToolExecutor,
     ToolRegistry,
-    browser_fn,
     close_client,
     connect_mcp_server,
     disconnect_mcp_server,
@@ -138,9 +135,6 @@ __all__ = [
     "HTTP_REQUEST_DEF",
     "http_request_fn",
     "close_client",
-    "BROWSER_DEF",
-    "browser_fn",
-    "BrowserManager",
     "MCP_CALL_DEF",
     "mcp_call_fn",
     "connect_mcp_server",

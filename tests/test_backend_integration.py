@@ -105,10 +105,18 @@ class TestWorkspaceRunConversationIntegration:
         assert created.status_code == 200
         run_id = created.json()["run_id"]
 
-        paused = await client.post(f"/api/v1/runs/{run_id}/pause", json={"reason": "integration"})
-        assert paused.status_code == 200
-        resumed = await client.post(f"/api/v1/runs/{run_id}/resume")
-        assert resumed.status_code == 200
+        # Control events (pause/resume) are written by the live scheduler; here
+        # the run completes near-instantly under the mock LLM and unregisters, so
+        # we append the historical control stream directly to assert the read
+        # model folds status purely from persisted events (Direction A: pause/
+        # resume with no live scheduler are rejected rather than faked).
+        from harness.models.events import RunPausedPayload, RunResumedPayload
+
+        await store.append_event(run_id, EventType.RUN_PAUSED, RunPausedPayload(reason="integration").model_dump())
+        seq3 = await store.get_latest_seq(run_id)
+        await store.append_event(
+            run_id, EventType.RUN_RESUMED, RunResumedPayload(resume_from_seq=seq3).model_dump()
+        )
 
         await store.append_event(
             run_id, EventType.RUN_COMPLETED, RunCompletedPayload(result_summary="done").model_dump()

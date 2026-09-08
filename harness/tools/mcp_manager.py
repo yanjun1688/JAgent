@@ -159,11 +159,9 @@ class MCPServerManager:
     # ── Private helpers ──────────────────────────────────────────
 
     async def _connect_stdio(self, cfg: MCPConnectionConfig) -> _MCPSession:
-        command = list(cfg.command)
-        if sys.platform == "win32" and command:
-            exe = command[0].removesuffix(".cmd").removesuffix(".exe").lower()
-            if exe in ("npx", "npm", "node"):
-                command = ["cmd", "/c"] + command
+        from harness.tools.browser_command import normalize_command
+
+        command = normalize_command(list(cfg.command))
         server_params = StdioServerParameters(
             command=command[0],
             args=command[1:],

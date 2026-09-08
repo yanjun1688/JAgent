@@ -43,10 +43,37 @@ from harness.core.scheduler import PlanningExecutorScheduler, SchedulerConfig
 from harness.models.events import EventType
 from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
 from harness.storage.event_store import EventStore
+from harness.tools.base import BaseTool
 from harness.tools.executor import ToolExecutor
 from harness.tools.registry import ToolRegistry
 
 _log = logging.getLogger("test_llm_dag")
+
+
+class _ScriptTool(BaseTool):
+    """Adapter: wrap a legacy (ToolDefinition, fn) pair via register_tool (ADR-010)."""
+
+    def __init__(self, td: ToolDefinition, fn) -> None:
+        self.name = td.name
+        self.description = td.description
+        self.input_schema = td.input_schema
+        self.output_schema = td.output_schema
+        self.idempotency_key_fields = td.idempotency_key_fields
+        self.side_effects = td.side_effects
+        self.timeout_ms = td.timeout_ms
+        self.retry_policy = td.retry_policy
+        self.dangerous_with = td.dangerous_with
+        self.max_parallel = td.max_parallel
+        self.guardrails = td.guardrails or []
+        self._fn = fn
+
+    async def run(self, input):
+        import inspect
+
+        result = self._fn(input)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
 # ── Tool Definitions ─────────────────────────────────────
 
@@ -86,7 +113,7 @@ ALL_FNS = {
 def _init_registry() -> ToolRegistry:
     reg = ToolRegistry()
     for td in ALL_DEFS:
-        reg.register(td, ALL_FNS.get(td.name))
+        reg.register_tool(_ScriptTool(td, ALL_FNS.get(td.name)))
     return reg
 
 

@@ -3538,6 +3538,13 @@
             "type": "array",
             "title": "Pending Confirmations"
           },
+          "step_evidence": {
+            "items": {
+              "$ref": "#/components/schemas/StepEvidenceView"
+            },
+            "type": "array",
+            "title": "Step Evidence"
+          },
           "thought_count": {
             "type": "integer",
             "title": "Thought Count",
@@ -3848,6 +3855,109 @@
           "step_id"
         ],
         "title": "StepChangeView"
+      },
+      "StepEvidenceView": {
+        "properties": {
+          "step_id": {
+            "type": "string",
+            "title": "Step Id"
+          },
+          "plan_id": {
+            "type": "string",
+            "title": "Plan Id",
+            "default": ""
+          },
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name",
+            "default": ""
+          },
+          "exec_state": {
+            "type": "string",
+            "title": "Exec State",
+            "default": "pending"
+          },
+          "depends_on": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Depends On"
+          },
+          "output_summary": {
+            "type": "string",
+            "title": "Output Summary",
+            "default": ""
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          },
+          "output_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Ref"
+          },
+          "output": {
+            "title": "Output"
+          },
+          "probe": {
+            "type": "boolean",
+            "title": "Probe",
+            "default": false
+          },
+          "skip_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skip Reason"
+          },
+          "updated_seq": {
+            "type": "integer",
+            "title": "Updated Seq",
+            "default": 0
+          },
+          "step_normal": {
+            "type": "boolean",
+            "title": "Step Normal",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "step_id"
+        ],
+        "title": "StepEvidenceView",
+        "description": "v3.4 (F-1, ADR-011): 受信执行态证据投影的只读视图.\n\nMirrors :class:`harness.core.fold.StepEvidence` (wire-safe, self-contained —\nthis module stays free of execution imports so the read path stays\nstatically auditable). The evidence projection is folded from PLAN_*/DAG_STEP_*/\nTOOL_* events and is **never trimmed by compression** — exposing it here is\nwhat makes Replay's time-travel view survive EpisodeArchived/ContextPruned\n(AC-5). ``step_normal`` is the trusted gate predicate (completed/idempotent,\nor probe-UNSUCCESSFUL), reproduced for the UI."
       },
       "SuccessResponse": {
         "properties": {

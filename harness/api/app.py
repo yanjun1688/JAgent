@@ -109,12 +109,41 @@ async def lifespan(app: FastAPI):
         MCP_CALL_DEF.description += "\n\nAvailable MCP servers and tools:\n" + "\n".join(mcp_tool_lines)
         _logger.info("MCP discovery: %d tools available via mcp_call", len(mcp_tool_lines))
 
+    # ── Browser pool (ADR-011) — playwright-mcp as the only browser backend ──
+    browser_pool = None
+    try:
+        from harness.models.browser import BrowserConfig
+        from harness.tools.browser_mcp import register_browser_tools
+        from harness.tools.browser_pool import BrowserPool, set_pool
+
+        browser_pool = BrowserPool(BrowserConfig.from_env())
+        browser_pool.attach_store(api.raw_store)
+        set_pool(browser_pool)
+        api.browser_pool = browser_pool
+        await browser_pool.reap_stale_profile_locks()
+        report = await register_browser_tools(api.registry, browser_pool)
+        if report["success"]:
+            _logger.info(
+                "Browser pool ready: %d tools registered (%d blocked by policy)",
+                len(report["registered"]),
+                len(report["blocked"]),
+            )
+        else:
+            _logger.warning("Browser pool unavailable: %s", report.get("error"))
+    except Exception as exc:
+        _logger.warning("Browser pool init failed (browser tools disabled): %s", exc)
+
     try:
         yield
     except asyncio.CancelledError:
         _logger.warning("Lifespan cancelled during shutdown")
         raise
     finally:
+        try:
+            if browser_pool is not None:
+                await browser_pool.shutdown()
+        except asyncio.CancelledError:
+            _logger.warning("Browser pool shutdown interrupted")
         try:
             await mcp_manager.shutdown_all()
         except asyncio.CancelledError:

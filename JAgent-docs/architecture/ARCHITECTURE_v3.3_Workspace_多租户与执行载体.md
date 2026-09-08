@@ -490,6 +490,23 @@ async def execute(self, run_id, tool_name, input, tool_def, tool_fn, *,
         current_run_id.reset(token); current_workspace.reset(token_ws)
 ```
 
+### 9.5 注册期 fail-closed 校验（受信）
+
+Guardrails 在工具契约上是 **opt-in**（`tool_def.guardrails` 为空则声明式 guardrail 全部跳过）。若新增危险工具时忘记挂接对应 guardrail，运行时只会**静默放行**——这类"漏配置"无法在执行链上检出。为此在唯一注册入口 `ToolRegistry.register_tool()` 增加受信前置校验：`to_definition()` 后、入库前调用 `validate_registration_safety(tool_def)`（`tools/guardrails.py` 纯函数），违规直接 `ValueError`，使"忘记防护"成为**启动即崩**而非运行时风险。
+
+两条硬规则：
+
+| 规则 | 理由 |
+|------|------|
+| tool 级或任一 operation 的 `side_effects` 含 `SideEffect.DELETE` → 必须声明 `destructive` guardrail | `DestructiveOpGuardrail` 是 DELETE→确认请求的**唯一**翻译者；`ToolExecutor` 的确认决策只读 `requires_confirmation` 字段、从不读 `side_effects`（executor.py 确认门）。缺该 guardrail 则删除操作无人工确认直接执行 |
+| `scope_targets` 非空 → 必须声明 `scope` guardrail | scope 目标仅由 `ScopeGuardrail` 强制执行；声明目标却不挂 guardrail，白名单无人执行，而空白名单本身又表示"不限制"，缺口双重静默 |
+
+边界说明：
+- `requires_confirmation=True` 但无 destructive guardrail **不违规**——executor 直读该契约字段，确认门照常生效（浏览器工具的 `browser_file_upload`/`browser_evaluate` 走此路径）。
+- 未知 guardrail type 在运行时已 fail-closed（`GuardrailRunner` 直接 block），无需注册期重复。
+- `SideEffect.WRITE` / `EXTERNAL` 暂不立规则：现有 WRITE 工具均声明 path scope 目标（被第二条规则覆盖）；待出现具体"无防护写工具"再增补，不提前抽象。
+- 校验只在 `register_tool(BaseTool)` 公共入口执行；私有原语 `_register(tool_def, fn)` 仅供测试直构 `ToolDefinition` 使用，生产注册路径（serve.py / browser_mcp / mcp_manager）全部经公共入口覆盖。
+
 ---
 
 ## 10. API 设计

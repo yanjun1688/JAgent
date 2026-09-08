@@ -15,7 +15,8 @@ import pytest
 from harness.core.dag_executor import DagExecutor
 from harness.core.dag_types import ExecState, StepResult
 from harness.core.fold import RunStatus, fold_events
-from harness.core.scheduler.plan import PlanningExecutorScheduler, verify_deliverables
+from harness.core.scheduler.plan import PlanningExecutorScheduler
+from harness.core.scheduler.completion import verify_deliverables
 from harness.models.events import EventType, RunCompletedPayload
 from harness.models.intent import DeliveryContract, DeliverySource
 from harness.models.plan import DagPlan, DagStep

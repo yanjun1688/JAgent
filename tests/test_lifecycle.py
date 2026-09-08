@@ -199,7 +199,7 @@ class TestMarkOrphans:
         marked = await mark_orphans(store)
         assert marked == 0
 
-    async def test_fold_after_mark_shows_orphaned(self, store: EventStore):
+    async def test_fold_after_mark_shows_orphaned_and_failed(self, store: EventStore):
         await store.append_event(
             "r1",
             EventType.RUN_STARTED,
@@ -209,5 +209,77 @@ class TestMarkOrphans:
 
         events = await store.get_events("r1")
         state = fold_events(events)
+        # Direction A (orphans-are-terminal): the orphan flag is kept for
+        # attribution, but the run converges to FAILED rather than lingering
+        # as a fake-RUNNING zombie with no scheduler driving it.
         assert state.orphaned is True
-        assert state.status == RunStatus.RUNNING
+        assert state.status == RunStatus.FAILED
+
+
+class TestOrphanTermination:
+    """Direction A: an orphaned run is terminated (RUN_FAILED) at startup,
+    not left as a RUNNING/PAUSED zombie. Crash recovery is deliberately NOT
+    automatic — the operator re-submits the task; event sourcing + idempotency
+    keys + F-4 evidence rebuild prevent duplicate side effects on re-run.
+    """
+
+    async def test_running_orphan_is_terminated_as_failed(self, store: EventStore):
+        await store.append_event(
+            "r1",
+            EventType.RUN_STARTED,
+            {"intent": "test", "context_snapshot": {}},
+        )
+        await mark_orphans(store)
+
+        events = await store.get_events("r1")
+        types = [e.event_type for e in events]
+        assert EventType.RUN_ORPHANED in types
+        assert EventType.RUN_FAILED in types
+        # ORPHANED (diagnostic flag) precedes FAILED (terminal state).
+        assert types.index(EventType.RUN_ORPHANED) < types.index(EventType.RUN_FAILED)
+
+        state = fold_events(events)
+        assert state.status == RunStatus.FAILED
+        assert state.orphaned is True
+
+    async def test_paused_orphan_is_terminated_as_failed(self, store: EventStore):
+        await store.append_event(
+            "r1",
+            EventType.RUN_STARTED,
+            {"intent": "test", "context_snapshot": {}},
+        )
+        await store.append_event("r1", EventType.RUN_PAUSED, {"reason": "waiting for confirmation"})
+        await mark_orphans(store)
+
+        state = fold_events(await store.get_events("r1"))
+        assert state.status == RunStatus.FAILED
+        assert state.orphaned is True
+
+    async def test_termination_is_idempotent(self, store: EventStore):
+        await store.append_event(
+            "r1",
+            EventType.RUN_STARTED,
+            {"intent": "test", "context_snapshot": {}},
+        )
+        first = await mark_orphans(store)
+        assert first == 1
+        # Second startup scan: run is already FAILED → not re-terminated.
+        second = await mark_orphans(store)
+        assert second == 0
+
+        events = await store.get_events("r1")
+        failed = [e for e in events if e.event_type == EventType.RUN_FAILED]
+        assert len(failed) == 1
+
+    async def test_failed_payload_tells_operator_to_resubmit(self, store: EventStore):
+        await store.append_event(
+            "r1",
+            EventType.RUN_STARTED,
+            {"intent": "test", "context_snapshot": {}},
+        )
+        await mark_orphans(store)
+
+        events = await store.get_events("r1")
+        failed = next(e for e in events if e.event_type == EventType.RUN_FAILED)
+        # The failure must be attributable to a restart and tell the user what to do.
+        assert "restart" in failed.payload["final_error"].lower() or "orphan" in failed.payload["final_error"].lower()

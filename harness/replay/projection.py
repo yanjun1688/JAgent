@@ -38,6 +38,7 @@ from harness.replay.schemas import (
     StateDiff,
     StatusChangeView,
     StepChangeView,
+    StepEvidenceView,
     ToolResultChangeView,
     ToolResultView,
 )
@@ -133,6 +134,28 @@ def _pending_confirmations(state: RunState, events: Sequence[Event]) -> list[Pen
     return views
 
 
+def _step_evidence_view(state: RunState) -> list[StepEvidenceView]:
+    return [
+        StepEvidenceView(
+            step_id=ev.step_id,
+            plan_id=ev.plan_id,
+            tool_name=ev.tool_name,
+            exec_state=ev.exec_state,
+            depends_on=list(ev.depends_on),
+            output_summary=ev.output_summary,
+            error=ev.error,
+            tool_call_id=ev.tool_call_id,
+            output_ref=ev.output_ref,
+            output=ev.output,
+            probe=ev.probe,
+            skip_reason=ev.skip_reason,
+            updated_seq=ev.updated_seq,
+            step_normal=ev.step_normal,
+        )
+        for ev in sorted(state.step_evidence.values(), key=lambda e: e.step_id)
+    ]
+
+
 def _plan_view(state: RunState) -> PlanView | None:
     plan = state.latest_plan
     if not plan:
@@ -199,6 +222,7 @@ def project_state_view(events: Sequence[Event], at_seq: int, latest_seq: int) ->
         tool_results=tool_results,
         guardrail_blocks=_guardrail_blocks(sliced),
         pending_confirmations=_pending_confirmations(state, sliced),
+        step_evidence=_step_evidence_view(state),
         thought_count=len(state.thought_history),
         orphaned=state.orphaned,
         workspace_id=state.workspace_id,

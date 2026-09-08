@@ -1,5 +1,12 @@
 from harness.tools.base import BaseTool, current_backend, make_invoker, operation
-from harness.tools.browser_tool import BROWSER_DEF, BrowserManager, BrowserTool, browser_fn
+from harness.tools.browser_mcp import BrowserMcpTool, register_browser_tools
+from harness.tools.browser_pool import (
+    BrowserLease,
+    BrowserLeaseUnavailableError,
+    BrowserPool,
+    get_pool,
+    set_pool,
+)
 from harness.tools.executor import ExecutionStatus, ToolExecutionResult, ToolExecutor
 from harness.tools.file_op import FileOpTool
 from harness.tools.guardrails import (
@@ -29,13 +36,18 @@ from harness.tools.skill import Skill
 
 
 async def close_tools() -> None:
-    """ADR-010 D-08: 统一关闭工具层共享资源（http client / browser / mcp）。"""
-    from harness.tools.browser_tool import BrowserManager
+    """ADR-010 D-08: 统一关闭工具层共享资源（http client / browser pool / mcp）。"""
+    from harness.tools.browser_pool import get_pool
     from harness.tools.http_request import close_client
     from harness.tools.mcp_call import get_manager
 
     await close_client()
-    await BrowserManager.cleanup()
+    pool = get_pool()
+    if pool is not None:
+        try:
+            await pool.shutdown()
+        except Exception:
+            pass
     manager = get_manager()
     if manager is not None:
         try:
@@ -66,7 +78,6 @@ __all__ = [
     "close_client",
     "FileOpTool",
     "HttpRequestTool",
-    "BrowserTool",
     "McpCallTool",
     "McpDynamicTool",
     "BaseTool",
@@ -74,12 +85,17 @@ __all__ = [
     "make_invoker",
     "current_backend",
     "close_tools",
-    "BROWSER_DEF",
-    "browser_fn",
-    "BrowserManager",
     "MCP_CALL_DEF",
     "mcp_call_fn",
     "connect_mcp_server",
     "disconnect_mcp_server",
     "Skill",
+    # ADR-011 browser (playwright-mcp pool)
+    "BrowserPool",
+    "BrowserLease",
+    "BrowserLeaseUnavailableError",
+    "BrowserMcpTool",
+    "register_browser_tools",
+    "get_pool",
+    "set_pool",
 ]

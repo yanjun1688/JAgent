@@ -31,6 +31,9 @@ harness/tools/r*.txt
 data/
 frontend/.vite/
 
+# Tool output blobs (runtime artifacts, not source)
+.harness_outputs/
+
 # Playwright MCP cache
 .playwright-mcp/
 

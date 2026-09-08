@@ -183,8 +183,8 @@ harness/
     ├── base.py                # BaseTool 抽象 + register_tool (ADR-010)
     ├── file_op.py             # FileOpTool — backend 驱动（无全局沙盒）
     ├── http_request.py        # HttpRequestTool
-    ├── browser_tool.py        # BrowserTool (Playwright)
-    ├── mcp_call.py / mcp_manager.py  # MCP 工具入口与管理
+    ├── browser_pool.py        # BrowserPool — playwright-mcp 浏览器池/按 Run 租借（ADR-011）
+    ├── mcp_call.py / mcp_manager.py  # MCP 工具入口与管理（memory/fetch 等 stdio MCP）
     ├── sandbox.py / retry.py / registry.py / semantic.py / skill.py
 
 frontend/                      # React 18 + Vite + TypeScript (v0.3.0)
@@ -231,9 +231,41 @@ tests/                         # 59 个测试文件，~1109 项测试全部通�
 
 ```bash
 pip install -e .
+# 浏览器自动化（playwright-mcp，本地固定安装，不走运行时 npx）
+python scripts/setup_playwright_mcp.py
 # 前端依赖（如需开发前端）
 cd frontend && npm install
 ```
+
+> 浏览器能力唯一后端为微软官方 [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp)；
+> 内置 Playwright Python 浏览器工具已退役（ADR-011）。架构与多租户隔离模型见
+> [ADR-011](./JAgent-docs/architecture/ADR-011_浏览器后端收敛与浏览器池.md)。
+
+#### 浏览器模式
+
+| 模式 | 适用 | 行为 |
+|------|------|------|
+| `isolated`（默认） | SaaS / CI / 云端 | `--isolated` 临时 profile，Run 结束浏览器即销毁，零跨租户泄漏；CI 设 `HARNESS_BROWSER_HEADLESS=1` |
+| `persistent` | 自托管 / 本机（A1） | 真实 Chrome + 按 tenant/workspace 隔离的持久 profile，headed 可见，登录态复用 |
+| `cdp` | 未来远端浏览器农场 | 仅预留接口，当前未实现 |
+
+**A1 一次性登录引导（persistent 模式）**：
+
+```bash
+# 1. 切到 persistent 模式（建议写入 .env）
+export HARNESS_BROWSER_MODE=persistent
+# 2. 启动服务，创建一个会用到浏览器的 Run（或直接让 agent 打开目标网站）
+python -m harness.api.serve
+# 3. 首次调用浏览器工具时会自动拉起本机真实 Chrome（headed）；
+#    在该 Chrome 窗口里人工登录目标网站（如内网系统/SaaS）一次；
+# 4. 登录态保存在 data/browser-profiles/<tenant>/<workspace>/，
+#    之后同 workspace 的多轮/多 Run 自动复用，无需再次登录。
+```
+
+> 约束：一个 profile 同一时间只能被一个浏览器实例使用（Chrome 限制）；
+> 同 workspace 的并发 Run 会排队（默认 30s）或被结构化拒绝。SaaS 多租户请用 `isolated`。
+> RCE 级工具 `browser_run_code_unsafe` 与 `browser_evaluate`（默认）在 harness 层过滤禁用，
+> 工具清单中不可见；`browser_file_upload` 触发人工确认。
 
 ### 启动 API 服务 + 前端
 
@@ -280,6 +312,11 @@ curl -X POST http://localhost:8000/api/v1/runs \
 | `HARNESS_LOG_DIR` | `data/logs` | 轮转日志目录 |
 | `HARNESS_PORT` | `8000` | uvicorn 端口 |
 | `LANGFUSE_ENABLED` | `false` | Langfuse 追踪开关 |
+| `HARNESS_BROWSER_MODE` | `isolated` | 浏览器隔离模式：`isolated` / `persistent` / `cdp`（ADR-011） |
+| `HARNESS_BROWSER_PROFILE_ROOT` | `data/browser-profiles` | persistent 模式 profile 根（下分 `<tenant>/<workspace>/`） |
+| `HARNESS_BROWSER_HEADLESS` | `0` | 无头模式（CI/云端设 `1`） |
+| `HARNESS_BROWSER_LEASE_WAIT_MS` | `30000` | persistent profile 被占用时排队超时 |
+| `HARNESS_PLAYWRIGHT_MCP_CMD` | — | 显式覆盖 playwright-mcp 可执行命令 |
 
 ## API 端点
 
@@ -341,10 +378,17 @@ curl -X POST http://localhost:8000/api/v1/runs \
 | 接口层 | FastAPI + Uvicorn |
 | Event Store | SQLite (aiosqlite, Append-Only) |
 | 沙盒执行 | ExecutionBackend：本地目录 / Docker 容器 / SSH-SFTP |
-| 浏览器工具 | Playwright (async) |
+| 浏览器工具 | `@playwright/mcp`（BrowserPool 按 Run 租借，ADR-011） |
 | 前端 | React 18 + Vite + TypeScript + zustand + three.js |
 | 观测 | Langfuse · 统一 Query API |
 | 测试 | pytest (asyncio_mode=auto) + ruff + vitest |
+
+## 交流与学习
+
+欢迎一起交流 Agent 架构、事件溯源（Event Sourcing）、受信边界设计等话题，互相学习、共同进步。
+
+- 📮 邮箱：**hyanjun546@gmail.com**
+- 有任何问题、建议或想法，欢迎邮件联系。
 
 ## License
 

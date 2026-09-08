@@ -4,7 +4,8 @@ from __future__ import annotations
 import pytest
 
 from harness.core.llm_client import ChatResponse
-from harness.core.planner import Planner, PlanGuardrail
+from harness.core.planner import Planner, PlanGuardrail, parse_plan_response
+from harness.core.planner.prompts import build_tool_descriptions
 from harness.core.fold import RunState
 from harness.models.plan import DagPlan, DagStep, RequiredOperation
 from harness.models.tools import RetryPolicy, ToolDefinition
@@ -49,9 +50,9 @@ def registry():
 
 class TestPlannerParsePlan:
     def test_parse_plan_parameters_fallback(self):
-        """_parse_plan should accept 'parameters' as alias for 'input'."""
+        """parse_plan_response should accept 'parameters' as alias for 'input'."""
         response = '{"steps": [{"id": "s1", "tool": "echo", "parameters": {"msg": "hello"}, "depends_on": []}]}'
-        plan, err = Planner._parse_plan(response)
+        plan, err = parse_plan_response(response)
         assert plan is not None, err
         assert len(plan.steps) == 1
         assert plan.steps[0].input == {"msg": "hello"}
@@ -59,44 +60,44 @@ class TestPlannerParsePlan:
     def test_parse_plan_input_takes_priority(self):
         """When both 'input' and 'parameters' exist, 'input' wins."""
         response = '{"steps": [{"id": "s1", "tool": "echo", "input": {"msg": "from_input"}, "parameters": {"msg": "from_params"}}]}'
-        plan, err = Planner._parse_plan(response)
+        plan, err = parse_plan_response(response)
         assert plan is not None, err
         assert plan.steps[0].input == {"msg": "from_input"}
 
     def test_parse_plan_missing_input_returns_err(self):
         """When neither 'input' nor 'parameters' exists, return error."""
         response = '{"steps": [{"id": "s1", "tool": "echo", "depends_on": []}]}'
-        plan, err = Planner._parse_plan(response)
+        plan, err = parse_plan_response(response)
         assert plan is None
         assert "required property" in err
 
     def test_parse_plan_non_dict_input_returns_err(self):
         """When input is not a dict (e.g. string), return error."""
         response = '{"steps": [{"id": "s1", "tool": "echo", "input": "not_a_dict"}]}'
-        plan, err = Planner._parse_plan(response)
+        plan, err = parse_plan_response(response)
         assert plan is None
         assert "not of type" in err
 
     def test_parse_plan_parameters_non_dict_returns_err(self):
         response = '{"steps": [{"id": "s1", "tool": "echo", "parameters": "bad"}]}'
-        plan, err = Planner._parse_plan(response)
+        plan, err = parse_plan_response(response)
         assert plan is None
         assert "not of type 'object'" in err or "required property" in err
 
     def test_parse_plan_empty_steps(self):
         response = '{"steps": []}'
-        plan, err = Planner._parse_plan(response)
+        plan, err = parse_plan_response(response)
         assert plan is not None, err
         assert len(plan.steps) == 0
 
     def test_parse_plan_malformed_json(self):
-        plan, err = Planner._parse_plan("not json at all")
+        plan, err = parse_plan_response("not json at all")
         assert plan is None
         assert err  # should be a non-empty error
 
     def test_parse_plan_code_fences(self):
         response = '```\n{"steps": [{"id": "s1", "tool": "echo", "input": {"msg": "hi"}}]}\n```'
-        plan, err = Planner._parse_plan(response)
+        plan, err = parse_plan_response(response)
         assert plan is not None, err
         assert len(plan.steps) == 1
 
@@ -106,7 +107,7 @@ class TestPlannerParsePlan:
             '{"intent":"t","steps":[{"id":"s1","tool":"echo","input":{"msg":"hi"}}],'
             '"declared_operations":[{"tool":"echo","input":{"msg":"hi"}},{"tool":"echo","input":{"msg":"other"}}]}'
         )
-        plan, err = Planner._parse_plan(response)
+        plan, err = parse_plan_response(response)
         assert plan is not None, err
         assert len(plan.declared_operations) == 2
         assert plan.declared_operations[0].tool == "echo"
@@ -118,7 +119,7 @@ class TestPlannerParsePlan:
             '{"steps": [], "declared_operations": ["bad", {"tool": ""}, {"input": {}}, '
             '{"tool": "echo", "input": {"msg": "hi"}}]}'
         )
-        plan, err = Planner._parse_plan(response)
+        plan, err = parse_plan_response(response)
         assert plan is not None, err
         assert len(plan.declared_operations) == 1
         assert plan.declared_operations[0].input == {"msg": "hi"}
@@ -293,7 +294,7 @@ class TestPlanPromptBug2:
         )
 
     async def test_plan_accepts_data_flow_references(self, registry):
-        """Verify _parse_plan correctly handles step inputs with $step_id.field references.
+        """Verify parse_plan_response correctly handles step inputs with $step_id.field references.
 
         This ensures the infrastructure supports data flow syntax, which is a
         prerequisite for the Planner to follow the "never compute" rule (Bug 2)
@@ -575,7 +576,7 @@ class TestToolFilteringBug8:
     """Bug 8: Always feed all tools — no filtering by intent."""
 
     def test_build_tool_descriptions_always_includes_all(self):
-        """_build_tool_descriptions() always returns all tools."""
+        """build_tool_descriptions() always returns all tools."""
         from harness.models.tools import SideEffect, ToolDefinition
 
         registry = ToolRegistry()
@@ -615,9 +616,7 @@ class TestToolFilteringBug8:
             ),
             lambda x: {"ok": True},
         )
-        planner = Planner(llm_client=_MockLLM(), registry=registry, store=None)
-
-        desc = planner._build_tool_descriptions()
+        desc = build_tool_descriptions(registry)
         assert "browser" in desc, "browser should always be included"
         assert "echo" in desc, "echo should always be included"
         assert "mcp_call" in desc, "mcp_call should always be included"

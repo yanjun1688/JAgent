@@ -58,7 +58,7 @@ JAgent 已有一层名为 `ScopeGuardrail` 的"作用域"机制（V0.4 引入）
 | # | 用户故事 | 验收要点 |
 |---|---------|---------|
 | US-1 | 作为运维，我想为"客户A迁移项目"建独立 workspace，使名下所有 `file_op` 只写进该项目目录 | 不同 workspace 文件互不可见；路径穿越被拦截 |
-| US-2 | 作为运维，我想让"只读调研"workspace 仅允许 `browser`/`http_request`，禁止 `file_op` | 白名单外工具被拦截并写入 `GuardrailTriggered` |
+| US-2 | 作为运维，我想让"只读调研"workspace 仅允许 `browser_*`（playwright-mcp 浏览器工具，ADR-011，支持前缀匹配）/`http_request`，禁止 `file_op` | 白名单外工具被拦截并写入 `GuardrailTriggered` |
 | US-3 | 作为租户管理员，我想确保租户 T1 的数据对 T2 完全不可见 | 任何查询在 T1 下无法读到 T2 的 workspace/run/conversation |
 | US-4 | 作为终端用户，我发新任务时可选择落在哪个 workspace | `RunStarted` 携带 `workspace_id`；Run 详情展示归属 |
 | US-5 | 作为运维，我想让 workspace 的代码/文件在 **Docker 容器** 内读写，不碰宿主机 | sandbox 载体下 file_op 落在容器挂载目录 |

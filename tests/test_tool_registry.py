@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from harness.models.tools import SideEffect
+from harness.models.tools import Guardrail, SideEffect, ToolScopeTarget
 from harness.tools.base import BaseTool, operation
 from harness.tools.registry import ToolRegistry
 
@@ -90,3 +90,97 @@ class TestRegisterTool:
         assert td.name == expected.name
         assert td.operation_key == expected.operation_key
         assert {o.operation for o in td.operations} == {o.operation for o in expected.operations}
+
+
+class _DeleteWithoutGuardrailTool(BaseTool):
+    """Regression: SideEffect.DELETE op without the destructive guardrail must
+    be rejected at registration — otherwise deletion executes without
+    confirmation (DestructiveOpGuardrail is the sole DELETE→confirmation
+    translator; the executor never reads side_effects for that decision)."""
+
+    name = "delete_unprotected"
+    description = "Declares DELETE side effect but forgets the destructive guardrail"
+    input_schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    side_effects: list[SideEffect] = []
+
+    @operation("delete", side_effects=[SideEffect.DELETE])
+    async def delete(self, input):
+        return {"ok": True}
+
+
+class _DeleteWithGuardrailTool(BaseTool):
+    name = "delete_protected"
+    description = "Declares DELETE side effect and carries the destructive guardrail"
+    input_schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    side_effects: list[SideEffect] = []
+    guardrails = [Guardrail(guardrail_type="destructive", config={})]
+
+    @operation("delete", side_effects=[SideEffect.DELETE])
+    async def delete(self, input):
+        return {"ok": True}
+
+
+class _ToolLevelDeleteWithoutGuardrailTool(BaseTool):
+    """Tool-level SideEffect.DELETE (no per-op contracts) without guardrail."""
+
+    name = "tool_level_delete_unprotected"
+    description = "Tool-level DELETE side effect without destructive guardrail"
+    input_schema = {"type": "object"}
+    side_effects = [SideEffect.DELETE]
+
+    async def run(self, input):
+        return {"ok": True}
+
+
+class _ScopeTargetWithoutGuardrailTool(BaseTool):
+    """Regression: scope_targets declared but the scope guardrail is missing —
+    the whitelist declaration would have no enforcer."""
+
+    name = "scope_unprotected"
+    description = "Declares a path scope target but forgets the scope guardrail"
+    input_schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    side_effects = [SideEffect.WRITE]
+    scope_targets = [ToolScopeTarget(kind="path", input_field="path")]
+
+    async def run(self, input):
+        return {"ok": True}
+
+
+class _ScopeTargetWithGuardrailTool(_ScopeTargetWithoutGuardrailTool):
+    name = "scope_protected"
+    guardrails = [Guardrail(guardrail_type="scope", config={})]
+
+
+class TestRegistrationSafetyValidation:
+    """Fail-closed registration-time checks (trusted boundary): a tool that
+    declares a dangerous contract without the matching guardrail must fail to
+    register, so "forgot to attach the guardrail" is a startup error rather
+    than a silent runtime allow."""
+
+    def test_given_delete_op_without_destructive_guardrail_when_register_then_raises(self):
+        registry = ToolRegistry()
+        with pytest.raises(ValueError, match="destructive"):
+            registry.register_tool(_DeleteWithoutGuardrailTool())
+
+    def test_given_tool_level_delete_without_destructive_guardrail_when_register_then_raises(self):
+        registry = ToolRegistry()
+        with pytest.raises(ValueError, match="destructive"):
+            registry.register_tool(_ToolLevelDeleteWithoutGuardrailTool())
+
+    def test_given_delete_op_with_destructive_guardrail_when_register_then_accepted(self):
+        registry = ToolRegistry()
+        assert registry.register_tool(_DeleteWithGuardrailTool()) == "delete_protected"
+
+    def test_given_scope_target_without_scope_guardrail_when_register_then_raises(self):
+        registry = ToolRegistry()
+        with pytest.raises(ValueError, match="scope"):
+            registry.register_tool(_ScopeTargetWithoutGuardrailTool())
+
+    def test_given_scope_target_with_scope_guardrail_when_register_then_accepted(self):
+        registry = ToolRegistry()
+        assert registry.register_tool(_ScopeTargetWithGuardrailTool()) == "scope_protected"
+
+    def test_given_read_only_tool_without_guardrails_when_register_then_accepted(self):
+        # Tools with no DELETE side effect and no scope targets need no guardrails.
+        registry = ToolRegistry()
+        assert registry.register_tool(_PingTool()) == "ping_tool"

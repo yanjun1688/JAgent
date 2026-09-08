@@ -1,7 +1,7 @@
 """v2.2 (Phase E) tests — probe 声明 (D4/D10) + 退化修订守卫 (U1 收敛闭环).
 
 Covers:
-  * _parse_plan 解析 probe 字段
+  * parse_plan_response 解析 probe 字段
   * PlanGuardrail 拒绝 probe + 有副作用工具（D10）
   * probe 步骤 UNSUCCESSFUL 算 normal（B 阶段已有，E 阶段补 LLM 声明路径）
   * 退化修订守卫：同一 step 反复非 normal 不收敛 → 熔断（U1）
@@ -12,16 +12,12 @@ from __future__ import annotations
 import pytest
 
 from harness.core.dag_types import ExecState, StepResult
-from harness.core.planner import PlanGuardrail, Planner
+from harness.core.planner import PlanGuardrail, parse_plan_response
 from harness.models.plan import DagPlan, DagStep
 from harness.tools.registry import ToolRegistry
 
 
-# ── 1. _parse_plan 解析 probe（D4）──────────────────────────────────
-
-
-def _make_planner():
-    return Planner(llm_client=None, registry=None, store=None)
+# ── 1. parse_plan_response 解析 probe（D4）──────────────────────────
 
 
 def test_parse_plan_extracts_probe_flag():
@@ -30,7 +26,7 @@ def test_parse_plan_extracts_probe_flag():
         '{"id":"s1","tool":"http_request","input":{"url":"http://a"},"probe":true},'
         '{"id":"s2","tool":"http_request","input":{"url":"http://b"}}]}'
     )
-    plan, err = _make_planner()._parse_plan(resp)
+    plan, err = parse_plan_response(resp)
     assert err == ""
     assert plan is not None
     assert plan.steps[0].probe is True
@@ -39,7 +35,7 @@ def test_parse_plan_extracts_probe_flag():
 
 def test_parse_plan_probe_defaults_false():
     resp = '{"intent":"t","steps":[{"id":"s1","tool":"http_request","input":{"url":"http://a"}}]}'
-    plan, err = _make_planner()._parse_plan(resp)
+    plan, err = parse_plan_response(resp)
     assert err == ""
     assert plan.steps[0].probe is False
 
