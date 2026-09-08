@@ -9,6 +9,7 @@ Agent is never aware of compression — it is pure infrastructure behavior.
 from __future__ import annotations
 
 import json
+import os
 import time
 
 from harness.core.fold import RunState, ThoughtEntry, ToolResult
@@ -29,6 +30,33 @@ _log_monitor = guard_logger("context.monitor")
 _log_compress = guard_logger("context.compress")
 _log_checkpoint = guard_logger("context.checkpoint")
 
+# v3.4 (F-3): 模型上下文窗口基准与安全系数。token_limit 不再硬编码（曾在 serve.py
+# 被写死为 3000，导致压缩/紧急阈值被压到 2100/2700 而频繁误触发，见 run e05087b6）。
+_CONTEXT_WINDOW_TOKENS = 128_000
+_CONTEXT_SAFETY_FACTOR = 0.7
+DEFAULT_CONTEXT_TOKEN_LIMIT = int(_CONTEXT_WINDOW_TOKENS * _CONTEXT_SAFETY_FACTOR)
+
+
+def resolve_context_token_limit(explicit: int | None) -> int:
+    """Resolve the context token limit from explicit arg → env → safe default.
+
+    Precedence: explicit constructor/caller value (if positive) →
+    ``HARNESS_CONTEXT_TOKEN_LIMIT`` env (if a positive integer) →
+    ``DEFAULT_CONTEXT_TOKEN_LIMIT`` (model window × safety factor).
+    Invalid / non-positive values fall back to the default rather than crashing.
+    """
+    if explicit is not None and explicit > 0:
+        return explicit
+    raw = os.environ.get("HARNESS_CONTEXT_TOKEN_LIMIT")
+    if raw:
+        try:
+            val = int(raw)
+        except (TypeError, ValueError):
+            val = 0
+        if val > 0:
+            return val
+    return DEFAULT_CONTEXT_TOKEN_LIMIT
+
 
 class ContextManager:
     """Monitors context size and triggers compression / checkpointing.
@@ -43,7 +71,7 @@ class ContextManager:
         store,
         llm_client: LLMClient | None = None,
         token_counter: TokenCounter | None = None,
-        token_limit: int = 128_000,
+        token_limit: int | None = None,
         checkpoint_interval: int = 10,
         compression_threshold_ratio: float = 0.7,
         emergency_threshold_ratio: float = 0.9,
@@ -52,14 +80,15 @@ class ContextManager:
         self.store = store
         self.llm_client = llm_client
         self.token_counter = token_counter or create_token_counter()
-        self.token_limit = token_limit
+        # v3.4 (F-3): token_limit 外置 — 显式值 > env > 模型窗口×安全系数默认值。
+        self.token_limit = resolve_context_token_limit(token_limit)
         self.checkpoint_interval = checkpoint_interval
         self.compression_threshold_ratio = compression_threshold_ratio
         self.emergency_threshold_ratio = emergency_threshold_ratio
         self.lazy_clear_ratio = lazy_clear_ratio
-        self.compression_threshold = int(token_limit * compression_threshold_ratio)
-        self.emergency_threshold = int(token_limit * emergency_threshold_ratio)
-        self.lazy_clear_threshold = int(token_limit * lazy_clear_ratio)
+        self.compression_threshold = int(self.token_limit * compression_threshold_ratio)
+        self.emergency_threshold = int(self.token_limit * emergency_threshold_ratio)
+        self.lazy_clear_threshold = int(self.token_limit * lazy_clear_ratio)
         self._last_compressed_iteration: dict[str, int] = {}
 
     async def _async_estimate_context_tokens(self, state: RunState) -> int:

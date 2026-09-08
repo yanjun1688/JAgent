@@ -309,3 +309,4 @@ async def test_empty_run_with_only_run_started_is_still_inspectable(client, api)
     assert data["status"] == "running"
     assert data["plan"] is None
     assert data["tool_results"] == []
+    assert data["step_evidence"] == []

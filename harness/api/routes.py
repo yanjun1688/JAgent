@@ -63,8 +63,6 @@ from harness.models.events import (
     FeedbackInjectedPayload,
     FeedbackSource,
     RunFailedPayload,
-    RunPausedPayload,
-    RunResumedPayload,
     RunStartedPayload,
     WorkspaceCreatedPayload,
     WorkspaceDeletedPayload,
@@ -451,19 +449,22 @@ async def pause_run(
                 content={"error": "Run is not in RUNNING state, cannot pause"},
             )
     else:
+        # No live scheduler (process likely restarted). Writing a RunPaused
+        # event here would leave a fake-PAUSED run that nobody can drive — the
+        # same zombie class as the resume path. After restart the startup orphan
+        # sweep terminates such runs as FAILED; a live run always has a
+        # scheduler. Fail closed rather than record an unenforceable pause.
         events = await api.store.get_events(run_id)
         if not events:
             raise HTTPException(status_code=404, detail="Run not found")
-        state = fold_events(events)
-        if state.status != RunStatus.RUNNING:
-            return JSONResponse(
-                status_code=409,
-                content={"error": f"Run is {state.status.value}, cannot pause"},
-            )
-        await api.store.append_event(
-            run_id,
-            EventType.RUN_PAUSED,
-            RunPausedPayload(reason=body.reason if body else "user_requested").model_dump(),
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": (
+                    "Run has no active scheduler (process likely restarted). "
+                    "Crashed runs are not auto-resumed; please re-submit the task."
+                )
+            },
         )
     return {"success": True}
 
@@ -480,20 +481,23 @@ async def resume_run(run_id: str, api: HarnessAPI = Depends(get_hapi)):
                 content={"error": "Run is not in PAUSED state, cannot resume"},
             )
     else:
+        # No live scheduler for this run. After a process restart the startup
+        # orphan sweep (mark_orphans) terminates such runs as FAILED (Direction
+        # A: orphans are terminal, no auto crash-recovery). A PAUSED run with no
+        # scheduler therefore cannot be driven forward — writing a RunResumed
+        # event here would create a fake-RUNNING zombie with nobody executing it.
+        # Fail closed and tell the operator to re-submit the task.
         events = await api.store.get_events(run_id)
         if not events:
             raise HTTPException(status_code=404, detail="Run not found")
-        state = fold_events(events)
-        if state.status != RunStatus.PAUSED:
-            return JSONResponse(
-                status_code=409,
-                content={"error": f"Run is {state.status.value}, cannot resume"},
-            )
-        seq = await api.store.get_latest_seq(run_id)
-        await api.store.append_event(
-            run_id,
-            EventType.RUN_RESUMED,
-            RunResumedPayload(resume_from_seq=seq).model_dump(),
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": (
+                    "Run has no active scheduler (process likely restarted). "
+                    "Crashed runs are not auto-resumed; please re-submit the task."
+                )
+            },
         )
     return {"success": True}
 

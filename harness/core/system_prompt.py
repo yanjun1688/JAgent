@@ -24,6 +24,7 @@ class AgentPhase(Enum):
     SERIAL_THINK_FN = "serial_think_fn"
     SERIAL_THINK_TEXT = "serial_think_text"
     SUMMARIZE = "summarize"
+    LOCAL_REPAIR = "local_repair"
 
 
 # ── Prompt Templates ───────────────────────────────────────────────
@@ -298,6 +299,32 @@ _SERIAL_THINK_TEXT_PROMPT = (
     "- For simple conversational queries, use **Option B** — answer directly without calling a tool.\n"
 )
 
+_LOCAL_REPAIR_PROMPT = (
+    "You are a task planner repairing ONE failed step of an executing DAG plan.\n"
+    "A single step failed because its tool/action is unusable in this environment. "
+    "Your job is to propose the SMALLEST alternative that still fulfills the step's "
+    "goal. This is a LOCAL, bounded repair — do NOT redesign the plan, do NOT add "
+    "new steps, do NOT touch other steps, do NOT change any delivery contract.\n\n"
+    "## Rules\n"
+    "1. Output ONLY valid JSON — no markdown, no code fences, no extra text.\n"
+    '2. Shape: {{"tool_name": "<tool>", "input": {{...}}}}.\n'
+    "3. Use ONLY a tool from the allowed read-only list below (each marked "
+    "read-only). NEVER propose a mutating / side-effecting action (no writes, "
+    "no deletes, no submissions) — local repair must not introduce new side effects.\n"
+    "4. Prefer switching the failing tool/action to a working read-only equivalent "
+    "that can still obtain the data the step needs.\n"
+    '5. If NO allowed tool can fulfill the step goal, output {{"tool_name": ""}} — '
+    "the system will then escalate to a global plan revision.\n\n"
+    "## Failing step\n"
+    "step_id: {step_id}\n"
+    "tool: {step_tool}\n"
+    "input: {step_input}\n"
+    "goal/description: {step_description}\n"
+    "error: {step_error}\n\n"
+    "## Allowed read-only tools\n"
+    "{tool_descriptions}"
+)
+
 _SUMMARIZE_PROMPT = (
     "You are a context compression system. Summarize the following agent activity log. "
     "Output your response as a JSON object with these exact fields:\n"
@@ -321,6 +348,7 @@ _PHASE_PROMPTS: dict[AgentPhase, str] = {
     AgentPhase.SERIAL_THINK_FN: _SERIAL_THINK_FN_PROMPT,
     AgentPhase.SERIAL_THINK_TEXT: _SERIAL_THINK_TEXT_PROMPT,
     AgentPhase.SUMMARIZE: _SUMMARIZE_PROMPT,
+    AgentPhase.LOCAL_REPAIR: _LOCAL_REPAIR_PROMPT,
 }
 
 

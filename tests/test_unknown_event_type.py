@@ -18,8 +18,8 @@ Root cause per AGENTS.md §3.5:
      warning; list comprehensions filter None. A scenario test below
      pins the behavior.
 
-Also covers the _run_to_conv cache eviction hook tied to scheduler
-terminal state (technical debt from P0-04 fix).
+Also covers the run-level cache eviction hook (evict_run_caches) tied to
+scheduler terminal state (technical debt from P0-04 fix).
 """
 
 from __future__ import annotations
@@ -203,37 +203,45 @@ class TestQueryPathUnknownEventType:
         assert AnalysisService._row_to_event(row) is None
 
 
-class TestRunToConvCacheEviction:
-    """P0-04 follow-up — _run_to_conv cache must be evictable when a run ends.
+class TestRunCacheEviction:
+    """Run-level column-fill caches (_run_to_conv / _run_to_workspace) must
+    be evicted together when a run ends.
 
-    The scheduler terminal hook (BaseScheduler._run_end_cb) calls
-    store.evict_run_to_conv(run_id) so that the in-memory mapping doesn't
-    grow unbounded across runs.
+    The scheduler terminal hook (BaseScheduler cleanup) calls
+    store.evict_run_caches(run_id) — the single eviction point for every
+    run-level cache — so the in-memory mappings don't grow unbounded across
+    runs. Both caches share the run lifecycle; evicting only one (the old
+    evict_run_to_conv) left _run_to_workspace to leak.
     """
 
-    async def test_evict_drops_cache_entry(self, store: EventStore):
+    async def test_evict_drops_both_cache_entries(self, store: EventStore):
         from harness.models.events import RunStartedPayload
 
         await store.append_event(
             "run-E",
             EventType.RUN_STARTED,
             RunStartedPayload(intent="i", conversation_id="conv-E").model_dump(),
+            workspace_id="ws-E",
         )
         assert store._run_to_conv.get("run-E") == "conv-E"
-        store.evict_run_to_conv("run-E")
+        assert store._run_to_workspace.get("run-E") == "ws-E"
+        store.evict_run_caches("run-E")
         assert "run-E" not in store._run_to_conv
+        assert "run-E" not in store._run_to_workspace
 
-    async def test_evict_does_not_break_subsequent_appends_without_conv(self, store: EventStore):
+    async def test_evict_does_not_break_subsequent_appends_without_cache(self, store: EventStore):
         """After eviction, appending another event on the same run_id without
-        conversation_id in payload should not crash; column will be NULL."""
+        conversation_id/workspace_id in payload should not crash; the columns
+        are filled as NULL."""
         from harness.models.events import AgentThoughtPayload
 
         await store.append_event(
             "run-F",
             EventType.RUN_STARTED,
             {"intent": "i", "context_snapshot": {}, "conversation_id": "conv-F"},
+            workspace_id="ws-F",
         )
-        store.evict_run_to_conv("run-F")
+        store.evict_run_caches("run-F")
         # Subsequent append: no cache, payload has no conversation_id
         await store.append_event(
             "run-F",
@@ -242,8 +250,9 @@ class TestRunToConvCacheEviction:
         )
         # The AGENT_THOUGHT row should have NULL conversation_id column
         cursor = await store.conn.execute(
-            "SELECT conversation_id FROM events WHERE run_id = ? AND event_type = ?",
+            "SELECT conversation_id, workspace_id FROM events WHERE run_id = ? AND event_type = ?",
             ("run-F", EventType.AGENT_THOUGHT.value),
         )
         row = await cursor.fetchone()
         assert row["conversation_id"] is None
+        assert row["workspace_id"] is None

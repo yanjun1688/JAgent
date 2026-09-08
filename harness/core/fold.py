@@ -77,6 +77,45 @@ class ToolResult:
 
 
 @dataclass
+class StepEvidence:
+    """v3.4 (F-1): 受信执行态证据投影 — 由 PLAN_*/DAG_STEP_*/TOOL_* 事件确定性折叠。
+
+    与喂 LLM 的工作视图（``thought_history`` / ``tool_results``）正交：后者会被
+    EpisodeArchived/ContextPruned 裁剪以控制上下文，而 ``step_evidence`` 是完成门 /
+    resume / Replay Inspector 的受信事实源，**任何压缩事件都不得裁剪它**（ADR-011）。
+
+    ``exec_state`` 取值对齐 ``harness.core.dag_types.ExecState``（pending/running/
+    completed/unsuccessful/failed/skipped/idempotent/cancelled）；此处用字符串以保持
+    fold 为无 I/O、无跨层依赖的纯函数。
+    """
+
+    step_id: str
+    plan_id: str = ""
+    tool_name: str = ""
+    exec_state: str = "pending"
+    depends_on: list[str] = field(default_factory=list)
+    output_summary: str = ""
+    error: str | None = None
+    tool_call_id: str | None = None
+    output_ref: str | None = None  # v3.4 (F-2): 大输出 blob 引用
+    output: Any = None  # v3.4 (F-4): 工具产出（可能是 blob 占位符），供 resume 重建下游
+    probe: bool = False
+    skip_reason: str | None = None
+    updated_seq: int = 0
+
+    @property
+    def step_normal(self) -> bool:
+        """完成门原子判据（与 dag_types.StepResult.step_normal 同语义，纯函数）。
+
+        completed/idempotent 正常；unsuccessful 仅在 probe（探测型步骤）时正常。
+        不读取任何 LLM 便签（task_state/step_tasks）。
+        """
+        if self.exec_state in ("completed", "idempotent"):
+            return True
+        return self.exec_state == "unsuccessful" and self.probe
+
+
+@dataclass
 class RunState:
     run_id: str
     status: RunStatus = RunStatus.RUNNING
@@ -111,6 +150,9 @@ class RunState:
     delivery_contracts: list[DeliveryContract] = field(default_factory=list)
     # S07 (D-02 / 方案 B): RunStarted 标记 → scheduler 首轮 plan 前需执行契约解析。
     requires_contract_extraction: bool = False
+    # v3.4 (F-1, ADR-011): 受信执行态证据投影。由计划/步骤/工具事件折叠，
+    # 独立于 LLM 工作视图，压缩事件永不裁剪 — 完成门 / resume / Replay 的事实源。
+    step_evidence: dict[str, StepEvidence] = field(default_factory=dict)
 
 
 def fold_events(events: list[Event]) -> RunState:
@@ -125,6 +167,38 @@ def fold_events(events: list[Event]) -> RunState:
     run_id = events[0].run_id
     state = RunState(run_id=run_id)
     p: Any = None
+
+    def _evidence(step_id: str, plan_id: str = "", seq: int = 0) -> StepEvidence:
+        """Get-or-create the trusted evidence record for a step."""
+        ev = state.step_evidence.get(step_id)
+        if ev is None:
+            ev = StepEvidence(step_id=step_id, plan_id=plan_id, updated_seq=seq)
+            state.step_evidence[step_id] = ev
+        elif plan_id:
+            ev.plan_id = plan_id
+        return ev
+
+    def _apply_blueprint(steps: list[dict[str, Any]], plan_id: str, seq: int) -> None:
+        """Fold plan/revision blueprint into evidence (does not regress finished steps).
+
+        A step whose tool changed across a revision is a *new action* → reset to
+        pending so it can be (re)executed; a finished step keeps its terminal state.
+        """
+        for s in steps:
+            sid = s.get("step_id")
+            if not sid:
+                continue
+            ev = _evidence(str(sid), plan_id, seq)
+            new_tool = str(s.get("tool_name") or ev.tool_name or "")
+            tool_changed = bool(ev.tool_name) and new_tool != ev.tool_name and ev.exec_state != "pending"
+            ev.tool_name = new_tool
+            ev.depends_on = list(s.get("depends_on") or [])
+            ev.probe = bool(s.get("probe", False))
+            if tool_changed and ev.exec_state not in ("completed", "idempotent", "cancelled"):
+                ev.exec_state = "pending"
+                ev.error = None
+                ev.output_summary = ""
+                ev.tool_call_id = None
 
     for event in events:
         if event.run_id != run_id:
@@ -182,6 +256,17 @@ def fold_events(events: list[Event]) -> RunState:
                         error=p.error,
                     )
                 )
+                # v3.4 (F-4): attach the tool output to the step evidence so a
+                # resumed run can rebuild downstream inputs. Never trimmed by
+                # compression (evidence is independent of the LLM working view).
+                if p.step_id:
+                    ev = _evidence(p.step_id, "", event.seq)
+                    ev.output = p.output
+                    ev.tool_name = p.tool_name or ev.tool_name
+                    if p.tool_call_id:
+                        ev.tool_call_id = p.tool_call_id
+                    if isinstance(p.output, dict) and p.output.get("ref") and p.output.get("sha256"):
+                        ev.output_ref = str(p.output["ref"])
 
             case EventType.TOOL_FAILED:
                 p = ToolFailedPayload(**event.payload)
@@ -312,9 +397,16 @@ def fold_events(events: list[Event]) -> RunState:
                 }
                 state.plan_history.append(entry)
                 state.latest_plan = entry
+                _apply_blueprint(list(blueprint), p.plan_id, event.seq)
 
             case EventType.DAG_STEP_STARTED:
                 p = DagStepStartedPayload(**event.payload)
+                ev = _evidence(p.step_id, p.plan_id, event.seq)
+                if ev.exec_state in ("pending", ""):
+                    ev.exec_state = "running"
+                ev.tool_name = p.tool_name or ev.tool_name
+                ev.depends_on = list(p.depends_on) if p.depends_on else ev.depends_on
+                ev.updated_seq = event.seq
                 if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
                     existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
                     if existing:
@@ -328,6 +420,14 @@ def fold_events(events: list[Event]) -> RunState:
             case EventType.DAG_STEP_COMPLETED:
                 p = DagStepCompletedPayload(**event.payload)
                 step_status = p.status if p.status else "completed"
+                ev = _evidence(p.step_id, p.plan_id, event.seq)
+                ev.exec_state = step_status
+                ev.output_summary = p.output_summary or ev.output_summary
+                if p.error:
+                    ev.error = p.error
+                if p.tool_call_id:
+                    ev.tool_call_id = p.tool_call_id
+                ev.updated_seq = event.seq
                 if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
                     existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
                     if existing:
@@ -347,6 +447,14 @@ def fold_events(events: list[Event]) -> RunState:
 
             case EventType.DAG_STEP_FAILED:
                 p = DagStepFailedPayload(**event.payload)
+                ev = _evidence(p.step_id, p.plan_id, event.seq)
+                ev.exec_state = "failed"
+                ev.error = p.error
+                if p.tool_name:
+                    ev.tool_name = p.tool_name
+                if p.tool_call_id:
+                    ev.tool_call_id = p.tool_call_id
+                ev.updated_seq = event.seq
                 if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
                     existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
                     if existing:
@@ -362,6 +470,14 @@ def fold_events(events: list[Event]) -> RunState:
 
             case EventType.DAG_STEP_SKIPPED:
                 p = DagStepSkippedPayload(**event.payload)
+                ev = _evidence(p.step_id, p.plan_id, event.seq)
+                # SKIPPED means the tool never ran; a later revision may re-open it,
+                # so it is not a terminal state for evidence purposes.
+                ev.exec_state = "skipped"
+                ev.skip_reason = p.reason
+                if p.tool_name:
+                    ev.tool_name = p.tool_name
+                ev.updated_seq = event.seq
                 if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
                     existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
                     if existing:
@@ -393,6 +509,9 @@ def fold_events(events: list[Event]) -> RunState:
                     if p.steps:
                         state.latest_plan["steps"] = [dict(s) for s in p.steps]
                 state.step_tasks.update(p.step_tasks)
+                # v3.4 (F-1): revision patch feeds evidence (tool change re-opens step).
+                if p.steps:
+                    _apply_blueprint(list(p.steps), p.plan_id, event.seq)
 
             case EventType.PLAN_COMPLETED:
                 p = PlanCompletedPayload(**event.payload)
@@ -438,5 +557,11 @@ def fold_events(events: list[Event]) -> RunState:
                 pruned_set = set(p.pruned_event_refs)
                 state.thought_history = [t for t in state.thought_history if t.seq not in pruned_set]
                 state.tool_results = [tr for tr in state.tool_results if tr.event_seq not in pruned_set]
+
+            case EventType.STEP_LOCAL_REPAIR_STARTED | EventType.STEP_LOCAL_REPAIR_COMPLETED:
+                # v3.4 (F-6, ADR-011): 局部修复边界事件 — 纯可观测/审计。
+                # 证据投影不变：修复对步骤终态的影响由修复后重跑的
+                # DAG_STEP_STARTED/COMPLETED/FAILED + TOOL_* 事件折叠，不在本事件折叠。
+                pass
 
     return state

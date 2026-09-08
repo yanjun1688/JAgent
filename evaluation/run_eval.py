@@ -77,6 +77,29 @@ async def _exec_confirm_fn(input: dict[str, Any]) -> dict[str, Any]:
     return {"stdout": f"(eval) simulated exec: {input.get('command', '')[:100]}"}
 
 
+class _ExecConfirmTool(BaseTool):
+    """Eval-only: shell command that always requires human confirmation."""
+
+    name = "exec"
+    description = "Execute an arbitrary shell command (requires operator confirmation)."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "Shell command to execute"},
+        },
+        "required": ["command"],
+    }
+    output_schema = {"type": "object", "properties": {"stdout": {"type": "string"}}}
+    idempotency_key_fields = ["command"]
+    side_effects = [SideEffect.EXTERNAL]
+    requires_confirmation = True
+    timeout_ms = 30000
+    retry_policy = RetryPolicy(max_retries=0)
+
+    async def run(self, input: dict) -> dict:
+        return await _exec_confirm_fn(input)
+
+
 # ── Eval-only tool: http_request with rate_limit guardrail ──────────────
 # Production http_request has only a scope guardrail (no rate_limit), so the
 # rate-limit scenario uses this eval-only definition to exercise the trusted
@@ -109,6 +132,30 @@ async def _http_rate_limit_fn(input: dict[str, Any]) -> dict[str, Any]:
     return {"status": 200}
 
 
+class _HttpRateLimitTool(BaseTool):
+    """Eval-only: http request wrapped with a strict rate-limit guardrail."""
+
+    name = "http_request_rl"
+    description = "Send an HTTP request (eval-only, rate limited to 3 calls)."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "method": {"type": "string", "enum": ["GET", "POST"], "default": "GET"},
+        },
+        "required": ["url"],
+    }
+    output_schema = {"type": "object", "properties": {"status": {"type": "integer"}}}
+    idempotency_key_fields = ["url", "method"]
+    side_effects = [SideEffect.EXTERNAL]
+    guardrails = [Guardrail(guardrail_type="rate_limit", config={"max_calls": 3})]
+    timeout_ms = 30000
+    retry_policy = RetryPolicy(max_retries=0)
+
+    async def run(self, input: dict) -> dict:
+        return await _http_rate_limit_fn(input)
+
+
 def _expand_placeholders(value: Any) -> Any:
     """Recursively replace ``@project@`` with the repo root.
 
@@ -131,11 +178,11 @@ from harness.core.scheduler.base import ThinkResult  # noqa: E402
 from harness.core.scheduler.loop import AgentLoopScheduler  # noqa: E402
 from harness.monitoring.langfuse_tracer import LangfuseTracer  # noqa: E402
 from harness.storage.event_store import EventStore  # noqa: E402
-from harness.tools.browser_tool import BROWSER_DEF, browser_fn  # noqa: E402
+from harness.tools.base import BaseTool  # noqa: E402
 from harness.tools.executor import ToolExecutor  # noqa: E402
-from harness.tools.file_op import FILE_OP_DEF, file_op_fn, set_sandbox_root  # noqa: E402
-from harness.tools.http_request import HTTP_REQUEST_DEF, http_request_fn  # noqa: E402
-from harness.tools.mcp_call import MCP_CALL_DEF, mcp_call_fn  # noqa: E402
+from harness.tools.file_op import FileOpTool  # noqa: E402
+from harness.tools.http_request import HttpRequestTool  # noqa: E402
+from harness.tools.mcp_call import McpCallTool  # noqa: E402
 from harness.tools.registry import ToolRegistry  # noqa: E402
 
 # ── CLI ────────────────────────────────────────────────────────────────
@@ -168,15 +215,16 @@ class _InProcessEngine:
         self.store = EventStore(":memory:")
         self.executor = ToolExecutor(self.store)
         self.registry = ToolRegistry()
-        for td, fn in (
-            (HTTP_REQUEST_DEF, http_request_fn),
-            (FILE_OP_DEF, file_op_fn),
-            (BROWSER_DEF, browser_fn),
-            (MCP_CALL_DEF, mcp_call_fn),
+        # ADR-010: 统一 register_tool 入口（invoker 永不 None）；ADR-011: 内置
+        # browser 已退役，浏览器能力由 playwright-mcp 动态注册（eval 不启用）。
+        for tool in (
+            FileOpTool(),
+            HttpRequestTool(),
+            McpCallTool(),
+            _ExecConfirmTool(),
+            _HttpRateLimitTool(),
         ):
-            self.registry.register(td, fn)
-        self.registry.register(_EXEC_CONFIRM_DEF, _exec_confirm_fn)
-        self.registry.register(_HTTP_RATE_LIMIT_DEF, _http_rate_limit_fn)
+            self.registry.register_tool(tool)
         self.max_iterations = max_iterations
         self.tracer = tracer
         self.llm_client: OpenAILLMClient | None = None
@@ -202,18 +250,17 @@ class _InProcessEngine:
             # Isolate mock file operations in a temp sandbox so a scope-blocked
             # target is outside it (→ blocked) while a confirmation target stays
             # inside it (→ executes harmlessly in temp).
+            from harness.execution.local import LocalDirectoryBackend
+
             tmp_root = tempfile.mkdtemp(prefix="jagent_eval_sandbox_")
-            set_sandbox_root(tmp_root)
-            try:
-                kernel = self._build_mock_kernel(case)
-                scheduler: Any = AgentLoopScheduler(
-                    self.store, self.executor, kernel,
-                    self.registry.list_tool_defs(), self.registry.list_tool_fns(),
-                    config=config, tracer=self.tracer,
-                )
-                state = await self._run_with_autoconfirm(scheduler, run_id, case)
-            finally:
-                set_sandbox_root(str(ROOT))
+            backend = LocalDirectoryBackend(tmp_root)
+            kernel = self._build_mock_kernel(case)
+            scheduler: Any = AgentLoopScheduler(
+                self.store, self.executor, kernel,
+                self.registry.list_tool_defs(), self.registry.list_tool_fns(),
+                config=config, tracer=self.tracer, backend=backend,
+            )
+            state = await self._run_with_autoconfirm(scheduler, run_id, case)
             events = await self.store.get_events(run_id)
             return {"run_id": run_id, "state": state, "events": events}
         if case.mock_plan:
@@ -229,17 +276,18 @@ class _InProcessEngine:
                 MockLLMClient(responses=["yes", plan_json, "Task completed"]),
                 self.registry, self.store, max_plan_retries=2,
             )
-            dag = DagExecutor(self.executor, self.store, self.registry)
-            set_sandbox_root(str(ROOT))
-            try:
-                scheduler: Any = PlanningExecutorScheduler(
-                    self.store, self.executor, planner, dag,
-                    self.registry.list_tool_defs(), self.registry.list_tool_fns(),
-                    config=config, tracer=self.tracer,
-                )
-                state = await self._run_with_autoconfirm(scheduler, run_id, case)
-            finally:
-                set_sandbox_root(str(ROOT))
+            # file_op steps read real project files (read-only) — LocalDirectoryBackend
+            # rooted at the repo root replaces the deleted global set_sandbox_root.
+            from harness.execution.local import LocalDirectoryBackend
+
+            backend = LocalDirectoryBackend(str(ROOT))
+            dag = DagExecutor(self.executor, self.store, self.registry, backend=backend)
+            scheduler: Any = PlanningExecutorScheduler(
+                self.store, self.executor, planner, dag,
+                self.registry.list_tool_defs(), self.registry.list_tool_fns(),
+                config=config, tracer=self.tracer, backend=backend,
+            )
+            state = await self._run_with_autoconfirm(scheduler, run_id, case)
             events = await self.store.get_events(run_id)
             return {"run_id": run_id, "state": state, "events": events}
         if self.llm_client is not None:

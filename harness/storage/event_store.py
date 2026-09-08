@@ -127,20 +127,24 @@ class EventStore:
     - UNIQUE INDEX on (run_id, event_type, idempotency_key) ensures idempotency.
 
     seq allocation:
-    - Uses per-run_id asyncio.Lock to ensure atomic MAX(seq)+1 under concurrent
-      asyncio tasks on the same connection. Locks are cleaned up after each
-      append_event to prevent memory accumulation.
+    - A single aiosqlite connection is shared across all runs; a global
+      asyncio.Lock (_db_write_lock) serializes every append so that
+      BEGIN IMMEDIATE -> MAX(seq)+1 -> INSERT -> COMMIT is atomic.
+      PRIMARY KEY (run_id, seq) plus retry-on-conflict is the final safety net.
+    - NOTE: the global lock is a single-connection SQLite artifact. When the
+      store migrates to a network database (e.g. Postgres) with a connection
+      pool, replace it with per-run advisory locks (or DB-side sequence
+      allocation); the (run_id, seq) uniqueness constraint remains the
+      invariant regardless of backend.
     """
 
     def __init__(self, db_path: str = ":memory:") -> None:
         self.db_path = db_path
         self._conn: aiosqlite.Connection | None = None
         self._post_append: list[Callable[[Event], Awaitable[None]]] = []
-        self._seq_locks: dict[str, asyncio.Lock] = {}
         # SQLite uses one connection here; serialize write transactions so
         # BEGIN IMMEDIATE cannot interleave across different run IDs.
         self._db_write_lock = asyncio.Lock()
-        self._append_count: int = 0
         # run_id -> conversation_id cache, populated from RunStarted payloads.
         # Used by append_event to fill conversation_id column for subsequent
         # events on the same run whose payload lacks this field.
@@ -452,14 +456,6 @@ class EventStore:
                 except Exception:
                     await self.conn.rollback()
                     raise
-
-        self._append_count += 1
-        if self._append_count % 50 == 0:
-            stale = [rid for rid, lk in self._seq_locks.items() if not lk.locked()]
-            for rid in stale:
-                self._seq_locks.pop(rid, None)
-        # Known Issue: count-based eviction above may miss locks held across the
-        # 50-write checkpoint. Needs time-based TTL. See TODO_v2.1.md §Known Technical Debt.
 
         if assigned_seq is None:
             raise RuntimeError("Event append completed without an assigned sequence")
@@ -980,15 +976,19 @@ class EventStore:
         _log_query.debug("get_events_for_conversation(conv=%s): %d rows, %dms", conversation_id, len(result), _ms)
         return result
 
-    def evict_run_to_conv(self, run_id: str) -> None:
-        """Drop a run's cached conversation_id mapping.
+    def evict_run_caches(self, run_id: str) -> None:
+        """Drop a run's cached column-fill mappings (conversation_id + workspace_id).
 
-        Safe to call after the run has reached a terminal state — at that
-        point no new events will be appended for this run_id, so the cache
-        entry is no longer needed for column auto-fill. Bounded growth is
-        achieved by Scheduler terminal hooks calling this method.
+        Single eviction point for ALL run-level caches: both caches share the
+        run lifecycle — they auto-fill columns while the run appends events
+        and are dead after the run reaches a terminal state (no new events
+        follow). Bounded growth is achieved by the Scheduler terminal hook
+        calling this method once. Any future run-level cache MUST be popped
+        here too; giving each cache its own eviction method is how
+        _run_to_workspace leaked (it had a writer but no eviction caller).
         """
         self._run_to_conv.pop(run_id, None)
+        self._run_to_workspace.pop(run_id, None)
 
 
 # ── Helpers ────────────────────────────────────────────────────

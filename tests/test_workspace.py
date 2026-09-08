@@ -71,16 +71,16 @@ async def test_scoped_store_prevents_cross_tenant_reads_and_writes():
 
 
 @pytest.mark.asyncio
-async def test_scoped_store_evict_run_to_conv_passthrough():
-    """Bug 9 回归：ScopedEventStore 必须透传 evict_run_to_conv，scheduler 收尾不再抛 AttributeError。"""
+async def test_scoped_store_evict_run_caches_passthrough():
+    """Bug 9 回归：ScopedEventStore 必须透传 run 缓存驱逐，scheduler 收尾不抛 AttributeError。"""
     store = EventStore(":memory:")
     await store.initialize()
     try:
         scoped = ScopedEventStore(store, "tenant")
         # 不应抛 AttributeError
-        scoped.evict_run_to_conv("run-xyz")
+        scoped.evict_run_caches("run-xyz")
         # 缓存驱逐实际生效（不存在的 key 也应静默成功）
-        scoped.evict_run_to_conv("run-xyz")
+        scoped.evict_run_caches("run-xyz")
     finally:
         await store.close()
 

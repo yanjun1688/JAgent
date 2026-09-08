@@ -113,21 +113,79 @@ class TestGetEvents:
 
 
 class TestPauseResume:
-    async def test_pause_and_resume(self, client, api):
+    async def test_pause_and_resume_without_live_scheduler_are_rejected(self, client, api):
+        """Direction A: a run with no live scheduler (process restarted) cannot
+        be paused/resumed by writing events nobody enforces — that would create
+        fake-PAUSED / fake-RUNNING zombies. Both control ops fail closed with
+        409 and write no control events."""
         _, store = api
         await store.append_event("r4", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
 
-        resp = await client.post("/api/v1/runs/r4/pause", json={"reason": "testing"})
-        assert resp.status_code == 200
+        pause_resp = await client.post("/api/v1/runs/r4/pause", json={"reason": "testing"})
+        assert pause_resp.status_code == 409
 
         events = await store.get_events("r4")
-        assert events[-1].event_type.value == "RunPaused"
+        assert all(e.event_type != EventType.RUN_PAUSED for e in events)
 
-        resp = await client.post("/api/v1/runs/r4/resume")
-        assert resp.status_code == 200
+        resume_resp = await client.post("/api/v1/runs/r4/resume")
+        assert resume_resp.status_code == 409
 
         events = await store.get_events("r4")
-        assert events[-1].event_type.value == "RunResumed"
+        assert all(e.event_type != EventType.RUN_RESUMED for e in events)
+
+    async def test_resume_without_live_scheduler_is_rejected(self, client, api):
+        """Direction A: a PAUSED run with no live scheduler (process restarted)
+        must NOT get a RunResumed event written with nobody to drive it — that
+        would produce a fake-RUNNING zombie. Fail closed with 409; the operator
+        re-submits the task instead."""
+        _, store = api
+        await store.append_event("r-orphan", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event(
+            "r-orphan",
+            EventType.RUN_PAUSED,
+            RunPausedPayload(reason="waiting for confirmation").model_dump(),
+        )
+
+        resp = await client.post("/api/v1/runs/r-orphan/resume")
+        assert resp.status_code == 409
+
+        events = await store.get_events("r-orphan")
+        assert all(e.event_type != EventType.RUN_RESUMED for e in events), (
+            "must not write RunResumed for a run with no live scheduler"
+        )
+
+    async def test_confirm_on_terminated_orphan_is_rejected(self, client, api):
+        """Direction A: after startup orphan termination, a crashed run is FAILED,
+        so a stale confirmation must be refused by the state guard (no scheduler
+        to wake, run is not waiting for confirmation)."""
+        _, store = api
+        await store.append_event("r-orphan2", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event(
+            "r-orphan2",
+            EventType.CONFIRMATION_REQUESTED,
+            ConfirmationRequestedPayload(
+                confirmation_id="cid-orphan",
+                tool_call_id="tc-1",
+                tool_name="file_op",
+                input={"operation": "delete", "path": "x.txt"},
+                idempotency_key="ik-1",
+            ).model_dump(),
+        )
+        await store.append_event(
+            "r-orphan2",
+            EventType.RUN_PAUSED,
+            RunPausedPayload(reason="waiting for confirmation").model_dump(),
+        )
+        # Simulate startup orphan termination (mark_orphans writes ORPHANED + FAILED).
+        from harness.core.lifecycle import mark_orphans
+
+        await mark_orphans(store)
+
+        resp = await client.post(
+            "/api/v1/runs/r-orphan2/confirm",
+            json={"confirmation_id": "cid-orphan", "confirmed": True, "operator_id": "op1"},
+        )
+        assert resp.status_code == 409
 
 
 class TestConfirm:
@@ -337,7 +395,9 @@ class TestPauseErrors:
 
         resp = await client.post("/api/v1/runs/r8/pause", json={"reason": "again"})
         assert resp.status_code == 409
-        assert "cannot pause" in resp.json()["error"]
+        # No live scheduler for this run → fail closed (Direction A); the run
+        # cannot be driven and the operator is told to re-submit.
+        assert "scheduler" in resp.json()["error"]
 
     async def test_pause_nonexistent_returns_404(self, client, api):
         resp = await client.post("/api/v1/runs/no-such-run/pause", json={"reason": "test"})

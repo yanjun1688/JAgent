@@ -197,11 +197,11 @@ class ScopedEventStore:
         """Infrastructure escape hatch; do not use from business handlers."""
         return self._store
 
-    def evict_run_to_conv(self, run_id: str) -> None:
-        """透传到 raw store 的 run→conversation 缓存驱逐。
+    def evict_run_caches(self, run_id: str) -> None:
+        """透传到 raw store 的 run 级缓存驱逐（conversation + workspace）。
 
         Bug JAGENT-2026-P1-13: scheduler 收尾（base.py finally）调用该方法，
         此前 ScopedEventStore 未实现 → 每次 run 结束抛 AttributeError。
         缓存只存在 raw store 上，按 tenant 无关，直接透传。
         """
-        self._store.evict_run_to_conv(run_id)
+        self._store.evict_run_caches(run_id)

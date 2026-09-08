@@ -87,9 +87,20 @@ class DagExecutor:
         self.store = store
         self.registry = registry
         self._semaphore = asyncio.Semaphore(max_parallel)
+        # ADR-011: per-tool concurrency cap (tool_def.max_parallel) — the
+        # global semaphore bounds total parallelism; this one enforces
+        # tool-specific limits (browser tools = 1, no page fights).
+        self._tool_semaphores: dict[str, asyncio.Semaphore] = {}
         self.workspace = workspace
         self.backend = backend
         self._guardrail = PlanGuardrail(registry, store)
+
+    def _tool_semaphore(self, tool_name: str, limit: int) -> asyncio.Semaphore:
+        sem = self._tool_semaphores.get(tool_name)
+        if sem is None:
+            sem = asyncio.Semaphore(max(1, limit))
+            self._tool_semaphores[tool_name] = sem
+        return sem
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -496,8 +507,9 @@ class DagExecutor:
         prefix = "[retry]" if is_retry else "[step]"
         _log.info("%s %s → %s with %d param(s)", prefix, step_id, step.tool, len(merged_input))
 
-        # --- Execute via Tool Layer (semaphore-gated) ---
-        async with self._semaphore:
+        # --- Execute via Tool Layer (global + per-tool semaphore-gated) ---
+        tool_limit = getattr(step_def, "max_parallel", 10)
+        async with self._semaphore, self._tool_semaphore(step.tool, tool_limit):
             result = await self.executor.execute(
                 run_id,
                 step.tool,

@@ -38,13 +38,14 @@ from harness.core.agent_kernel import LLMAgentKernel
 from harness.core.context_manager import ContextManager
 from harness.core.llm_client import OpenAILLMClient
 from harness.core.scheduler import AgentLoopScheduler, SchedulerConfig
+from harness.execution.local import LocalDirectoryBackend
 from harness.monitoring.run_monitor import RunMonitor
 from harness.storage.event_store import EventStore
-from harness.tools.browser_tool import BROWSER_DEF, BrowserManager, browser_fn
 from harness.tools.executor import ToolExecutor
-from harness.tools.file_op import FILE_OP_DEF, file_op_fn, set_sandbox_root
-from harness.tools.http_request import HTTP_REQUEST_DEF, http_request_fn
-from harness.tools.mcp_call import MCP_CALL_DEF, connect_mcp_server, disconnect_mcp_server, mcp_call_fn
+from harness.tools.file_op import FileOpTool
+from harness.tools.http_request import HttpRequestTool
+from harness.tools.mcp_call import McpCallTool, connect_mcp_server, disconnect_mcp_server
+from harness.tools.registry import ToolRegistry
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)-5s] %(name)s: %(message)s")
 logging.getLogger("harness").setLevel(logging.INFO)
@@ -56,7 +57,15 @@ BASE_URL = os.environ.get("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compat
 
 TMP = Path(__file__).parent.parent / ".sandbox_tmp"
 TMP.mkdir(exist_ok=True)
-set_sandbox_root(str(TMP.resolve()))
+FILE_BACKEND = LocalDirectoryBackend(str(TMP.resolve()))
+
+
+def build_registry(*tools) -> ToolRegistry:
+    """ADR-010: 统一 register_tool 入口；file_op 经受信 backend 注入（v3.3）。"""
+    registry = ToolRegistry()
+    for tool in tools:
+        registry.register_tool(tool)
+    return registry
 
 
 def make_client() -> OpenAILLMClient:
@@ -148,12 +157,13 @@ async def test_http_request() -> dict:
     await store.initialize()
     mon = make_monitor(store)
     cm = make_cm(store)
+    registry = build_registry(HttpRequestTool())
     sched = AgentLoopScheduler(
         store,
         ToolExecutor(store),
         LLMAgentKernel(make_client()),
-        [HTTP_REQUEST_DEF],
-        {"http_request": http_request_fn},
+        registry.list_tool_defs(),
+        registry.list_tool_fns(),
         SchedulerConfig(max_iterations=8),
         monitor=mon,
         context_manager=cm,
@@ -170,12 +180,13 @@ async def test_http_request_error() -> dict:
     await store.initialize()
     mon = make_monitor(store)
     cm = make_cm(store)
+    registry = build_registry(HttpRequestTool())
     sched = AgentLoopScheduler(
         store,
         ToolExecutor(store),
         LLMAgentKernel(make_client()),
-        [HTTP_REQUEST_DEF],
-        {"http_request": http_request_fn},
+        registry.list_tool_defs(),
+        registry.list_tool_fns(),
         SchedulerConfig(max_iterations=8),
         monitor=mon,
         context_manager=cm,
@@ -194,15 +205,17 @@ async def test_file_op() -> dict:
     await store.initialize()
     mon = make_monitor(store)
     cm = make_cm(store)
+    registry = build_registry(FileOpTool())
     sched = AgentLoopScheduler(
         store,
         ToolExecutor(store),
         LLMAgentKernel(make_client()),
-        [FILE_OP_DEF],
-        {"file_op": file_op_fn},
+        registry.list_tool_defs(),
+        registry.list_tool_fns(),
         SchedulerConfig(max_iterations=8),
         monitor=mon,
         context_manager=cm,
+        backend=FILE_BACKEND,
     )
     state = await sched.run(
         "file-norm", "帮我创建一个叫 greeting.txt 的文件，内容写上 'Hello from Harness Agent!'，然后再读取它验证"
@@ -218,15 +231,17 @@ async def test_file_op_error() -> dict:
     await store.initialize()
     mon = make_monitor(store)
     cm = make_cm(store)
+    registry = build_registry(FileOpTool())
     sched = AgentLoopScheduler(
         store,
         ToolExecutor(store),
         LLMAgentKernel(make_client()),
-        [FILE_OP_DEF],
-        {"file_op": file_op_fn},
+        registry.list_tool_defs(),
+        registry.list_tool_fns(),
         SchedulerConfig(max_iterations=8),
         monitor=mon,
         context_manager=cm,
+        backend=FILE_BACKEND,
     )
     state = await sched.run("file-err", "帮我在 ../outside.txt 写一个文件，内容写 'test'")
     events = await store.get_events("file-err")
@@ -234,19 +249,43 @@ async def test_file_op_error() -> dict:
     return report("[file_op] 错误流", "file-err", state, events)
 
 
+def _browser_registry() -> ToolRegistry | None:
+    """ADR-011: browser = playwright-mcp first-class tools via BrowserPool.
+
+    Returns None when playwright-mcp is not locally installed (manual flow
+    script — skip rather than fail).
+    """
+    from harness.models.browser import BrowserConfig
+    from harness.tools.browser_pool import BrowserPool, browser_command_available, set_pool
+
+    if not browser_command_available():
+        return None
+    pool = BrowserPool(BrowserConfig.from_env())
+    set_pool(pool)
+    return ToolRegistry(), pool
+
+
 async def test_browser() -> dict:
-    """Normal: user asks to visit httpbin.org and get page info."""
+    """Normal: user asks to visit httpbin.org and get page info (playwright-mcp)."""
+    built = _browser_registry()
+    if built is None:
+        print("\n[browser] SKIP: playwright-mcp 未安装（运行 python scripts/setup_playwright_mcp.py）")
+        return {"tool": "browser", "status": "skipped"}
+    registry, pool = built
     store = EventStore(":memory:")
     await store.initialize()
     mon = make_monitor(store)
     cm = make_cm(store)
+    from harness.tools.browser_mcp import register_browser_tools
+
+    await register_browser_tools(registry, pool)
     sched = AgentLoopScheduler(
         store,
         ToolExecutor(store),
         LLMAgentKernel(make_client()),
-        [BROWSER_DEF],
-        {"browser": browser_fn},
-        SchedulerConfig(max_iterations=8),
+        registry.list_tool_defs(),
+        registry.list_tool_fns(),
+        SchedulerConfig(max_iterations=10),
         monitor=mon,
         context_manager=cm,
     )
@@ -255,22 +294,31 @@ async def test_browser() -> dict:
         events = await store.get_events("browser-norm")
         return report("[browser] 正常流", "browser-norm", state, events)
     finally:
-        await BrowserManager.cleanup()
+        await pool.shutdown()
+        await store.close()
 
 
 async def test_browser_error() -> dict:
-    """Error: user asks to visit a non-existent website."""
+    """Error: user asks to visit a non-existent website (playwright-mcp)."""
+    built = _browser_registry()
+    if built is None:
+        print("\n[browser] SKIP: playwright-mcp 未安装（运行 python scripts/setup_playwright_mcp.py）")
+        return {"tool": "browser", "status": "skipped"}
+    registry, pool = built
     store = EventStore(":memory:")
     await store.initialize()
     mon = make_monitor(store)
     cm = make_cm(store)
+    from harness.tools.browser_mcp import register_browser_tools
+
+    await register_browser_tools(registry, pool)
     sched = AgentLoopScheduler(
         store,
         ToolExecutor(store),
         LLMAgentKernel(make_client()),
-        [BROWSER_DEF],
-        {"browser": browser_fn},
-        SchedulerConfig(max_iterations=8),
+        registry.list_tool_defs(),
+        registry.list_tool_fns(),
+        SchedulerConfig(max_iterations=10),
         monitor=mon,
         context_manager=cm,
     )
@@ -281,7 +329,8 @@ async def test_browser_error() -> dict:
         events = await store.get_events("browser-err")
         return report("[browser] 错误流", "browser-err", state, events)
     finally:
-        await BrowserManager.cleanup()
+        await pool.shutdown()
+        await store.close()
 
 
 async def _mcp_test(run_id: str, intent: str, label: str) -> dict:
@@ -294,12 +343,13 @@ async def _mcp_test(run_id: str, intent: str, label: str) -> dict:
         await store.initialize()
         mon = make_monitor(store)
         cm = make_cm(store)
+        registry = build_registry(McpCallTool())
         sched = AgentLoopScheduler(
             store,
             ToolExecutor(store),
             LLMAgentKernel(make_client()),
-            [MCP_CALL_DEF],
-            {"mcp_call": mcp_call_fn},
+            registry.list_tool_defs(),
+            registry.list_tool_fns(),
             SchedulerConfig(max_iterations=8),
             monitor=mon,
             context_manager=cm,
@@ -334,7 +384,7 @@ async def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     print(f"\n{'#' * 72}")
     print("#  Harness Real-LLM Data Flow Verification")
-    print(f"#  Model: {MODEL}  |  Tools: http_request, file_op, browser, mcp_call")
+    print(f"#  Model: {MODEL}  |  Tools: http_request, file_op, browser_* (playwright-mcp), mcp_call")
     print("#  Each tool tested with natural language: normal flow + error flow")
     print(f"{'#' * 72}")
 

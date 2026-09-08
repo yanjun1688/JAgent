@@ -457,15 +457,22 @@ class RunMonitor:
     def _generate_suggestion(tool: str, error_type: str) -> str | None:
         """Tool + exception-class based suggestions.
 
-        Current: 4 hardcoded patterns for ~10 tools.
-        TODO: when tools exceed 10, consider FailureAdvisor registry.
+        Current: hardcoded patterns for first-class tools + browser_* family.
+        TODO: when tools exceed ~50, consider FailureAdvisor registry.
         """
+        # ADR-011: playwright-mcp browser tools (browser_navigate/click/...).
+        if tool.startswith("browser_"):
+            if error_type.startswith("Timeout"):
+                return (
+                    "Browser action timed out. Take a browser_snapshot to inspect the "
+                    "current page, then retry the element-level action. For plain web "
+                    "fetches use http_request."
+                )
+            return (
+                "Browser automation failed. Take a browser_snapshot (accessibility tree) "
+                "to re-locate the target element before retrying."
+            )
         suggestions = {
-            (
-                "browser",
-                "NotImplementedError",
-            ): "The browser tool is unavailable on this platform. Use 'http_request' for web requests.",
-            ("browser", "Timeout"): "Browser requests are timing out. Use 'http_request' with adjusted timeout.",
             ("http_request", "ConnectTimeout"): "HTTP connection timed out. Check network or try a different URL.",
             ("http_request", "InvalidURL"): "Invalid URL format. Check and correct the URL before retrying.",
         }

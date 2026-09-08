@@ -29,9 +29,24 @@ class ToolRegistry:
         self._fns: dict[str, Callable[[dict[str, Any]], Any]] = {}
 
     def register_tool(self, tool: "BaseTool") -> str:
-        """Register a ``BaseTool`` (ADR-010 D-03/D-07) — unique public entry."""
+        """Register a ``BaseTool`` (ADR-010 D-03/D-07) — unique public entry.
+
+        Fail-closed: the tool definition is validated against the trusted
+        safety rules (e.g. a DELETE side effect must carry the destructive
+        guardrail, scope targets must carry the scope guardrail) before it is
+        stored. A violation raises ValueError so a tool missing its guardrail
+        is a startup error rather than a silent runtime allow.
+        """
         td = tool.to_definition()
         from harness.tools.base import make_invoker
+        from harness.tools.guardrails import validate_registration_safety
+
+        violations = validate_registration_safety(td)
+        if violations:
+            raise ValueError(
+                f"Refusing to register tool '{td.name}' due to safety contract violations:\n  - "
+                + "\n  - ".join(violations)
+            )
 
         self._register(td, make_invoker(tool))
         return td.name

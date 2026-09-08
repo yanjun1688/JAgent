@@ -49,6 +49,13 @@ class EventType(str, Enum):
     # S10 (问题八 / C-03 / D-06): 分阶段超时 + 子任务清理超时
     PHASE_TIMED_OUT = "PhaseTimedOut"
     TASK_CLEANUP_TIMEOUT = "TaskCleanupTimeout"
+    # v3.4 (F-2, ADR-011): 大工具输出落 blob — 事件只存摘要+引用，完整体按需取回。
+    OUTPUT_BLOB_STORED = "OutputBlobStored"
+    # v3.4 (F-6, ADR-011): 步骤级 bounded 局部修复 — 受信预算边界由 Scheduler
+    # 机械判定（validate_local_repair），LLM 只产出建议动作。修复范围/轮次/工具白名单
+    # 全部落事件，供 Replay 解释"为什么这一步被换工具/重跑"（AC-5 / AC-3）。
+    STEP_LOCAL_REPAIR_STARTED = "StepLocalRepairStarted"
+    STEP_LOCAL_REPAIR_COMPLETED = "StepLocalRepairCompleted"
 
 
 class ToolResultType(str, Enum):
@@ -423,6 +430,61 @@ class TaskCleanupTimeoutPayload(BaseModel):
     grace_ms: int
 
 
+class OutputBlobStoredPayload(BaseModel):
+    """v3.4 (F-2, ADR-011): 超大工具输出被收口为 blob 引用。
+
+    Tool Layer 在输出超过阈值时把完整体写入 workspace 作用域的 content-addressed
+    blob，事件流里只保留摘要 + 引用；Agent 需要细节时用受信只读工具 ``fetch_output``
+    按 ``ref`` 取回。受信组件（fold/门控/replay）只持引用，fold 内不做 I/O。
+    """
+
+    tool_call_id: str
+    tool_name: str
+    ref: str
+    sha256: str
+    bytes: int
+    summary: str = ""
+    truncated: bool = True
+    step_id: str | None = None
+    workspace_id: str | None = None
+
+
+class StepLocalRepairStartedPayload(BaseModel):
+    """v3.4 (F-6, ADR-011): Scheduler 开始对单个失败步骤做 bounded 局部修复。
+
+    触发：DAG 步骤失败、工具级 retry 用尽、且该失败分级为非瞬时（step_repair）。
+    边界字段（repair_round / budget_remaining / tool_whitelist）由受信预算计算，
+    落事件供可观测与 Replay 审计。
+    """
+
+    step_id: str
+    plan_id: str = ""
+    repair_round: int = 1
+    budget_remaining: int = 0
+    step_tool: str = ""
+    error: str | None = None
+    tool_whitelist: list[str] = Field(default_factory=list)
+
+
+class StepLocalRepairCompletedPayload(BaseModel):
+    """v3.4 (F-6, ADR-011): 局部修复轮次结束。
+
+    outcome 由受信预算决定（LLM 内容不参与判定）：
+    - ``accepted``：建议动作经受信校验，已替换该步骤动作并重跑；
+    - ``rejected``：建议被受信预算机械拒绝（越权工具 / mutating / 超预算）；
+    - ``exhausted``：修复预算耗尽，升级到全局 revise。
+    """
+
+    step_id: str
+    plan_id: str = ""
+    repair_round: int = 1
+    outcome: Literal["accepted", "rejected", "exhausted"] = "rejected"
+    tool_name: str = ""
+    proposed_tool: str = ""
+    error: str | None = None
+    reason: str = ""
+
+
 # ── Payload model registry ─────────────────────────────────────
 
 PAYLOAD_MODEL_MAP: dict[EventType, type[BaseModel]] = {
@@ -464,6 +526,9 @@ PAYLOAD_MODEL_MAP: dict[EventType, type[BaseModel]] = {
     EventType.LATE_EVENT_REJECTED: LateEventRejectedPayload,
     EventType.PHASE_TIMED_OUT: PhaseTimedOutPayload,
     EventType.TASK_CLEANUP_TIMEOUT: TaskCleanupTimeoutPayload,
+    EventType.OUTPUT_BLOB_STORED: OutputBlobStoredPayload,
+    EventType.STEP_LOCAL_REPAIR_STARTED: StepLocalRepairStartedPayload,
+    EventType.STEP_LOCAL_REPAIR_COMPLETED: StepLocalRepairCompletedPayload,
 }
 
 

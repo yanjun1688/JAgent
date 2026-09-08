@@ -1375,7 +1375,7 @@ class TestBoundaryCases:
 )
 def test_intent_requires_tools_trusted_gate_hits(intent):
     """Bug 1 回归：含文件/路径/URL/浏览器信号的意图必须触发受信保守门。"""
-    from harness.core.scheduler.plan import _intent_requires_tools
+    from harness.core.scheduler.classify import intent_requires_tools as _intent_requires_tools
 
     assert _intent_requires_tools(intent) is True, f"trusted gate must catch: {intent}"
 
@@ -1392,7 +1392,7 @@ def test_intent_requires_tools_trusted_gate_hits(intent):
 )
 def test_intent_requires_tools_trusted_gate_pure_conversation(intent):
     """Bug 1 回归：纯对话请求不触发保守门（交由 LLM 判定）。"""
-    from harness.core.scheduler.plan import _intent_requires_tools
+    from harness.core.scheduler.classify import intent_requires_tools as _intent_requires_tools
 
     assert _intent_requires_tools(intent) is False, f"pure conversation must not trigger gate: {intent}"
 

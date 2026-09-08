@@ -95,6 +95,15 @@ class SchedulerConfig:
     宽限期后仍 pending → 写结构化 TASK_CLEANUP_TIMEOUT 并强制 cleanup，不无限等待。
     清理时间不计入 Run 执行预算。"""
 
+    # v3.4 (F-6, ADR-011): 步骤级 bounded 局部修复（默认关闭 — 仅显式启用的 run
+    # 生效，避免对现有 plan-execute 行为的回归面）。开启后，步骤失败且工具级 retry
+    # 用尽时，Scheduler 在受信预算内驱动针对该步骤的局部 think-act 循环。
+    local_repair_enabled: bool = False
+    local_repair_max_rounds: int = 2
+    """每步骤允许的局部修复轮次上限（受信预算 RecoveryBudget.max_repair_rounds）。"""
+    local_repair_allowed_tools: tuple[str, ...] = ()
+    """局部修复工具白名单（read-only 工具名；空 = 拒绝一切修复动作，fail-closed）。"""
+
     def __post_init__(self):
         if self.confirm_timeout_ms == 0:
             self.confirm_timeout_ms = self.pause_timeout_ms
@@ -310,9 +319,11 @@ class BaseScheduler(ABC):
                         run_id,
                     )
                 self.monitor.cleanup(run_id)
-            # Evict the run-level conversation_id cache so the in-memory
-            # mapping doesn't grow unbounded across runs (P0-04 follow-up).
-            self.store.evict_run_to_conv(run_id)
+            # Evict run-level column-fill caches (conversation_id +
+            # workspace_id) so the in-memory mappings don't grow unbounded
+            # across runs. evict_run_caches is the single eviction point for
+            # all run-level caches.
+            self.store.evict_run_caches(run_id)
             self._run_end_cb(run_id)
             try:
                 await self._end_run_trace(run_id)

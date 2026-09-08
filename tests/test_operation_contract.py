@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from harness.models.tools import OperationContract, SideEffect, ToolDefinition, resolve_operation_contract
-from harness.tools.browser_tool import BROWSER_DEF
 from harness.tools.file_op import FileOpTool
 from harness.tools.http_request import HTTP_REQUEST_DEF
 from harness.tools.mcp_call import MCP_CALL_DEF
@@ -71,17 +70,6 @@ def test_resolve_http_default_method_is_get():
     assert op is not None
     assert op.operation == "GET"
     assert op.probe_allowed is True
-
-
-def test_resolve_browser_actions():
-    op = resolve_operation_contract(BROWSER_DEF, {"action": "extract", "selector": "a"})
-    assert op is not None
-    assert op.side_effects == []
-    assert op.probe_allowed is True
-    op = resolve_operation_contract(BROWSER_DEF, {"action": "navigate", "url": "http://a"})
-    assert op is not None
-    assert op.side_effects == [SideEffect.EXTERNAL]
-    assert op.probe_allowed is False
 
 
 def test_unknown_operation_returns_none():

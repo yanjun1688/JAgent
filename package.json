@@ -1,0 +1,9 @@
+{
+  "name": "jagent-node-deps",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned Node tooling for Harness (playwright-mcp browser backend, ADR-011). Not a published package.",
+  "dependencies": {
+    "@playwright/mcp": "0.0.80"
+  }
+}

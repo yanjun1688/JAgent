@@ -54,11 +54,10 @@ from harness.core.scheduler.plan import PlanningExecutorScheduler
 from harness.models.events import EventType
 from harness.models.intent import DeliveryContract, DeliverySource
 from harness.storage.event_store import EventStore
-from harness.tools.browser_tool import BROWSER_DEF, browser_fn
 from harness.tools.executor import ToolExecutor
-from harness.tools.file_op import FILE_OP_DEF, file_op_fn
-from harness.tools.http_request import HTTP_REQUEST_DEF, http_request_fn
-from harness.tools.mcp_call import MCP_CALL_DEF, mcp_call_fn
+from harness.tools.file_op import FileOpTool
+from harness.tools.http_request import HttpRequestTool
+from harness.tools.mcp_call import McpCallTool
 from harness.tools.registry import ToolRegistry
 
 
@@ -76,11 +75,11 @@ def build_llm() -> OpenAILLMClient:
 
 
 def build_registry() -> ToolRegistry:
+    # ADR-011: 内置 browser 退役（浏览器能力为 playwright-mcp 动态注册）；
+    # ADR-010: 统一 register_tool 入口。
     r = ToolRegistry()
-    r.register(HTTP_REQUEST_DEF, http_request_fn)
-    r.register(FILE_OP_DEF, file_op_fn)
-    r.register(BROWSER_DEF, browser_fn)
-    r.register(MCP_CALL_DEF, mcp_call_fn)
+    for tool in (HttpRequestTool(), FileOpTool(), McpCallTool()):
+        r.register_tool(tool)
     return r
 
 
@@ -100,13 +99,28 @@ async def run_scenario(
     scoped = store
     executor = ToolExecutor(scoped)
     planner = Planner(llm, registry, scoped, max_plan_retries=2)
-    dag = DagExecutor(executor, scoped, registry)
+    # v3.3: file_op 经受信 ExecutionBackend 注入（替代删除的全局沙盒根）。
+    import tempfile
+
+    from harness.execution.local import LocalDirectoryBackend
+
+    backend = LocalDirectoryBackend(tempfile.mkdtemp(prefix="jagent_s12_"))
+    dag = DagExecutor(executor, scoped, registry, backend=backend)
     config = SchedulerConfig(
         max_iterations=15,
         run_timeout_ms=run_timeout_ms,
         max_revise_retries=3,
     )
-    sched = PlanningExecutorScheduler(scoped, executor, planner, dag, [], {}, config=config)
+    sched = PlanningExecutorScheduler(
+        scoped,
+        executor,
+        planner,
+        dag,
+        registry.list_tool_defs(),
+        registry.list_tool_fns(),
+        config=config,
+        backend=backend,
+    )
     run_id = f"s12_{int(time.time_ns() % 10_000_000)}"
 
     payload = {

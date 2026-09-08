@@ -47,9 +47,37 @@ from harness import (
     setup_logging,
 )
 from harness.core.system_prompt import _PLAN_PROMPT, _REVISE_PROMPT
+from harness.tools.base import BaseTool
 
 PASS = "  PASS"
 FAIL = "  FAIL"
+
+
+class _ScriptTool(BaseTool):
+    """Adapter: legacy (ToolDefinition, fn) pair via register_tool (ADR-010)."""
+
+    def __init__(self, td: ToolDefinition, fn) -> None:
+        self.name = td.name
+        self.description = td.description
+        self.input_schema = td.input_schema
+        self.output_schema = td.output_schema
+        self.idempotency_key_fields = td.idempotency_key_fields
+        self.side_effects = td.side_effects
+        self.timeout_ms = td.timeout_ms
+        self.retry_policy = td.retry_policy
+        self.guardrails = td.guardrails or []
+        self.requires_confirmation = td.requires_confirmation
+        self.scope_targets = td.scope_targets
+        self.operation_key = td.operation_key
+        self._fn = fn
+
+    async def run(self, input):
+        import inspect
+
+        result = self._fn(input)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
 
 def make_tool_def(name: str, description: str = "", input_schema: dict | None = None) -> ToolDefinition:
@@ -83,7 +111,7 @@ async def run_full_pipeline(
     llm_client = MockLLMClient(llm_responses)
     registry = ToolRegistry()
     for td in tool_defs:
-        registry.register(td, tool_fns[td.name])
+        registry.register_tool(_ScriptTool(td, tool_fns[td.name]))
 
     dag = DagExecutor(executor, store, registry)
     planner = Planner(llm_client=llm_client, registry=registry, store=store)

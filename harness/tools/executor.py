@@ -12,12 +12,14 @@ from typing import Any, Callable
 import jsonschema
 
 from harness.core.logger import agent_logger, guard_logger
+from harness.core.recovery import classify_failure_tier, is_read_only_action
 from harness.execution.base import ExecutionBackend
 from harness.models.events import (
     ConfirmationReceivedPayload,
     ConfirmationRequestedPayload,
     EventType,
     GuardrailTriggeredPayload,
+    OutputBlobStoredPayload,
     ToolCalledPayload,
     ToolCompletedPayload,
     ToolFailedPayload,
@@ -31,6 +33,7 @@ from harness.storage.event_store import EventStore
 from harness.tools.base import current_backend
 from harness.tools.guardrails import GuardrailRunner
 from harness.tools.idempotency import IdempotencyKeyGenerator
+from harness.tools.output_store import OutputBlobStore, build_ref_placeholder
 from harness.tools.retry import RetryRunner
 from harness.tools.sandbox import Sandbox
 from harness.tools.semantic import SemanticEvaluator
@@ -59,6 +62,10 @@ def _log_summary(value: Any, limit: int = 240) -> str:
 # Context variable that tool functions can read to discover the current run_id.
 # Set by ToolExecutor.execute() before each invocation.
 current_run_id: contextvars.ContextVar[str] = contextvars.ContextVar("current_run_id", default="")
+
+# ADR-011: current workspace_id (trusted, injected by executor) — BrowserPool
+# builds per-tenant/workspace persistent profile paths from this + tenant ctx.
+current_workspace_id: contextvars.ContextVar[str] = contextvars.ContextVar("current_workspace_id", default="")
 
 
 class ConfirmationNeededError(Exception):
@@ -103,9 +110,73 @@ class ToolExecutionResult:
 
 
 class ToolExecutor:
-    def __init__(self, store: EventStore, guardrail_runner: GuardrailRunner | None = None):
+    def __init__(
+        self,
+        store: EventStore,
+        guardrail_runner: GuardrailRunner | None = None,
+        output_inline_max_chars: int = 8000,
+    ):
         self.store = store
         self.guardrails = guardrail_runner or GuardrailRunner(store=store)
+        # v3.4 (F-2): tool outputs larger than this are offloaded to a workspace
+        # blob; the event stream keeps only a {summary, ref, sha256, bytes} placeholder.
+        self.output_inline_max_chars = output_inline_max_chars
+
+    async def _offload_if_large(
+        self,
+        run_id: str,
+        output: Any,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        step_id: str | None,
+        workspace_id: str | None,
+        backend: Any,
+    ) -> Any:
+        """Offload an oversized tool output to a blob; return the event payload value.
+
+        The in-memory ``output`` returned to the current run's downstream steps is
+        unchanged (full data stays available within the run); only the value
+        persisted to the Event Store is replaced by a compact placeholder. A
+        corresponding ``OutputBlobStored`` event records the ref for replay/audit.
+        """
+        blob_store = OutputBlobStore(backend, inline_max_chars=self.output_inline_max_chars)
+        try:
+            stored = await blob_store.store(
+                output,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                step_id=step_id,
+                workspace_id=workspace_id,
+            )
+        except Exception as exc:  # offload failure must never break tool execution
+            _guard_log.warning("[output] blob offload failed (keeping inline output): %s", exc)
+            return output
+        if stored is None:
+            return output
+        await self.store.append_event(
+            run_id,
+            EventType.OUTPUT_BLOB_STORED,
+            OutputBlobStoredPayload(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                ref=stored.ref,
+                sha256=stored.sha256,
+                bytes=stored.bytes,
+                summary=stored.summary,
+                truncated=stored.truncated,
+                step_id=step_id,
+                workspace_id=workspace_id,
+            ).model_dump(),
+        )
+        _log_sandbox.info(
+            "[output] tool=%s call=%s large output offloaded bytes=%d ref=%s",
+            tool_name,
+            tool_call_id,
+            stored.bytes,
+            stored.ref,
+        )
+        return build_ref_placeholder(stored)
 
     # ── Langfuse tracing helpers (non-trusted observability, no-op when off) ──
 
@@ -376,14 +447,36 @@ class ToolExecutor:
         # ADR-010 D-03: run 级 backend 经 contextvar 注入 invoker，替代按工具名
         # partial 特判（file_op）——所有工具统一 Sandbox.invoke(tool_fn, input)。
         token_backend = current_backend.set(backend)
+        token_workspace = current_workspace_id.set(workspace_id or "")
         try:
 
             async def _run() -> Any:
                 return await Sandbox.invoke(tool_fn, input, timeout_ms=tool_def.timeout_ms)
 
+            # F-5 (v3.4): retries cover BOTH raised exceptions (legacy) and
+            # retryable *semantic* failures (infra-transient success:false /
+            # 5xx on a read-only op). The predicate decides, per returned
+            # result, whether it is an auto-retryable semantic failure;
+            # RetryRunner shares one retry_policy budget across both failure
+            # kinds. A business (non-transient) or side-effecting UNSUCCESSFUL
+            # returns None → not retried → escalates exactly as before.
+            def _semantic_retry_reason(out: Any) -> str | None:
+                rt, err = SemanticEvaluator.evaluate(out, tool_def)
+                if rt != ToolResultType.UNSUCCESSFUL or not err:
+                    return None
+                if classify_failure_tier(err, retryable=False) != "tool_retry":
+                    return None
+                rp = tool_def.retry_policy
+                if rp and rp.retryable_errors and not any(c in err for c in rp.retryable_errors):
+                    return None
+                if not is_read_only_action(tool_name, input or {}):
+                    return None
+                return err
+
             output, retry_count = await RetryRunner.execute_with_retry(
                 _run,
                 policy=tool_def.retry_policy,
+                semantic_retry_check=_semantic_retry_reason,
             )
             duration_ms = int((time.monotonic() - step7_start) * 1000)
 
@@ -391,7 +484,11 @@ class ToolExecutor:
             result_type, semantic_error = SemanticEvaluator.evaluate(output, tool_def)
             if result_type == ToolResultType.UNSUCCESSFUL:
                 _log_sandbox.warning(
-                    "[semantic] tool=%s UNSUCCESSFUL: %s (%dms)", tool_name, semantic_error, duration_ms
+                    "[semantic] tool=%s UNSUCCESSFUL (retries=%d): %s (%dms)",
+                    tool_name,
+                    retry_count,
+                    semantic_error,
+                    duration_ms,
                 )
                 if op_contract is not None and op_contract.side_effects:
                     _log_sandbox.info(
@@ -521,10 +618,22 @@ class ToolExecutor:
                     "[sidefx] tool=%s side_effects=%s", tool_name, [s.value for s in tool_def.side_effects]
                 )
 
+            # v3.4 (F-2): offload oversized output to a blob; persist only the
+            # compact placeholder to the Event Store (full body stays in-memory
+            # for this run's downstream steps and is retrievable via fetch_output).
+            persisted_output = await self._offload_if_large(
+                run_id,
+                output,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                step_id=step_id,
+                workspace_id=workspace_id,
+                backend=backend,
+            )
             tp = ToolCompletedPayload(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
-                output=output,
+                output=persisted_output,
                 duration_ms=duration_ms,
                 step_id=step_id,
             )
@@ -642,6 +751,7 @@ class ToolExecutor:
         finally:
             current_run_id.reset(token_run)
             current_backend.reset(token_backend)
+            current_workspace_id.reset(token_workspace)
 
     # ── Helpers ──────────────────────────────────────────────────
 

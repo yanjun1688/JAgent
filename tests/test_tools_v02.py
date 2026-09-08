@@ -522,13 +522,15 @@ class TestToolResultEnrichmentBug6:
         assert "url" in props, f"output_schema should include url, got: {list(props.keys())}"
         assert "method" in props, f"output_schema should include method, got: {list(props.keys())}"
 
-    def test_browser_schema_includes_action_and_url(self):
-        """Browser output_schema should include action and url."""
-        from harness.tools.browser_tool import BROWSER_DEF
+    def test_browser_mcp_schema_includes_success_and_content(self):
+        """ADR-011: playwright-mcp first-class tools share the mcp-style output schema."""
+        from harness.tools.browser_mcp import BrowserMcpTool
+        from harness.tools.browser_policy import policy_for
 
-        props = BROWSER_DEF.output_schema.get("properties", {})
-        assert "action" in props, f"output_schema should include action, got: {list(props.keys())}"
-        assert "url" in props, f"output_schema should include url, got: {list(props.keys())}"
+        tool = BrowserMcpTool("browser_navigate", "[playwright] navigate", {}, policy_for("browser_navigate"))
+        props = tool.to_definition().output_schema.get("properties", {})
+        assert "success" in props, f"output_schema should include success, got: {list(props.keys())}"
+        assert "content" in props, f"output_schema should include content, got: {list(props.keys())}"
 
     def test_file_op_schema_includes_path(self):
         """File op output_schema should include path."""

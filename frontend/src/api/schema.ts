@@ -320,6 +320,7 @@ export interface RunStateView {
   tool_results?: ToolResultView[]
   guardrail_blocks?: GuardrailBlockView[]
   pending_confirmations?: PendingConfirmationView[]
+  step_evidence?: StepEvidenceView[]
   thought_count: number
   orphaned: boolean
   workspace_id?: string
@@ -373,6 +374,23 @@ export interface StepChangeView {
   from_status?: string
   to_status?: string
   error?: string
+}
+
+export interface StepEvidenceView {
+  step_id: string
+  plan_id: string
+  tool_name: string
+  exec_state: string
+  depends_on?: string[]
+  output_summary: string
+  error?: string
+  tool_call_id?: string
+  output_ref?: string
+  output?: unknown
+  probe: boolean
+  skip_reason?: string
+  updated_seq: number
+  step_normal: boolean
 }
 
 export interface SuccessResponse {

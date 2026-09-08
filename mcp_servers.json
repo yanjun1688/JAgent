@@ -9,11 +9,6 @@
       "name": "fetch",
       "command": ["npx", "-y", "@modelcontextprotocol/server-fetch"],
       "enabled": true
-    },
-    {
-      "name": "playwright",
-      "command": ["npx", "-y", "@playwright/mcp"],
-      "enabled": true
     }
   ]
 }
