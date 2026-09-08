@@ -40,7 +40,7 @@ async def backend():
     await store.close()
 
 
-def directory_scope(root: str = "D:/Project/JAgent/data/workspaces/integration/work") -> dict:
+def directory_scope(root: str = "data/workspaces/integration/work") -> dict:
     return {"target": {"type": "directory", "filesystem_root": root}}
 
 

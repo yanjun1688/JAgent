@@ -40,7 +40,7 @@ def directory_scope() -> dict:
     return {
         "target": {
             "type": "directory",
-            "filesystem_root": "D:/Project/JAgent/data/workspaces/test/work",
+            "filesystem_root": "data/workspaces/test/work",
         }
     }
 
