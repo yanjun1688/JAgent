@@ -5,7 +5,8 @@ import json
 import os
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 import aiosqlite
@@ -352,6 +353,40 @@ class EventStore:
             raise RuntimeError("EventStore not initialized. Call initialize() first.")
         return self._conn
 
+    @asynccontextmanager
+    async def _txn_immediate(self) -> AsyncIterator[aiosqlite.Connection]:
+        """单条 ``BEGIN IMMEDIATE`` 事务，取消安全（调用方负责持写锁）。
+
+        **强制不变量：离开本上下文时连接上不得遗留 OPEN 事务。** 单连接 SQLite
+        上一个未闭合事务会让下一条写（可能是另一个 run，或看门狗强制写的终态
+        RunFailed）撞 "cannot start a transaction within a transaction"，并永久
+        污染这条共享连接。
+
+        取消安全是关键：``asyncio.CancelledError`` 继承 ``BaseException``，普通的
+        ``except Exception`` 捕不到它。watchdog 可能恰好在 BEGIN…commit 之间取消
+        在途 append，故清理必须用 ``BaseException`` 兜底，且 rollback 本身要
+        ``shield``——取消信号在 finally/except 里仍处 pending，直接 await rollback
+        会立刻再抛 CancelledError，使事务无法闭合。rollback 完成后把原异常
+        （含 CancelledError）忠实重抛，绝不吞掉取消。
+        """
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield self.conn
+            await self.conn.commit()
+        except BaseException:
+            # 单次 task.cancel() 下 CancelledError 在 except 中只投递一次，这里的
+            # await 会正常跑完；不使用 shield（外层取消时 shield 会立即抛
+            # CancelledError，反而等不到 rollback 完成）。回滚未决事务后忠实重抛。
+            await self.conn.rollback()
+            raise
+
+    @asynccontextmanager
+    async def _write_txn(self) -> AsyncIterator[aiosqlite.Connection]:
+        """持全局写锁的单事务写原语（单次 INSERT/UPDATE 的写方法用）。"""
+        async with self._db_write_lock:
+            async with self._txn_immediate() as conn:
+                yield conn
+
     # ── Core API ───────────────────────────────────────────────
 
     async def append_event(
@@ -403,37 +438,37 @@ class EventStore:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
 
-        lock = self._db_write_lock
         assigned_seq: int | None = None
-        async with lock:
+        async with self._db_write_lock:
             for attempt in range(_max_retries + 1):
                 try:
-                    await self.conn.execute("BEGIN IMMEDIATE")
-                    cursor = await self.conn.execute(
-                        "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE run_id = ?",
-                        (run_id,),
-                    )
-                    row = await cursor.fetchone()
-                    assigned_seq = int(row[0])
-                    await self.conn.execute(
-                        sql,
-                        (
-                            run_id,
-                            tenant_id,
-                            workspace_id,
-                            assigned_seq,
-                            event_type.value,
-                            payload_json,
-                            idempotency_key,
-                            created_at,
-                            conversation_id,
-                            int(is_audit),
-                        ),
-                    )
-                    await self.conn.commit()
+                    # 每个 attempt 一个独立、取消安全的事务；锁跨重试持有，
+                    # 保证 BEGIN…MAX(seq)+1…INSERT…COMMIT 不与其它写交错。
+                    async with self._txn_immediate():
+                        cursor = await self.conn.execute(
+                            "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE run_id = ?",
+                            (run_id,),
+                        )
+                        row = await cursor.fetchone()
+                        assigned_seq = int(row[0])
+                        await self.conn.execute(
+                            sql,
+                            (
+                                run_id,
+                                tenant_id,
+                                workspace_id,
+                                assigned_seq,
+                                event_type.value,
+                                payload_json,
+                                idempotency_key,
+                                created_at,
+                                conversation_id,
+                                int(is_audit),
+                            ),
+                        )
                     break
                 except sqlite3.IntegrityError as exc:
-                    await self.conn.rollback()
+                    # _txn_immediate 已先 rollback（取消安全），此处事务已闭合。
                     error_str = str(exc)
                     if "UNIQUE constraint" in error_str and "events.idempotency_key" in error_str:
                         if idempotency_key is None:
@@ -453,9 +488,6 @@ class EventStore:
                         )
                         continue
                     raise SequenceConflictError(f"PK conflict on (run_id='{run_id}', seq): {exc}") from exc
-                except Exception:
-                    await self.conn.rollback()
-                    raise
 
         if assigned_seq is None:
             raise RuntimeError("Event append completed without an assigned sequence")
