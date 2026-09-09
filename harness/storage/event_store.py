@@ -362,23 +362,60 @@ class EventStore:
         RunFailed）撞 "cannot start a transaction within a transaction"，并永久
         污染这条共享连接。
 
-        取消安全是关键：``asyncio.CancelledError`` 继承 ``BaseException``，普通的
-        ``except Exception`` 捕不到它。watchdog 可能恰好在 BEGIN…commit 之间取消
-        在途 append，故清理必须用 ``BaseException`` 兜底。单次 ``task.cancel()``
-        下 CancelledError 在 except 中只投递一次，其内 ``await rollback()`` 能正常
-        跑完（不使用 shield——外层取消时 shield 会立即重抛，反而等不到回滚）。
-        rollback 完成后把原异常（含 CancelledError）忠实重抛，绝不吞掉取消。
+        取消安全的关键有两层：
+
+        1. ``CancelledError`` 继承 ``BaseException``，普通 ``except Exception``
+           捕不到，故清理必须用 ``BaseException`` 兜底。
+        2. aiosqlite 的每个操作是"先 ``put_nowait`` 进后台工作线程 FIFO 队列，再
+           ``await future``"。``task.cancel()`` 只取消 future，**不会撤回已入队的
+           操作**。因此清理时**无条件**入队一条 ROLLBACK：无论 BEGIN 此刻已执行、
+           还是仅入队未执行，ROLLBACK 都靠 FIFO 排在它之后执行，事务必然闭合
+           （没有事务时 sqlite3 的 ROLLBACK 是无害 no-op）。绝不能读
+           ``conn.in_transaction`` 做早退判断——那是事件循环线程跨线程读工作线程
+           状态，BEGIN 可能"尚未执行但已入队"，读到 False 就会漏排 ROLLBACK
+           （2026-09-09 Linux CI 双重取消竞态的根因）。
+
+        BEGIN 必须在同一个 try 内：取消可能就落在 BEGIN 的 await 点（孤儿 BEGIN 已
+        入队、尚未执行），只有把它纳入 except，清理 ROLLBACK 才会被无条件入队。
+
+        ROLLBACK 一旦入队即不可撤回，故清理期间再被取消也只打断等待、不影响 worker
+        执行它；清理自身报错用 ``except Exception`` 吞掉，以免掩盖原始异常。原始异常
+        （含 CancelledError）最后忠实重抛，绝不吞取消。
         """
-        await self.conn.execute("BEGIN IMMEDIATE")
         try:
+            await self._begin_immediate_with_recovery()
             yield self.conn
             await self.conn.commit()
         except BaseException:
-            # 单次 task.cancel() 下 CancelledError 在 except 中只投递一次，这里的
-            # await 会正常跑完；不使用 shield（外层取消时 shield 会立即抛
-            # CancelledError，反而等不到 rollback 完成）。回滚未决事务后忠实重抛。
-            await self.conn.rollback()
+            try:
+                await self.conn.rollback()
+            except Exception:
+                pass
             raise
+
+    async def _begin_immediate_with_recovery(self) -> None:
+        """``BEGIN IMMEDIATE``，并对"共享连接上的孤儿事务"自愈一次（纵深防御）。
+
+        正常情况下 ``_txn_immediate`` 的取消安全清理保证不留 OPEN 事务。这是兜底：
+        若仍有未知窗口在共享连接上遗留了 OPEN 事务，下一条写的 BEGIN 会撞
+        sqlite3.OperationalError("cannot start a transaction within a transaction")。
+        所有写都持 ``_db_write_lock``，故该 OPEN 事务不可能属于某个并发协程——它只能
+        是孤儿。此处入队一条 ROLLBACK（FIFO 保证排在已执行的孤儿 BEGIN 之后闭合它），
+        再重试一次 BEGIN，确保看门狗的终态写（RunFailed）也能把 run 收敛到 failed，
+        而不是让 run 永久卡 running。
+        """
+        try:
+            await self.conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            if "cannot start a transaction within a transaction" not in str(exc):
+                raise
+            _log_write.error(
+                "[store] BEGIN hit an orphaned transaction on the shared connection; "
+                "issuing ROLLBACK and retrying once: %s",
+                exc,
+            )
+            await self.conn.rollback()
+            await self.conn.execute("BEGIN IMMEDIATE")
 
     @asynccontextmanager
     async def _write_txn(self) -> AsyncIterator[aiosqlite.Connection]:
