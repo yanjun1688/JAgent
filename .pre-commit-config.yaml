@@ -8,6 +8,12 @@ repos:
         types: [python]
         pass_filenames: false
         always_run: true
+      - id: openapi-diff
+        name: OpenAPI artifacts in sync (scripts/generate_openapi.py --check)
+        entry: uv run python scripts/generate_openapi.py --check
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: bug-summary
         name: validate Bug summary
         entry: uv run pytest tests/test_bug_summary.py -q
