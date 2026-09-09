@@ -30,6 +30,21 @@ class SideEffect(str, Enum):
     EXTERNAL = "external"
 
 
+def unknown_tool_message(name: str) -> str:
+    """Single source of the canonical "tool does not exist" fragment (R7).
+
+    Every trusted seam that rejects an unregistered tool must derive its core
+    message from this function (call sites may add their own prefix for triage
+    clustering); none may hand-write ``unknown tool '{name}'`` again.
+
+    Lives in the zero-dependency ``models`` layer — not ``tools.registry`` — so
+    that the lowest contract layer (``models.intent``) can reuse it without
+    depending upward on ``tools``/``core``. New code must import it from here;
+    ``tools.registry`` only re-exports it for backward compatibility.
+    """
+    return f"unknown tool '{name}'"
+
+
 class ToolScopeTarget(BaseModel):
     """工具声明的 scope 目标（ADR-010 D-02），取代 ScopeGuardrail 名称特判。
 

@@ -12,7 +12,12 @@ from __future__ import annotations
 
 import pytest
 
-from harness.models.tools import Guardrail, SideEffect, ToolScopeTarget
+from harness.models.tools import (
+    Guardrail,
+    SideEffect,
+    ToolScopeTarget,
+    unknown_tool_message as canonical_message,
+)
 from harness.tools.base import BaseTool, operation
 from harness.tools.registry import (
     ToolRegistry,
@@ -221,4 +226,10 @@ class TestToolExistencePrimitive:
         registry = ToolRegistry()
         registry.register_tool(_PingTool())
         assert registry.require_tool_def("ping_tool").name == "ping_tool"
+
+    def test_registry_reexport_is_same_function_as_models_source(self):
+        """The tools.registry export is a compatibility re-export of the single
+        canonical function in zero-dependency models.tools — not a second copy.
+        Pins identity so a future drift cannot silently reintroduce a duplicate."""
+        assert unknown_tool_message is canonical_message
 

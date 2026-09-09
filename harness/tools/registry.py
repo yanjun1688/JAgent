@@ -3,20 +3,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Callable
 
 from harness.core.system_prompt import build_tool_schemas
-from harness.models.tools import ToolDefinition
+from harness.models.tools import ToolDefinition, unknown_tool_message
 
 if TYPE_CHECKING:
     from harness.tools.base import BaseTool
 
-
-def unknown_tool_message(name: str) -> str:
-    """Single source of the canonical "tool does not exist" fragment (R7).
-
-    Every trusted seam that rejects an unregistered tool must derive its core
-    message from this function (call sites may add their own prefix for
-    triage clustering); none may hand-write ``unknown tool '{name}'`` again.
-    """
-    return f"unknown tool '{name}'"
+# Compatibility re-export only: unknown_tool_message now lives in the
+# zero-dependency models layer (harness.models.tools). Do NOT add new call
+# sites that import it from here — import it directly from harness.models.tools
+# so the dependency direction stays models <- tools.
 
 
 class UnknownToolError(LookupError):
