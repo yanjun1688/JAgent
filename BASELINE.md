@@ -104,4 +104,25 @@ mypy 在阶段零之前**从未进入任何门禁**。清掉 `.mypy_cache` 冷�
 ## 6. 已知但本阶段不处理的事项
 
 - 所有 R1–R12 观察项以 review 20260909 为准，阶段一只处理其排定的重复实现合并。
-- PlanGuardrail 未知工具分支此前无专门测试用例（阶段零第 5 项补）。
+- mypy 存量错误（§3）只显式记录，不在阶段零修复。
+- README 事件类型"38 种 vs 实际 41 种"的计数漂移（R10）不在阶段零修复，按独立任务处理。
+
+## 7. 受信纯函数边界覆盖审计（阶段零第 5 项）
+
+阶段零逐条核对"受信判定函数"的**未知输入 fail 方向**是否有测试 pin。
+阶段一合并重复实现（R7/R8）时，必须以此表对账，不得反转任一方向。
+
+| 受信判定函数 | 未知输入方向 | 覆盖位置 | 状态 |
+|---|---|---|---|
+| `PlanGuardrail.validate`（工具存在性，R7 #2） | **fail-closed**（errors 非空即拒，:51-53 短路） | test_planner.py:135；**新增** test_plan_guardrail_structure.py 方向 pin ×2 | 已补强 |
+| `step_is_mutating`（revision_invariants） | **fail-closed**（未知→True=mutating） | test_reviser_restriction.py:159,171,179 | 已覆盖 |
+| `is_read_only_action` / `_is_read_only_action`（recovery） | **fail-closed**（未知→False=非只读） | test_tool_semantic_retry.py:102 | 已覆盖 |
+| `validate_local_repair`（预算/白名单/只读） | **fail-closed**（超预算/非白名单/mutating/空提案全拒） | test_recovery_core.py:178-211 | 已覆盖 |
+| `verify_deliverables` / `CompletionVerdict.compute` | 空契约→**unverified**（非 met，fail-safe 不假绿）；不匹配→unmet；UNSUCCESSFUL→unmet | test_deliverable_gate.py:42-124；test_completion_gate.py:320-352 | 已覆盖 |
+| `validate_revision_invariants`（内核：弱化交付） | 未知工具未被契约覆盖→拒绝；无契约跳过反向覆盖（legacy unverified） | test_reviser_restriction.py:58-197 | 已覆盖 |
+| `ToolWhitelistGuardrail`（R7 #5，workspace 白名单） | **fail-open**（scope 未声明 `allowed_tools`，即 None → 放行；声明后 fail-closed） | test_browser_policy.py:166-189；test_tool_guardrail_contract.py:77 | 已覆盖（**注意：这是唯一现存的 fail-open 点，属存量 workspace 语义，禁止顺手反转**） |
+| 注册期契约自洽（R7 #1） | **fail-closed**（拒绝注册/启动） | test_tool_registry.py:137 起 | 已覆盖 |
+| 执行时双查 `get_tool_def/get_tool_fn`（R7 #4） | **fail-closed**（StepResult FAILED） | test_dag_executor.py 未知工具用例 | 已覆盖 |
+
+阶段零补的两条用例只 pin 方向、不改任何生产代码。
+

@@ -198,3 +198,27 @@ def test_guardrail_external_dep_not_rejected(registry):
     plan = _plan(DagStep(id="s2", tool="echo", input={}, depends_on=["s1"]))
     errors = PlanGuardrail(registry).validate(plan, completed_step_ids={"s1"})
     assert errors == []
+
+
+# ── 受信方向 pin：未知工具必须 fail-closed（R7 判定 #2）──────────
+
+
+def test_guardrail_unknown_tool_rejected_fail_closed(registry):
+    """含一个未注册工具的计划必须被拒绝（errors 非空），绝不静默放行到
+    Executor。pin 住 PlanGuardrail 对未知输入的默认方向 = fail-closed，
+    供阶段一合并 R7 的 8 份"工具存在性"判定时对账。"""
+    plan = _plan(
+        DagStep(id="s1", tool="echo", input={}),
+        DagStep(id="s2", tool="ghost_tool", input={}),
+    )
+    errors = PlanGuardrail(registry).validate(plan)
+    assert any("unknown tool 'ghost_tool'" in e for e in errors)
+
+
+def test_guardrail_unknown_tool_short_circuits_before_structure_checks(registry):
+    """未知工具命中后提前返回，结构校验不再执行 —— 同时带未知工具和自依赖
+    的计划，首条错误必须是受信存在性违规，而非结构问题。"""
+    plan = _plan(DagStep(id="s1", tool="ghost_tool", input={}, depends_on=["s1"]))
+    errors = PlanGuardrail(registry).validate(plan)
+    assert errors and "unknown tool" in errors[0]
+    assert all("itself" not in e for e in errors)
