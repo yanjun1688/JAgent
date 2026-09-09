@@ -14,6 +14,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from harness.models.tools import unknown_tool_message
+
 
 class DeliverySource(str, Enum):
     CALLER = "caller"
@@ -59,7 +61,7 @@ def validate_delivery_contract_input(tool: str, op_input: Any, tool_def: Any) ->
     operations (mcp_call has none → tool_name only).
     """
     if tool_def is None:
-        return [f"unknown tool '{tool}'"]
+        return [unknown_tool_message(tool)]
     if not isinstance(op_input, dict) or not op_input:
         return ["input must be a non-empty object"]
 

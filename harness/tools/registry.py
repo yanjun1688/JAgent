@@ -3,10 +3,29 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Callable
 
 from harness.core.system_prompt import build_tool_schemas
-from harness.models.tools import ToolDefinition
+from harness.models.tools import ToolDefinition, unknown_tool_message
 
 if TYPE_CHECKING:
     from harness.tools.base import BaseTool
+
+# Compatibility re-export only: unknown_tool_message now lives in the
+# zero-dependency models layer (harness.models.tools). Do NOT add new call
+# sites that import it from here — import it directly from harness.models.tools
+# so the dependency direction stays models <- tools.
+
+
+class UnknownToolError(LookupError):
+    """Raised by fail-fast trusted paths when a named tool is not registered.
+
+    Collect-all paths (e.g. PlanGuardrail, which accumulates every bad step
+    into one error list for a single LLM retry) must use
+    ``ToolRegistry.tool_def_or_error`` instead, so validation does not
+    degenerate into stopping at the first unknown tool.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(unknown_tool_message(name))
+        self.name = name
 
 
 class ToolRegistry:
@@ -68,6 +87,30 @@ class ToolRegistry:
 
     def get_tool_fn(self, name: str) -> Callable[[dict[str, Any]], Any] | None:
         return self._fns.get(name)
+
+    def tool_def_or_error(self, name: str) -> tuple[ToolDefinition | None, str | None]:
+        """Non-raising lookup primitive (R7).
+
+        Returns ``(tool_def, None)`` when registered, otherwise
+        ``(None, message)`` with the canonical fragment from
+        ``unknown_tool_message``. This is the shared bottom layer for both
+        control-flow styles: collect-all validators append ``message`` to an
+        error list, while fail-fast paths wrap it via ``require_tool_def``.
+        """
+        tool_def = self.get_tool_def(name)
+        if tool_def is None:
+            return None, unknown_tool_message(name)
+        return tool_def, None
+
+    def require_tool_def(self, name: str) -> ToolDefinition:
+        """Fail-fast wrapper over :meth:`tool_def_or_error` (R7).
+
+        Raises :class:`UnknownToolError` when the tool is not registered.
+        """
+        tool_def, _ = self.tool_def_or_error(name)
+        if tool_def is None:
+            raise UnknownToolError(name)
+        return tool_def
 
     def remove(self, name: str) -> None:
         self._tools.pop(name, None)

@@ -10,6 +10,7 @@ from __future__ import annotations
 from harness.core.fold import fold_events
 from harness.models.events import Event, EventType, RunStartedPayload
 from harness.models.intent import DeliveryContract, DeliverySource, UserIntent, validate_delivery_contract_input
+from harness.models.tools import unknown_tool_message
 from harness.storage.event_store import EventStore
 
 
@@ -34,6 +35,13 @@ def test_delivery_contract_validation_is_tool_specific():
     file_def = FileOpTool().to_definition()
     assert validate_delivery_contract_input("file_op", {"operation": "write"}, file_def)
     assert validate_delivery_contract_input("file_op", {"operation": "write", "path": "x.txt"}, file_def) == []
+
+
+def test_unknown_tool_contract_error_uses_shared_fragment():
+    """R7 #7b: models.intent is the lowest layer; its unknown-tool error must
+    come from the shared canonical function, not a hand-written copy."""
+    errors = validate_delivery_contract_input("ghost_tool", {}, None)
+    assert errors == [unknown_tool_message("ghost_tool")]
 
 
 def test_source_distinguishes_caller_extracted():

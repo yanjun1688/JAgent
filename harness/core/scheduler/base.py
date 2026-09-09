@@ -36,6 +36,7 @@ from harness.monitoring.langfuse_tracer import (
 )
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ExecutionStatus, ToolExecutor
+from harness.tools.registry import unknown_tool_message
 
 if TYPE_CHECKING:
     from harness.monitoring.langfuse_tracer import LangfuseTracer, TraceContext
@@ -927,7 +928,10 @@ class BaseScheduler(ABC):
         tool_def = self._find_tool_def(think_result.tool_name)
         if tool_def is None:
             _sched_act.error("[act] Unknown tool: '%s'", think_result.tool_name)
-            await self._fail(run_id, f"Unknown tool: '{think_result.tool_name}'")
+            # R7 #8: serial path holds no ToolRegistry (tool_defs list / tool_fns
+            # dict), so it keeps its list lookup but derives the terminal error's
+            # core fragment from the shared pure function (fail-closed unchanged).
+            await self._fail(run_id, f"serial act: {unknown_tool_message(think_result.tool_name)}")
             return True, consecutive_failures
 
         tool_fn = self.tool_fns.get(think_result.tool_name)

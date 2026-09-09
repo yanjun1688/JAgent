@@ -31,7 +31,7 @@ from harness.models.plan import DagPlan, DagStep
 from harness.models.workspace import Workspace
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ExecutionStatus, ToolExecutor
-from harness.tools.registry import ToolRegistry
+from harness.tools.registry import ToolRegistry, unknown_tool_message
 
 _log = agent_logger("dag_executor")
 
@@ -498,11 +498,17 @@ class DagExecutor:
             return StepResult(step_id=step_id, exec_state=ExecState.FAILED, error=str(e))
 
         # --- Tool lookup ---
-        step_def = self.registry.get_tool_def(step.tool)
+        step_def, unknown_error = self.registry.tool_def_or_error(step.tool)
         step_fn = self.registry.get_tool_fn(step.tool)
 
         if step_def is None or step_fn is None:
-            return StepResult(step_id=step_id, exec_state=ExecState.FAILED, error=f"Tool '{step.tool}' not registered")
+            # Execution-time defense in depth (AGENTS.md constraint 4): fail-closed
+            # regardless of plan-time validation. Core fragment is shared (R7);
+            # the prefix is this call site's triage marker.
+            fragment = unknown_error or unknown_tool_message(step.tool)
+            return StepResult(
+                step_id=step_id, exec_state=ExecState.FAILED, error=f"step execution: {fragment}"
+            )
 
         prefix = "[retry]" if is_retry else "[step]"
         _log.info("%s %s → %s with %d param(s)", prefix, step_id, step.tool, len(merged_input))

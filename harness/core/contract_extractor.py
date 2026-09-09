@@ -14,6 +14,7 @@ import json
 from harness.core.llm_client import LLMClient
 from harness.core.logger import agent_logger, guard_logger
 from harness.models.intent import DeliveryContract, DeliverySource, validate_delivery_contract_input
+from harness.models.tools import unknown_tool_message
 from harness.tools.registry import ToolRegistry
 
 _log = agent_logger("contract_extractor")
@@ -84,7 +85,7 @@ class ContractExtractor:
         if not isinstance(tool, str) or not tool:
             return None, "operation missing a 'tool' name"
         if self.registry.get_tool_def(tool) is None:
-            reason = f"unknown tool '{tool}'"
+            reason = unknown_tool_message(tool)
             _guard.warning("[extract] Dropping contract for %s", reason)
             return None, reason
         if not isinstance(op_input, dict):
