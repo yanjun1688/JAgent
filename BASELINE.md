@@ -24,24 +24,62 @@
   3. 全量 `pytest`
 - 无 mypy 钩子；前端无 tsc / build / vitest 钩子。
 
-## 3. 类型检查豁免基线（mypy）
+## 3. 类型检查豁免清单（mypy，阶段零显式记录）
 
-`pyproject.toml` 对以下 **11 个模块**整体关闭 6 类错误
-（`arg-type, assignment, attr-defined, call-arg, no-redef, union-attr`）：
+mypy 在阶段零之前**从未进入任何门禁**。清掉 `.mypy_cache` 冷跑
+`uv run mypy harness` 实测 **122 errors / 23 files**（历史增量缓存曾只暴露 52，
+属假象）。阶段零不修任何一个，只做显式、可移除即红的记录，让 CI 从第一天就是绿的。
+豁免全部位于 `pyproject.toml [tool.mypy.overrides]`。
 
-1. `harness.core.dag_executor`
-2. `harness.tools.executor`
-3. `harness.monitoring.run_monitor`
-4. `harness.core.scheduler.base`
-5. `harness.tools.mcp_manager`
-6. `harness.tools.mcp_call`
-7. `harness.api.deps`
-8. `harness.api.analysis_routes`
-9. `harness.api.routes`
-10. `harness.api.app`
-11. `harness.api.serve`
+### 3.1 历史宽豁免块（阶段零之前已存在，逐字保留，6 个错误码）
 
-本阶段只记录、不要求修复。阶段零另有显式清单文档跟踪。
+关闭码：`arg-type, assignment, attr-defined, call-arg, no-redef, union-attr`。
+
+| 模块 | 备注 |
+|---|---|
+| `harness.core.dag_executor` | 冷跑错误最多（含 22 个 union-attr） |
+| `harness.tools.executor` | |
+| `harness.monitoring.run_monitor` | |
+| `harness.core.scheduler.base` | |
+| `harness.tools.mcp_manager` | |
+| `harness.api.deps` | |
+| `harness.api.analysis_routes` | |
+| `harness.api.app` | |
+| `harness.api.serve` | |
+
+`harness.api.routes` 与 `harness.tools.mcp_call` 原在本块内；因还各自需要一个
+额外错误码（`misc`），已拆成独立 override 块（同一模块在两个 override 中给出
+冲突的 `disable_error_code` 会导致 mypy **作废全部 overrides**，已实测踩中并修正）。
+
+### 3.2 阶段零新记录的窄豁免（52 errors / 14 files，按 文件 × 错误码 最小化）
+
+| 模块 | 关闭码 | 冷跑数量 |
+|---|---|---|
+| `harness.api.replay_routes` | arg-type | 1 |
+| `harness.core.lifecycle` | arg-type | 1（`max(key=...)` 重载类型） |
+| `harness.core.planner.revision_invariants` | arg-type | 2（**内核相关**：`DeliveryContract` 传给声明 `RequiredOperation` 的参数，结构化兼容、运行时正常） |
+| `harness.core.scheduler.plan` | arg-type | 1（dict 不变性，建议 Mapping） |
+| `harness.core.scheduler.classify` | attr-defined | 9（mixin 动态属性） |
+| `harness.core.scheduler.local_repair` | attr-defined | 10（mixin 动态属性） |
+| `harness.core.scheduler.revision_guard` | attr-defined | 6（mixin 动态属性 `planner`/`config`） |
+| `harness.monitoring.langfuse_tracer` | assignment | 1 |
+| `harness.storage.event_store` | index | 1（**内核相关**：`Row | None` 未判空，`:417`） |
+| `harness.tools.browser_mcp` | misc | 7 |
+| `harness.tools.fetch_output` | misc | 1 |
+| `harness.tools.skill` | misc | 6 |
+| `harness.tools.mcp_call` | 历史 6 码 + misc | 5（misc） |
+| `harness.api.routes` | 历史 6 码 + misc | 1（misc） |
+
+收敛规则：**修掉一个底层错误就必须删掉对应窄豁免并让 mypy 仍为绿**；
+禁止借无关改动新增豁免。移除任一窄豁免的变异自检已验证（mypy 立即变红）。
+
+### 3.3 内核相关的两条类型债（合并阶段需额外留意，勿顺手改语义）
+
+- `revision_invariants.py:51,76` — `RequiredOperation.step_satisfies(step, contract)`
+  形参类型问题；改类型声明时不得改变 DeliveryContract 覆盖判定语义。
+- `storage/event_store.py:417` — `Row | None` 可索引性；属读取路径类型债，
+  与 append-only 触发器无关，修复时不得动写路径。
+
 
 ## 4. 内核契约基线（本次工作禁止改动的锚点）
 
