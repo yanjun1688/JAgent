@@ -24,6 +24,7 @@ from harness import (
 )
 from harness.core.scheduler import BaseScheduler
 from harness.monitoring.run_monitor import RunMonitor
+from harness.tools.registry import unknown_tool_message
 
 
 @pytest.fixture
@@ -191,7 +192,12 @@ async def test_unknown_tool_fails_run(store: EventStore):
     state = await scheduler.run("run-1", "Bad call")
 
     assert state.status == RunStatus.FAILED
-    assert "Unknown tool" in (state.last_error or "")
+    # R7 #8: fail-closed terminal state; core fragment from the shared source,
+    # serial seam keeps its own triage prefix (no ToolRegistry on this path).
+    assert state.last_error is not None
+    assert state.last_error.startswith("serial act: ")
+    assert unknown_tool_message("ghost_tool") in state.last_error
+    assert "Unknown tool:" not in state.last_error
 
 
 @pytest.mark.asyncio
