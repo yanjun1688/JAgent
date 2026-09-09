@@ -97,7 +97,6 @@ disable_error_code = ["arg-type", "assignment", "attr-defined", "call-arg", "no-
 module = [
     "harness.api.replay_routes",
     "harness.core.lifecycle",
-    "harness.core.planner.revision_invariants",
     "harness.core.scheduler.plan",
 ]
 disable_error_code = ["arg-type"]
@@ -113,10 +112,6 @@ disable_error_code = ["attr-defined"]
 [[tool.mypy.overrides]]
 module = ["harness.monitoring.langfuse_tracer"]
 disable_error_code = ["assignment"]
-
-[[tool.mypy.overrides]]
-module = ["harness.storage.event_store"]
-disable_error_code = ["index"]
 
 [[tool.mypy.overrides]]
 module = [

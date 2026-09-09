@@ -450,7 +450,10 @@ class EventStore:
                             (run_id,),
                         )
                         row = await cursor.fetchone()
-                        assigned_seq = int(row[0])
+                        # 无 GROUP BY 的标量聚合 SELECT COALESCE(MAX(seq),0)+1 即使在空表上
+                        # 也保证恰好返回一行，fetchone() 不可能为 None（mypy 不懂 SQL 聚合
+                        # 行数语义才报 index on Row|None）。这是写路径 seq 分配，非读路径。
+                        assigned_seq = int(row[0])  # type: ignore[index]
                         await self.conn.execute(
                             sql,
                             (

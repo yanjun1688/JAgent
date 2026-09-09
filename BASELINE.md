@@ -51,19 +51,17 @@ mypy 在阶段零之前**从未进入任何门禁**。清掉 `.mypy_cache` 冷�
 额外错误码（`misc`），已拆成独立 override 块（同一模块在两个 override 中给出
 冲突的 `disable_error_code` 会导致 mypy **作废全部 overrides**，已实测踩中并修正）。
 
-### 3.2 阶段零新记录的窄豁免（52 errors / 14 files，按 文件 × 错误码 最小化）
+### 3.2 阶段零新记录的窄豁免（文件级 49 errors / 12 files，按 文件 × 错误码 最小化）
 
 | 模块 | 关闭码 | 冷跑数量 |
 |---|---|---|
 | `harness.api.replay_routes` | arg-type | 1 |
 | `harness.core.lifecycle` | arg-type | 1（`max(key=...)` 重载类型） |
-| `harness.core.planner.revision_invariants` | arg-type | 2（**内核相关**：`DeliveryContract` 传给声明 `RequiredOperation` 的参数，结构化兼容、运行时正常） |
 | `harness.core.scheduler.plan` | arg-type | 1（dict 不变性，建议 Mapping） |
 | `harness.core.scheduler.classify` | attr-defined | 9（mixin 动态属性） |
 | `harness.core.scheduler.local_repair` | attr-defined | 10（mixin 动态属性） |
 | `harness.core.scheduler.revision_guard` | attr-defined | 6（mixin 动态属性 `planner`/`config`） |
 | `harness.monitoring.langfuse_tracer` | assignment | 1 |
-| `harness.storage.event_store` | index | 1（**内核相关**：`Row | None` 未判空，`:417`） |
 | `harness.tools.browser_mcp` | misc | 7 |
 | `harness.tools.fetch_output` | misc | 1 |
 | `harness.tools.skill` | misc | 6 |
@@ -73,12 +71,28 @@ mypy 在阶段零之前**从未进入任何门禁**。清掉 `.mypy_cache` 冷�
 收敛规则：**修掉一个底层错误就必须删掉对应窄豁免并让 mypy 仍为绿**；
 禁止借无关改动新增豁免。移除任一窄豁免的变异自检已验证（mypy 立即变红）。
 
-### 3.3 内核相关的两条类型债（合并阶段需额外留意，勿顺手改语义）
+> 原列于此的 2 个内核模块（`revision_invariants` 2 处 arg-type、`event_store`
+> 1 处 index）经 §3.3 分诊确认为假阳性，已改用**行内 `# type: ignore[code]` +
+> 原因注释**，从文件级豁免块移除（豁免面从 14 files 收窄到 12 files）。
+
+### 3.3 内核 mypy 分诊结论（2026-09-09，3 处全部判定假阳性，无真实 bug）
 
 - `revision_invariants.py:51,76` — `RequiredOperation.step_satisfies(step, contract)`
-  形参类型问题；改类型声明时不得改变 DeliveryContract 覆盖判定语义。
-- `storage/event_store.py:417` — `Row | None` 可索引性；属读取路径类型债，
-  与 append-only 触发器无关，修复时不得动写路径。
+  把 `DeliveryContract` 传给声明 `RequiredOperation` 的形参。
+  **分诊**：`step_satisfies` 仅读取 `.tool` / `.input`（plan.py:77-90），
+  `DeliveryContract` 在 C-01 收敛后是含这两个字段的受信超集（另带 contract_id/source），
+  运行时不可能触发属性错误。**结论：注解过窄的假阳性**，非空值/逻辑路径问题。
+  处置：行内 `# type: ignore[arg-type]` + 注释；根治（给 step_satisfies 的 req
+  引入 `Protocol`/`Union[RequiredOperation, DeliveryContract]`）归入 mypy 清理任务，
+  根治时不得改变 DeliveryContract 覆盖判定语义。
+- `storage/event_store.py:417` — `Row | None` 未判空即 `row[0]`。
+  **分诊**：该语句是 seq 分配的**写路径**（非读路径），SQL 为无 GROUP BY 的标量
+  聚合 `SELECT COALESCE(MAX(seq),0)+1 ...`，标量聚合即使在空表上也**保证恰好返回
+  一行**，故 `fetchone()` 不可能为 None，无真实可触发的 NoneType 路径。
+  **结论：mypy 不理解 SQL 聚合行数语义的假阳性**，不是潜伏 bug。
+  处置：行内 `# type: ignore[index]` + 注释；不改动任何写路径/触发器逻辑。
+- 两处行内豁免均以 `mypy --warn-unused-ignores` 单独验证：无 "unused ignore"，
+  证明错误真实存在且豁免必要（非多余压制）。
 
 
 ## 4. 内核契约基线（本次工作禁止改动的锚点）
