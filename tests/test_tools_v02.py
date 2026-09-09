@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from typing import Any
 
@@ -756,7 +757,11 @@ class TestToolRegistryWithBuiltinDefs:
             backend = LocalDirectoryBackend(tmp)
             tool = FileOpTool()
             tool.backend = backend
+            # 用平台原生分隔符构造穿越串：Windows 上反斜杠、POSIX 上正斜杠才是
+            # 真实分隔符；写死 "..\\..\\secret.txt" 在 Linux 上只是普通文件名，
+            # 无法穿越、也就不会抛 PermissionError（CI 跨平台失败根因）。
+            traversal = os.path.join("..", "..", "secret.txt")
             with pytest.raises(PermissionError, match="outside the sandbox"):
                 import asyncio
 
-                asyncio.run(tool.run({"operation": "read", "path": "..\\..\\secret.txt"}))
+                asyncio.run(tool.run({"operation": "read", "path": traversal}))
