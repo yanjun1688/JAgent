@@ -364,10 +364,10 @@ class EventStore:
 
         取消安全是关键：``asyncio.CancelledError`` 继承 ``BaseException``，普通的
         ``except Exception`` 捕不到它。watchdog 可能恰好在 BEGIN…commit 之间取消
-        在途 append，故清理必须用 ``BaseException`` 兜底，且 rollback 本身要
-        ``shield``——取消信号在 finally/except 里仍处 pending，直接 await rollback
-        会立刻再抛 CancelledError，使事务无法闭合。rollback 完成后把原异常
-        （含 CancelledError）忠实重抛，绝不吞掉取消。
+        在途 append，故清理必须用 ``BaseException`` 兜底。单次 ``task.cancel()``
+        下 CancelledError 在 except 中只投递一次，其内 ``await rollback()`` 能正常
+        跑完（不使用 shield——外层取消时 shield 会立即重抛，反而等不到回滚）。
+        rollback 完成后把原异常（含 CancelledError）忠实重抛，绝不吞掉取消。
         """
         await self.conn.execute("BEGIN IMMEDIATE")
         try:
