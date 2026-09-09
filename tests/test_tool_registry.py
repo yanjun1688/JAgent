@@ -14,7 +14,11 @@ import pytest
 
 from harness.models.tools import Guardrail, SideEffect, ToolScopeTarget
 from harness.tools.base import BaseTool, operation
-from harness.tools.registry import ToolRegistry
+from harness.tools.registry import (
+    ToolRegistry,
+    UnknownToolError,
+    unknown_tool_message,
+)
 
 
 class _PingTool(BaseTool):
@@ -184,3 +188,37 @@ class TestRegistrationSafetyValidation:
         # Tools with no DELETE side effect and no scope targets need no guardrails.
         registry = ToolRegistry()
         assert registry.register_tool(_PingTool()) == "ping_tool"
+
+
+class TestToolExistencePrimitive:
+    """R7: the two-layer existence primitive — a non-raising lookup that
+    returns the canonical fragment, plus a thin fail-fast wrapper. The core
+    message fragment must always originate from ``unknown_tool_message``."""
+
+    def test_registered_lookup_returns_def_and_no_error(self):
+        registry = ToolRegistry()
+        registry.register_tool(_PingTool())
+        tool_def, error = registry.tool_def_or_error("ping_tool")
+        assert tool_def is not None
+        assert tool_def.name == "ping_tool"
+        assert error is None
+
+    def test_unknown_lookup_returns_none_and_shared_fragment_without_raising(self):
+        registry = ToolRegistry()
+        tool_def, error = registry.tool_def_or_error("ghost")
+        assert tool_def is None
+        # The fragment must come from the single shared source.
+        assert error == unknown_tool_message("ghost")
+
+    def test_require_tool_def_raises_shared_error_for_unknown(self):
+        registry = ToolRegistry()
+        with pytest.raises(UnknownToolError) as exc_info:
+            registry.require_tool_def("ghost")
+        assert str(exc_info.value) == unknown_tool_message("ghost")
+        assert exc_info.value.name == "ghost"
+
+    def test_require_tool_def_returns_def_when_registered(self):
+        registry = ToolRegistry()
+        registry.register_tool(_PingTool())
+        assert registry.require_tool_def("ping_tool").name == "ping_tool"
+
