@@ -1,5 +1,7 @@
 """Tests for V0.5 Context Manager — compression, checkpointing, resume, and scheduler integration."""
 
+import asyncio
+
 import pytest
 
 from harness import (
@@ -1117,6 +1119,58 @@ class TestPreservedExcerpts:
         all_text = "\n".join(m["content"] for m in mock_llm.calls[-1]["messages"])
         assert "Preserved verbatim excerpts" in all_text
         assert "boom: connection reset" in all_text
+
+
+class TestEpisodeLLMTransportResilience:
+    """R8-a bugfix: episode summarization is best-effort infrastructure. A
+    transport failure must degrade to a legacy episode (never fail the run),
+    while real cancellation must still propagate."""
+
+    @staticmethod
+    def _cm_with_llm(llm):
+        return ContextManagerCls(None, llm_client=llm)
+
+    @pytest.mark.asyncio
+    async def test_transport_error_degrades_to_legacy_not_fatal(self):
+        class _RaisingLLM:
+            async def chat(self, *a, **k):
+                raise RuntimeError("upstream 500")
+
+        from harness.core.fold import ThoughtEntry
+
+        cm = self._cm_with_llm(_RaisingLLM())
+        thoughts = [ThoughtEntry(seq=1, thought="did some meaningful work here")]
+        episode = await cm._generate_episode(
+            RunState(run_id="r"),
+            episode_range=(1, 1),
+            original_event_refs=[1],
+            original_tokens=100,
+            compress_thoughts=thoughts,
+            compress_results=[],
+        )
+        assert episode.format == "legacy"
+        assert "unavailable" in episode.title
+        assert episode.current_plan and "meaningful work" in episode.current_plan
+
+    @pytest.mark.asyncio
+    async def test_cancellation_propagates_through_episode_generation(self):
+        class _CancelledLLM:
+            async def chat(self, *a, **k):
+                raise asyncio.CancelledError()
+
+        from harness.core.fold import ThoughtEntry
+
+        cm = self._cm_with_llm(_CancelledLLM())
+        thoughts = [ThoughtEntry(seq=1, thought="x")]
+        with pytest.raises(asyncio.CancelledError):
+            await cm._generate_episode(
+                RunState(run_id="r"),
+                episode_range=(1, 1),
+                original_event_refs=[1],
+                original_tokens=100,
+                compress_thoughts=thoughts,
+                compress_results=[],
+            )
 
 
 # ── V3.0 Phase 1: fold.py new event types ──────────────────────

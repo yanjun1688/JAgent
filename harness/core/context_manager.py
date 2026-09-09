@@ -563,42 +563,62 @@ class ContextManager:
             ),
         )
 
-        chat_resp = await self.llm_client.chat(
-            [
-                {"role": "system", "content": get_prompt(AgentPhase.SUMMARIZE)},
-                {"role": "user", "content": activity_text},
-            ],
-            temperature=0.0,
-            max_tokens=2048,
-        )
-        response = chat_resp.content
-
-        _log_compress.info(
-            "EPISODE_LLM_CALL_DONE %s",
-            fmtkv(
-                response_chars=len(response),
-                response_preview=response[:100].replace("\n", " "),
-            ),
-        )
-
+        # Best-effort, never-fatal auxiliary path: a summarization transport
+        # error must degrade to a legacy episode (same as an unparseable
+        # response), never fail the run. Catch only Exception on purpose —
+        # CancelledError is a BaseException and must still propagate so run
+        # cancellation is not swallowed by compression.
+        response: str | None = None
         try:
-            parsed = parse_lenient_json(response)
-            data: dict[str, Any] | None = parsed if isinstance(parsed, dict) else None
-            _log_compress.info(
-                "EPISODE_JSON_PARSE_OK %s",
-                fmtkv(parsed_keys=list(parsed.keys()) if isinstance(parsed, dict) else "not_dict"),
+            chat_resp = await self.llm_client.chat(
+                [
+                    {"role": "system", "content": get_prompt(AgentPhase.SUMMARIZE)},
+                    {"role": "user", "content": activity_text},
+                ],
+                temperature=0.0,
+                max_tokens=2048,
             )
-            if data is None:
-                _log_compress.warning(
-                    "EPISODE_JSON_PARSE_FAIL %s", fmtkv(kind="not_object", fallback="legacy")
-                )
-        except LenientJsonError as e:
-            data = None
+            response = chat_resp.content
+
+            _log_compress.info(
+                "EPISODE_LLM_CALL_DONE %s",
+                fmtkv(
+                    response_chars=len(response),
+                    response_preview=response[:100].replace("\n", " "),
+                ),
+            )
+        except Exception as e:
+            response = None
             _log_compress.warning(
-                "EPISODE_JSON_PARSE_FAIL %s", fmtkv(kind=e.kind, fallback="legacy")
+                "EPISODE_LLM_CALL_FAIL %s", fmtkv(error=str(e)[:100], fallback="legacy")
             )
 
-        compressed_tokens = await self._async_estimate_text_tokens(response.strip())
+        data: dict[str, Any] | None = None
+        legacy_title = "Legacy summary (LLM non-JSON)"
+        if response is not None:
+            try:
+                parsed = parse_lenient_json(response)
+                data = parsed if isinstance(parsed, dict) else None
+                _log_compress.info(
+                    "EPISODE_JSON_PARSE_OK %s",
+                    fmtkv(parsed_keys=list(parsed.keys()) if isinstance(parsed, dict) else "not_dict"),
+                )
+                if data is None:
+                    _log_compress.warning(
+                        "EPISODE_JSON_PARSE_FAIL %s", fmtkv(kind="not_object", fallback="legacy")
+                    )
+            except LenientJsonError as e:
+                data = None
+                _log_compress.warning(
+                    "EPISODE_JSON_PARSE_FAIL %s", fmtkv(kind=e.kind, fallback="legacy")
+                )
+        else:
+            legacy_title = "Legacy summary (LLM unavailable)"
+            if len(activity_text) > 2000:
+                activity_text = activity_text[:1000] + "\n...(truncated)...\n" + activity_text[-1000:]
+
+        fallback_text = response.strip() if response is not None else activity_text
+        compressed_tokens = await self._async_estimate_text_tokens(fallback_text)
 
         if data is None:
             return Episode(
@@ -609,10 +629,10 @@ class ContextManager:
                 tools_used=tools_used,
                 key_findings=[],
                 errors_encountered=[],
-                current_plan=response.strip(),
+                current_plan=fallback_text,
                 original_event_refs=refs,
-                title="Legacy summary (LLM non-JSON)",
-                summary=response.strip()[:500],
+                title=legacy_title,
+                summary=fallback_text[:500],
                 importance_score=self._compute_episode_importance(state),
                 format="legacy",
                 preserved_excerpts=preserved_excerpts,
