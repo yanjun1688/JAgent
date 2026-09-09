@@ -146,3 +146,56 @@ mypy 在阶段零之前**从未进入任何门禁**。清掉 `.mypy_cache` 冷�
 
 阶段零补的两条用例只 pin 方向、不改任何生产代码。
 
+## 8. GitHub Actions CI 首次实证（2026-09-09，PR #18）
+
+工作流 `.github/workflows/ci.yml`（ubuntu-latest，Python 3.11，uv `--frozen`）：
+ruff → mypy → OpenAPI `--check` → pytest。首次把测试放到 Linux 上跑，三次运行：
+
+| Run | sha | 结果 | 说明 |
+|---|---|---|---|
+| 34324868693 | 67d4191 | **failure** | ruff/mypy/openapi 全过；pytest 4 failed（见下"平台缺陷"） |
+| 34325742282 | 7e35d2e | **failure** | 4 个平台缺陷已修；照出 2 个看门狗用例失败 → 实为真实内核 bug（见 §9） |
+| 34328386014 | bc27eb2 | **success** | 全部门禁通过；job 耗时约 87s |
+
+最终 Linux CI 结果（run 34328386014 日志实证）：
+- ruff：All checks passed
+- mypy：`Success: no issues found in 92 source files`
+- OpenAPI：`[OK] OpenAPI artifacts are up to date`
+- pytest：**1441 passed, 2 skipped, 1 warning in 62.11s**（与 Windows 本地 1441 / ~61s 双平台一致）
+
+**阶段零补 CI 照出的两类问题（价值实证：本地 Windows 全绿 ≠ CI 绿）：**
+
+1. **测试硬编码 Windows 路径（非生产 bug，已修，提交 7e35d2e）**：
+   - `tests/test_api_contract_robustness.py` / `test_backend_integration.py` 两个
+     `directory_scope()` 把 `filesystem_root` 写死 `D:/Project/JAgent/...`，Linux 上
+     解析到受信 `WORKSPACE_BASE_DIR` 之外，被 `_validate_workspace_scope` 正确拒为 422。
+     改为从 `WORKSPACE_BASE_DIR` 派生（保持"基目录内"原意图）。
+   - `tests/test_tools_v02.py` 沙盒穿越用例写死反斜杠 `..\..\secret.txt`，POSIX 上
+     `\` 非分隔符无法穿越。改为 `os.path.join("..","..","secret.txt")` 平台原生分隔符。
+   - 生产受信校验（基目录包含性、沙盒穿越拦截）行为正确，未改动。
+
+## 9. 内核 bug：watchdog 取消在途 append 致 SQLite 事务泄漏（已根治）
+
+- **分支**：`fix/event-store-txn-cancel-leak`（独立基于 main @ 678e23e，修复提交 `3d85780`，
+  已合入护栏分支 `bc27eb2` 经 CI 实证；可独立合 main / cherry-pick）。
+- **现象**：Linux CI run 34325742282，`test_lifecycle_cancellation.py` 两个看门狗用例
+  失败，run 终态停在 `running`、无 `RUN_FAILED` 事件；日志
+  `OperationalError('cannot start a transaction within a transaction')`。
+- **根因**：`append_event` 用 `except Exception` 兜底 rollback；watchdog 在
+  `BEGIN IMMEDIATE`…`commit` 之间取消任务时，`asyncio.CancelledError`（py3.8+ 属
+  `BaseException`）绕过该兜底，不回滚，共享单连接遗留 OPEN 事务；此后该连接上所有写
+  （含看门狗强制写的终态 `RunFailed`，乃至跨 run）全部失败——受信组件终态无法落 Event Store。
+- **确定性复现**：在 `commit()` 注入取消，实测取消后 `conn.in_transaction == True`、
+  后续 append 必撞事务嵌套。非 flaky，是真实竞态；紧 250/300ms 预算 + CI 负载使其在
+  Linux 稳定踩中、Windows 开发机未中。
+- **根治（受信存储层，非调用点打补丁）**：新增取消安全事务原语
+  `_txn_immediate()`（`BEGIN IMMEDIATE`…body…`commit` 包在 `try/except BaseException`，
+  任何退出含取消都先 `rollback()` 并忠实重抛，不吞 CancelledError），`append_event`
+  跨重试持写锁、每轮 attempt 跑在该原语内。seq 分配/重试/幂等/append-only 触发器/fold 契约不变。
+- **回归测试**：`tests/test_event_store_txn_cancel.py`（2 条）确定性取消注入，断言
+  取消后无 OPEN 事务、后续 append 成功且 seq 正确、写锁被释放；既有看门狗端到端用例保持通过。
+- **后续项（不在本次范围）**：`_create_workspace_unlocked` 等使用隐式事务
+  （无显式 BEGIN，靠 sqlite3 自动开启 + commit）的写方法理论上存在同类取消窗口，
+  但不在本次看门狗触发路径，建议后续统一收敛到同一取消安全原语。
+
+
