@@ -111,15 +111,21 @@ mypy 在阶段零之前**从未进入任何门禁**。清掉 `.mypy_cache` 冷�
 
 ## 5. 事件面基线（R10）
 
-- `len(EventType) == 41`，`len(PAYLOAD_MODEL_MAP) == 41`（运行时一致，但无任何断言强制）。
-- `fold_events` 的 `match` 无 default，未覆盖的新事件类型被静默忽略。
-- README 已漂移：标注"38 种"，实际 41 种（记录在案，按独立任务处理，不在阶段零修）。
+- `len(EventType) == 41`，`len(PAYLOAD_MODEL_MAP) == 41`；现由
+  `tests/test_event_contract_completeness.py` 断言强制 1:1（阶段零已加，漂移即红）。
+- `fold_events` 的 `match` 已无静默 wildcard：未覆盖事件由 AST 测试强制显式列举
+  （7 个无投影事件为显式 no-op 分支），新增事件类型必须显式决定语义。
+- README 计数漂移（标"38 种"、清单缺 3 个）已于阶段零修正为 41 种并补齐
+  `OutputBlobStored` / `StepLocalRepairStarted` / `StepLocalRepairCompleted`。
+- **仍留独立任务（不在阶段零处理）**：事件枚举尚未真正进入 OpenAPI 同源生成链，
+  目前 TypeScript 类型不随事件枚举自动更新——需设计新生成链路，非改数字量级。
 
 ## 6. 已知但本阶段不处理的事项
 
 - 所有 R1–R12 观察项以 review 20260909 为准，阶段一只处理其排定的重复实现合并。
-- mypy 存量错误（§3）只显式记录，不在阶段零修复。
-- README 事件类型"38 种 vs 实际 41 种"的计数漂移（R10）不在阶段零修复，按独立任务处理。
+- 非内核文件的 mypy 存量错误（§3.2，49 errors / 12 files）只显式记录，
+  阶段一之后排独立清理任务；内核 3 处已分诊（见 §3.3，全为假阳性）。
+- 事件枚举进入 OpenAPI 同源链（R10 深层问题）留独立任务。
 
 ## 7. 受信纯函数边界覆盖审计（阶段零第 5 项）
 

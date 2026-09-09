@@ -94,7 +94,7 @@
 - **执行依赖唯一**：DAG 步骤间唯一执行依赖是 `DagStep.depends_on`
 - **完成判定只信契约**：mutating 覆盖、任务完成判定只认 `DeliveryContract` + `StepResult`
 
-## 事件类型 (38 种)
+## 事件类型 (41 种)
 
 **核心循环**:
 ```
@@ -112,10 +112,15 @@ PlanCreated → DagStepStarted → DagStepCompleted / DagStepFailed / DagStepSki
             → PlanRevised → PlanCompleted / PlanFailed
 ```
 
+**本地修复**:
+```
+StepLocalRepairStarted → StepLocalRepairCompleted
+```
+
 **上下文与监控**:
 ```
 ContextCompressed (EpisodeSummary) · ContextCheckpointed · ContextPruned · EpisodeArchived
-FeedbackInjected · RunOrphaned · LateEventRejected · PhaseTimedOut · TaskCleanupTimeout
+FeedbackInjected · RunOrphaned · LateEventRejected · PhaseTimedOut · TaskCleanupTimeout · OutputBlobStored
 ```
 
 **Workspace 审计 (V3.3)**:
@@ -164,7 +169,7 @@ harness/
 │   ├── docker.py              # DockerSandboxBackend
 │   └── ssh.py                 # SSHSFTPBackend (remote)
 ├── models/                    # Pydantic v2 数据模型（唯一事实来源）
-│   ├── events.py              # 38 种 EventType + Payload
+│   ├── events.py              # 41 种 EventType + Payload
 │   ├── workspace.py           # Tenant / Workspace / ExecutionTarget / WorkspaceScope
 │   ├── intent.py              # DeliveryContract / OperationContract
 │   ├── conversation.py        # Conversation 模型
