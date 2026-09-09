@@ -1,5 +1,7 @@
 """Tests for V0.5 Context Manager — compression, checkpointing, resume, and scheduler integration."""
 
+import asyncio
+
 import pytest
 
 from harness import (
@@ -958,6 +960,44 @@ class TestEpisodeGeneration:
         p = EpisodeArchivedPayload.model_validate(archived[0].payload)
         assert "Plain text summary" in p.episode.current_plan
 
+    @pytest.mark.asyncio
+    async def test_episode_fenced_json_now_parses_structured(self, store):
+        """R8-a BEHAVIOR CHANGE pin: a JSON object wrapped in a markdown fence
+        previously failed the bare json.loads and degraded to legacy. After
+        routing through parse_lenient_json it must parse as a *structured*
+        episode (format='structured'), not fall back to legacy."""
+        import json
+
+        fenced = "```json\n" + json.dumps(
+            {
+                "title": "Fenced Episode",
+                "summary": "parsed from a fenced block",
+                "key_decisions": ["decision f"],
+                "tools_used": ["echo"],
+                "key_findings": ["finding f"],
+                "errors_encountered": [],
+                "current_plan": "continue",
+            }
+        ) + "\n```"
+        mock_llm = MockLLMClient([fenced])
+        cm = ContextManagerCls(store, llm_client=mock_llm, token_limit=100, compression_threshold_ratio=0.5)
+        state = RunState(run_id="r")
+        state.seq = 99
+        state.plan_boundary_seqs = [99]
+        from harness.core.fold import ThoughtEntry
+
+        for i in range(20):
+            state.thought_history.append(ThoughtEntry(seq=i, thought="x" * 30))
+
+        await cm.maybe_compress("run-ep-fence", 1, state)
+        events = await store.get_events("run-ep-fence")
+        archived = [e for e in events if e.event_type == EventType.EPISODE_ARCHIVED]
+        assert len(archived) >= 1
+        p = EpisodeArchivedPayload.model_validate(archived[0].payload)
+        assert p.episode.format == "structured"
+        assert p.episode.title == "Fenced Episode"
+        assert p.episode.summary == "parsed from a fenced block"
+
 
 # ── ⑤: High-tier (archive/emergency) preserved excerpts ────────────
 
@@ -1079,6 +1119,58 @@ class TestPreservedExcerpts:
         all_text = "\n".join(m["content"] for m in mock_llm.calls[-1]["messages"])
         assert "Preserved verbatim excerpts" in all_text
         assert "boom: connection reset" in all_text
+
+
+class TestEpisodeLLMTransportResilience:
+    """R8-a bugfix: episode summarization is best-effort infrastructure. A
+    transport failure must degrade to a legacy episode (never fail the run),
+    while real cancellation must still propagate."""
+
+    @staticmethod
+    def _cm_with_llm(llm):
+        return ContextManagerCls(None, llm_client=llm)
+
+    @pytest.mark.asyncio
+    async def test_transport_error_degrades_to_legacy_not_fatal(self):
+        class _RaisingLLM:
+            async def chat(self, *a, **k):
+                raise RuntimeError("upstream 500")
+
+        from harness.core.fold import ThoughtEntry
+
+        cm = self._cm_with_llm(_RaisingLLM())
+        thoughts = [ThoughtEntry(seq=1, thought="did some meaningful work here")]
+        episode = await cm._generate_episode(
+            RunState(run_id="r"),
+            episode_range=(1, 1),
+            original_event_refs=[1],
+            original_tokens=100,
+            compress_thoughts=thoughts,
+            compress_results=[],
+        )
+        assert episode.format == "legacy"
+        assert "unavailable" in episode.title
+        assert episode.current_plan and "meaningful work" in episode.current_plan
+
+    @pytest.mark.asyncio
+    async def test_cancellation_propagates_through_episode_generation(self):
+        class _CancelledLLM:
+            async def chat(self, *a, **k):
+                raise asyncio.CancelledError()
+
+        from harness.core.fold import ThoughtEntry
+
+        cm = self._cm_with_llm(_CancelledLLM())
+        thoughts = [ThoughtEntry(seq=1, thought="x")]
+        with pytest.raises(asyncio.CancelledError):
+            await cm._generate_episode(
+                RunState(run_id="r"),
+                episode_range=(1, 1),
+                original_event_refs=[1],
+                original_tokens=100,
+                compress_thoughts=thoughts,
+                compress_results=[],
+            )
 
 
 # ── V3.0 Phase 1: fold.py new event types ──────────────────────

@@ -7,10 +7,11 @@ evaluation pipeline never crashes on a missing/erroring LLM.
 
 from __future__ import annotations
 
-import json
+from typing import Any
 
 from evaluation.datasets.base import EvalCase
 from harness.core.fold import RunState
+from harness.core.lenient_json import LenientJsonError, parse_lenient_json
 from harness.core.llm_client import LLMClient
 
 _JUDGE_PROMPT = """你是 Agent 输出质量评审专家。
@@ -71,23 +72,21 @@ class LLMJudgeScorer:
 
     @staticmethod
     def _parse(content: str) -> dict | None:
-        content = content.strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[-1]
-            content = content.rsplit("```", 1)[0]
-        start, end = content.find("{"), content.rfind("}")
-        if start == -1 or end <= start:
-            return None
         try:
-            data = json.loads(content[start:end + 1])
-        except json.JSONDecodeError:
+            data = parse_lenient_json(content)
+        except LenientJsonError:
             return None
         if not isinstance(data, dict):
             return None
+        score_data: dict[str, Any] = data
         out = {}
         for k in ("completeness", "accuracy", "formatting"):
+            raw = score_data.get(k)
+            if raw is None:
+                out[k] = 0.0
+                continue
             try:
-                out[k] = float(data.get(k))
+                out[k] = float(raw)
             except (TypeError, ValueError):
                 out[k] = 0.0
         return out
