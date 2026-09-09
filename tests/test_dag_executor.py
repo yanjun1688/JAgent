@@ -12,7 +12,7 @@ from harness.models.plan import DagPlan, DagStep
 from harness.models.tools import RetryPolicy, ToolDefinition
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ToolExecutor
-from harness.tools.registry import ToolRegistry
+from harness.tools.registry import ToolRegistry, unknown_tool_message
 
 
 @pytest.fixture
@@ -141,6 +141,21 @@ class TestDagExecutorEdgeCases:
         assert results == {}
         events = await store.get_events("run-edge-1")
         assert any(event.event_type == EventType.PLAN_FAILED for event in events)
+
+    async def test_execute_step_unknown_tool_fail_closed_with_shared_fragment(self, store, executor, registry):
+        """R7 #4 execution-time defense in depth: an unknown tool at step
+        execution returns a FAILED StepResult whose message keeps this seam's
+        triage prefix but derives its core fragment from the shared constant."""
+        dag = DagExecutor(executor, store, registry)
+        plan = DagPlan(
+            intent="step-level unknown tool",
+            steps=[DagStep(id="s1", tool="nonexistent", input={})],
+        )
+        result = await dag._execute_step("run-edge-step", plan, {}, "s1")
+        assert result.exec_state == ExecState.FAILED
+        assert result.error is not None
+        assert result.error.startswith("step execution: ")
+        assert unknown_tool_message("nonexistent") in result.error
 
     async def test_hyphenated_step_reference_resolves(self, store, executor, registry):
         upstream = {"s-1": {"output": {"value": "ok"}}}
