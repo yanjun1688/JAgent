@@ -6,9 +6,8 @@ trusted PlanGuardrail / Scheduler before use.
 
 from __future__ import annotations
 
-import json
-
 from harness.core.dag_types import TaskState
+from harness.core.lenient_json import LenientJsonError, parse_lenient_json
 from harness.core.logger import agent_logger
 from harness.core.planner.schema_contract import validate_step
 from harness.core.recovery import LocalRepairProposal
@@ -23,22 +22,10 @@ def parse_local_repair_proposal(response: str) -> LocalRepairProposal | None:
     Empty tool_name (``{"tool_name": ""}``) or a missing tool means "no
     repair possible" → None (escalate). Extra keys are ignored.
     """
-    text = (response or "").strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-        text = text.rsplit("```", 1)[0]
-        text = text.strip()
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end <= start:
-            return None
-        try:
-            data = json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            return None
+        data = parse_lenient_json(response)
+    except LenientJsonError:
+        return None
     if not isinstance(data, dict):
         return None
     tool_name = str(data.get("tool_name") or "").strip()
@@ -57,24 +44,14 @@ def parse_plan_response(
     response: str, executed_step_ids: set[str] | None = None
 ) -> tuple[DagPlan | None, str]:
     """返回 (plan_or_None, error_reason)。error_reason 为空字符串表示成功。"""
-    response = response.strip()
-    if response.startswith("```"):
-        response = response.split("\n", 1)[-1]
-        response = response.rsplit("```", 1)[0]
-        response = response.strip()
-
     try:
-        data = json.loads(response)
-    except json.JSONDecodeError:
-        start = response.find("{")
-        end = response.rfind("}")
-        if start != -1 and end > start:
-            try:
-                data = json.loads(response[start : end + 1])
-            except json.JSONDecodeError as e:
-                return None, f"JSON parse error: {e.msg} at position {e.pos}"
-        else:
+        data = parse_lenient_json(response)
+    except LenientJsonError as e:
+        if e.kind == "no_object":
             return None, "No JSON object found in response"
+        cause = e.cause
+        detail = f"{cause.msg} at position {cause.pos}" if cause is not None else "unparseable"
+        return None, f"JSON parse error: {detail}"
 
     if not isinstance(data, dict):
         return None, "Top-level value must be a JSON object with a 'steps' array"

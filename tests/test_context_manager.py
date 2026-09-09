@@ -958,6 +958,44 @@ class TestEpisodeGeneration:
         p = EpisodeArchivedPayload.model_validate(archived[0].payload)
         assert "Plain text summary" in p.episode.current_plan
 
+    @pytest.mark.asyncio
+    async def test_episode_fenced_json_now_parses_structured(self, store):
+        """R8-a BEHAVIOR CHANGE pin: a JSON object wrapped in a markdown fence
+        previously failed the bare json.loads and degraded to legacy. After
+        routing through parse_lenient_json it must parse as a *structured*
+        episode (format='structured'), not fall back to legacy."""
+        import json
+
+        fenced = "```json\n" + json.dumps(
+            {
+                "title": "Fenced Episode",
+                "summary": "parsed from a fenced block",
+                "key_decisions": ["decision f"],
+                "tools_used": ["echo"],
+                "key_findings": ["finding f"],
+                "errors_encountered": [],
+                "current_plan": "continue",
+            }
+        ) + "\n```"
+        mock_llm = MockLLMClient([fenced])
+        cm = ContextManagerCls(store, llm_client=mock_llm, token_limit=100, compression_threshold_ratio=0.5)
+        state = RunState(run_id="r")
+        state.seq = 99
+        state.plan_boundary_seqs = [99]
+        from harness.core.fold import ThoughtEntry
+
+        for i in range(20):
+            state.thought_history.append(ThoughtEntry(seq=i, thought="x" * 30))
+
+        await cm.maybe_compress("run-ep-fence", 1, state)
+        events = await store.get_events("run-ep-fence")
+        archived = [e for e in events if e.event_type == EventType.EPISODE_ARCHIVED]
+        assert len(archived) >= 1
+        p = EpisodeArchivedPayload.model_validate(archived[0].payload)
+        assert p.episode.format == "structured"
+        assert p.episode.title == "Fenced Episode"
+        assert p.episode.summary == "parsed from a fenced block"
+
 
 # ── ⑤: High-tier (archive/emergency) preserved excerpts ────────────
 

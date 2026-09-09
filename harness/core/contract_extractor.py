@@ -9,8 +9,7 @@
 
 from __future__ import annotations
 
-import json
-
+from harness.core.lenient_json import LenientJsonError, parse_lenient_json
 from harness.core.llm_client import LLMClient
 from harness.core.logger import agent_logger, guard_logger
 from harness.models.intent import DeliveryContract, DeliverySource, validate_delivery_contract_input
@@ -109,21 +108,12 @@ class ContractExtractor:
         fed back to the model (mirrors Planner.parse_plan_response).
         """
         text = response.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1]
-            text = text.rsplit("```", 1)[0]
-            text = text.strip()
         try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start == -1 or end <= start:
+            data = parse_lenient_json(text)
+        except LenientJsonError as e:
+            if e.kind == "no_object":
                 return [], "no JSON object found in extraction response"
-            try:
-                data = json.loads(text[start : end + 1])
-            except json.JSONDecodeError:
-                return [], "extraction JSON parse failed"
+            return [], "extraction JSON parse failed"
         if not isinstance(data, dict):
             return [], "response JSON root is not an object"
         raw_ops = data.get("required_operations")

@@ -8,11 +8,12 @@ Agent is never aware of compression — it is pure infrastructure behavior.
 
 from __future__ import annotations
 
-import json
 import os
 import time
+from typing import Any
 
 from harness.core.fold import RunState, ThoughtEntry, ToolResult
+from harness.core.lenient_json import LenientJsonError, parse_lenient_json
 from harness.core.llm_client import LLMClient
 from harness.core.logger import fmtkv, guard_logger
 from harness.core.system_prompt import AgentPhase, get_prompt
@@ -581,14 +582,21 @@ class ContextManager:
         )
 
         try:
-            data = json.loads(response)
+            parsed = parse_lenient_json(response)
+            data: dict[str, Any] | None = parsed if isinstance(parsed, dict) else None
             _log_compress.info(
                 "EPISODE_JSON_PARSE_OK %s",
-                fmtkv(parsed_keys=list(data.keys()) if isinstance(data, dict) else "not_dict"),
+                fmtkv(parsed_keys=list(parsed.keys()) if isinstance(parsed, dict) else "not_dict"),
             )
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            if data is None:
+                _log_compress.warning(
+                    "EPISODE_JSON_PARSE_FAIL %s", fmtkv(kind="not_object", fallback="legacy")
+                )
+        except LenientJsonError as e:
             data = None
-            _log_compress.warning("EPISODE_JSON_PARSE_FAIL %s", fmtkv(error=str(e)[:100], fallback="legacy"))
+            _log_compress.warning(
+                "EPISODE_JSON_PARSE_FAIL %s", fmtkv(kind=e.kind, fallback="legacy")
+            )
 
         compressed_tokens = await self._async_estimate_text_tokens(response.strip())
 
