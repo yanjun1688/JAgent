@@ -40,7 +40,13 @@ async def backend():
     await store.close()
 
 
-def directory_scope(root: str = "D:/Project/JAgent/data/workspaces/integration/work") -> dict:
+def directory_scope(root: str | None = None) -> dict:
+    # 跨平台：默认 root 从受信 WORKSPACE_BASE_DIR 派生，保证通过基目录包含性校验，
+    # 不写死仅存在于开发机的 Windows 绝对路径（Linux CI 上会被判在基目录外 → 422）。
+    if root is None:
+        from harness.api.routes import WORKSPACE_BASE_DIR
+
+        root = str(WORKSPACE_BASE_DIR / "integration" / "work")
     return {"target": {"type": "directory", "filesystem_root": root}}
 
 

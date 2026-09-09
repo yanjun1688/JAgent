@@ -24,6 +24,7 @@ dev = [
     "pre-commit>=4.0",
     "ruff>=0.15.15",
     "tiktoken>=0.7.0",
+    "mypy>=1.10",
 ]
 
 [build-system]
@@ -64,11 +65,58 @@ module = [
     "harness.monitoring.run_monitor",
     "harness.core.scheduler.base",
     "harness.tools.mcp_manager",
-    "harness.tools.mcp_call",
     "harness.api.deps",
     "harness.api.analysis_routes",
-    "harness.api.routes",
     "harness.api.app",
     "harness.api.serve",
 ]
 disable_error_code = ["arg-type", "assignment", "attr-defined", "call-arg", "no-redef", "union-attr"]
+
+# api.routes is part of the historical broad exemption above plus one newly
+# recorded [misc] debt (kept in its own block so the other ten modules do not
+# silently inherit a wider suppression).
+[[tool.mypy.overrides]]
+module = ["harness.api.routes"]
+disable_error_code = ["arg-type", "assignment", "attr-defined", "call-arg", "no-redef", "union-attr", "misc"]
+
+# tools.mcp_call carries the historical broad suppression plus newly recorded
+# [misc] debt; split into one block (the same code must not appear in two
+# overrides or mypy invalidates ALL overrides).
+[[tool.mypy.overrides]]
+module = ["harness.tools.mcp_call"]
+disable_error_code = ["arg-type", "assignment", "attr-defined", "call-arg", "no-redef", "union-attr", "misc"]
+
+# Phase-0 guardrail work (2026-09-09): mypy was never run in any gate, so the
+# modules below had drifted to 52 errors even though they are *outside* the
+# historical exemption block. Rather than silently fixing or ignoring them, each
+# is recorded here at the narrowest file x error-code granularity so CI can be
+# green from day one while the debt stays visible. Removing an entry must make
+# mypy fail; fixing the underlying error must shrink this list. Tracked in
+# BASELINE.md §3. Do NOT add new entries as part of unrelated changes.
+[[tool.mypy.overrides]]
+module = [
+    "harness.api.replay_routes",
+    "harness.core.lifecycle",
+    "harness.core.scheduler.plan",
+]
+disable_error_code = ["arg-type"]
+
+[[tool.mypy.overrides]]
+module = [
+    "harness.core.scheduler.classify",
+    "harness.core.scheduler.local_repair",
+    "harness.core.scheduler.revision_guard",
+]
+disable_error_code = ["attr-defined"]
+
+[[tool.mypy.overrides]]
+module = ["harness.monitoring.langfuse_tracer"]
+disable_error_code = ["assignment"]
+
+[[tool.mypy.overrides]]
+module = [
+    "harness.tools.browser_mcp",
+    "harness.tools.fetch_output",
+    "harness.tools.skill",
+]
+disable_error_code = ["misc"]

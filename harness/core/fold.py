@@ -564,4 +564,21 @@ def fold_events(events: list[Event]) -> RunState:
                 # DAG_STEP_STARTED/COMPLETED/FAILED + TOOL_* 事件折叠，不在本事件折叠。
                 pass
 
+            case EventType.LATE_EVENT_REJECTED | EventType.PHASE_TIMED_OUT | EventType.TASK_CLEANUP_TIMEOUT:
+                # 受信守卫事件（L-03 / S10）：仅审计可观测，不改变 run 折叠态。
+                pass
+
+            case EventType.OUTPUT_BLOB_STORED:
+                # v3.4 (F-2): 大输出落 blob 引用；证据投影由 TOOL_COMPLETED 的
+                # output.ref/output_sha256 完成，本事件不另改折叠态。
+                pass
+
+            case (
+                EventType.WORKSPACE_CREATED
+                | EventType.WORKSPACE_UPDATED
+                | EventType.WORKSPACE_DELETED
+            ):
+                # workspace 作用域事件，不属于单个 run 的折叠投影。
+                pass
+
     return state

@@ -48,7 +48,13 @@ def validate_revision_invariants(
     errors: list[str] = []
 
     for contract in root_contracts:
-        matching = [s for s in revised.steps if RequiredOperation.step_satisfies(s, contract)]
+        # DeliveryContract 与 RequiredOperation 同为 {tool, input} 结构（C-01 收敛后
+        # 前者是后者的受信超集，还带 contract_id/source）；step_satisfies 只读这两个
+        # 属性，故传入契约在运行时安全。类型收窄（Protocol/Union）属独立 mypy 清理
+        # 任务，此处行内豁免并记录，不用文件级宽豁免掩盖。
+        matching = [
+            s for s in revised.steps if RequiredOperation.step_satisfies(s, contract)  # type: ignore[arg-type]
+        ]
         if not matching:
             errors.append(
                 f"Revision removed required operation: {contract.tool} {contract.input} "
@@ -73,7 +79,10 @@ def validate_revision_invariants(
         for step in revised.steps:
             if not step_is_mutating(step, registry):
                 continue
-            covered = any(RequiredOperation.step_satisfies(step, c) for c in root_contracts)
+            covered = any(
+                RequiredOperation.step_satisfies(step, c)  # type: ignore[arg-type]
+                for c in root_contracts
+            )
             if not covered:
                 errors.append(
                     f"Revision introduced un-declared mutating step '{step.id}' "

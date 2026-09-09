@@ -37,12 +37,13 @@ async def api_and_client():
 
 
 def directory_scope() -> dict:
-    return {
-        "target": {
-            "type": "directory",
-            "filesystem_root": "D:/Project/JAgent/data/workspaces/test/work",
-        }
-    }
+    # 跨平台：filesystem_root 必须落在受信 WORKSPACE_BASE_DIR 之内，否则
+    # _validate_workspace_scope 返回 422。不能写死 Windows 绝对路径（Linux CI 上
+    # 会解析到基目录之外）。子目录无需预先存在，校验只做包含性判断。
+    from harness.api.routes import WORKSPACE_BASE_DIR
+
+    root = WORKSPACE_BASE_DIR / "test" / "work"
+    return {"target": {"type": "directory", "filesystem_root": str(root)}}
 
 
 class TestOpenAPIContract:

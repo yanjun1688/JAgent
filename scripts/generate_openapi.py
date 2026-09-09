@@ -1,17 +1,25 @@
 """Generate OpenAPI schema and TypeScript types for the frontend.
 
 Usage:
-    python scripts/generate_openapi.py
+    python scripts/generate_openapi.py            # (re)write generated artifacts
+    python scripts/generate_openapi.py --check    # CI/pre-commit gate: fail if the
+                                                  # checked-in artifacts are stale
 
 This generates:
     frontend/public/openapi.json   — OpenAPI 3.0 schema
     frontend/src/api/schema.ts     — TypeScript interfaces extracted from schema
+
+Artifacts are always written with LF line endings so regeneration is
+byte-identical across platforms (Windows text-mode translation previously
+produced CRLF and made every regeneration a no-content diff).
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -21,11 +29,12 @@ FRONTEND_SRC_API = PROJECT_ROOT / "frontend" / "src" / "api"
 # Build schema from the FastAPI app without running a server
 from harness.api.app import app  # noqa: E402
 
-schema = app.openapi()
-FRONTEND_PUBLIC.mkdir(parents=True, exist_ok=True)
-schema_path = FRONTEND_PUBLIC / "openapi.json"
-schema_path.write_text(json.dumps(schema, indent=2, ensure_ascii=False), encoding="utf-8")
-print(f"[OK] OpenAPI schema written to {schema_path}")
+
+def _write_lf(path: Path, text: str) -> None:
+    """Write text with normalized LF endings, independent of host OS."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
 
 
 # ── Generate TypeScript interfaces from OpenAPI components.schemas ──
@@ -96,32 +105,69 @@ def _generate_interfaces(components: dict) -> str:
     return "\n".join(lines)
 
 
-components = schema.get("components", {})
-ts_source = _generate_interfaces(components)
-schema_ts_path = FRONTEND_SRC_API / "schema.ts"
-schema_ts_path.write_text(ts_source, encoding="utf-8")
-print(f"[OK] TypeScript interfaces written to {schema_ts_path}")
-
-
-# ── Optionally generate with openapi-typescript for richer types ──
-
-try:
-    result = subprocess.run(
-        [
-            "npx",
-            "--yes",
-            "openapi-typescript",
-            str(schema_path),
-            "--output",
-            str(FRONTEND_SRC_API / "schema.openapi.ts"),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="do not write; exit non-zero if checked-in artifacts are stale",
     )
-    if result.returncode == 0:
-        print(f"[OK] openapi-typescript output at {FRONTEND_SRC_API / 'schema.openapi.ts'}")
-    else:
-        print(f"[WARN] openapi-typescript skipped: {result.stderr.strip()}")
-except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-    print(f"[WARN] openapi-typescript skipped: {exc}")
+    args = parser.parse_args()
+
+    schema = app.openapi()
+    schema_path = FRONTEND_PUBLIC / "openapi.json"
+    schema_text = json.dumps(schema, indent=2, ensure_ascii=False)
+
+    components = schema.get("components", {})
+    ts_text = _generate_interfaces(components)
+    schema_ts_path = FRONTEND_SRC_API / "schema.ts"
+
+    artifacts = [(schema_path, schema_text), (schema_ts_path, ts_text)]
+
+    if args.check:
+        # Normalize CRLF so a Windows checkout with core.autocrlf converting the
+        # working tree does not produce a false positive; generation still writes LF.
+        stale = [
+            str(p)
+            for p, text in artifacts
+            if (not p.exists()) or p.read_bytes().replace(b"\r\n", b"\n") != text.encode("utf-8")
+        ]
+        if stale:
+            for p in stale:
+                print(f"[STALE] {p} — run `python scripts/generate_openapi.py` and commit the result")
+            return 1
+        print("[OK] OpenAPI artifacts are up to date")
+        return 0
+
+    for path, text in artifacts:
+        _write_lf(path, text)
+        print(f"[OK] written to {path}")
+
+    # ── Optionally generate with openapi-typescript for richer types ──
+    # Best-effort only: requires network/npx and the output is not checked in,
+    # so it is intentionally skipped in --check mode.
+    try:
+        result = subprocess.run(
+            [
+                "npx",
+                "--yes",
+                "openapi-typescript",
+                str(schema_path),
+                "--output",
+                str(FRONTEND_SRC_API / "schema.openapi.ts"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            print(f"[OK] openapi-typescript output at {FRONTEND_SRC_API / 'schema.openapi.ts'}")
+        else:
+            print(f"[WARN] openapi-typescript skipped: {result.stderr.strip()}")
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        print(f"[WARN] openapi-typescript skipped: {exc}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

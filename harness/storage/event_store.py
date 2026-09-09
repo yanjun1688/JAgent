@@ -364,10 +364,10 @@ class EventStore:
 
         取消安全是关键：``asyncio.CancelledError`` 继承 ``BaseException``，普通的
         ``except Exception`` 捕不到它。watchdog 可能恰好在 BEGIN…commit 之间取消
-        在途 append，故清理必须用 ``BaseException`` 兜底，且 rollback 本身要
-        ``shield``——取消信号在 finally/except 里仍处 pending，直接 await rollback
-        会立刻再抛 CancelledError，使事务无法闭合。rollback 完成后把原异常
-        （含 CancelledError）忠实重抛，绝不吞掉取消。
+        在途 append，故清理必须用 ``BaseException`` 兜底。单次 ``task.cancel()``
+        下 CancelledError 在 except 中只投递一次，其内 ``await rollback()`` 能正常
+        跑完（不使用 shield——外层取消时 shield 会立即重抛，反而等不到回滚）。
+        rollback 完成后把原异常（含 CancelledError）忠实重抛，绝不吞掉取消。
         """
         await self.conn.execute("BEGIN IMMEDIATE")
         try:
@@ -450,7 +450,10 @@ class EventStore:
                             (run_id,),
                         )
                         row = await cursor.fetchone()
-                        assigned_seq = int(row[0])
+                        # 无 GROUP BY 的标量聚合 SELECT COALESCE(MAX(seq),0)+1 即使在空表上
+                        # 也保证恰好返回一行，fetchone() 不可能为 None（mypy 不懂 SQL 聚合
+                        # 行数语义才报 index on Row|None）。这是写路径 seq 分配，非读路径。
+                        assigned_seq = int(row[0])  # type: ignore[index]
                         await self.conn.execute(
                             sql,
                             (
