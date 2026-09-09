@@ -10,7 +10,7 @@ import pytest
 
 from harness.core.planner import PlanGuardrail
 from harness.models.plan import DagPlan, DagStep, validate_dag_structure
-from harness.tools.registry import ToolRegistry
+from harness.tools.registry import ToolRegistry, unknown_tool_message
 
 
 def _plan(*steps: DagStep) -> DagPlan:
@@ -222,3 +222,26 @@ def test_guardrail_unknown_tool_short_circuits_before_structure_checks(registry)
     errors = PlanGuardrail(registry).validate(plan)
     assert errors and "unknown tool" in errors[0]
     assert all("itself" not in e for e in errors)
+
+
+def test_guardrail_collects_all_unknown_tools_in_one_pass(registry):
+    """R7 合并最易假绿处：collect-all 行为不得退化成遇到第一个未注册工具就
+    中断。一个计划里同时有两个未注册工具，errors 必须一次同时包含两者，让
+    LLM 单轮重试看到全部问题，而非改一个再冒一个。"""
+    plan = _plan(
+        DagStep(id="s1", tool="echo", input={}),
+        DagStep(id="s2", tool="ghost_a", input={}),
+        DagStep(id="s3", tool="ghost_b", input={}),
+    )
+    errors = PlanGuardrail(registry).validate(plan)
+    assert any("ghost_a" in e for e in errors)
+    assert any("ghost_b" in e for e in errors)
+    assert sum(1 for e in errors if "unknown tool" in e) == 2
+
+
+def test_guardrail_unknown_tool_fragment_from_shared_constant(registry):
+    """核心错误片段必须来自单一共享来源 unknown_tool_message，而非各调用点
+    手抄一遍 'unknown tool' —— 防止文案漂移。"""
+    plan = _plan(DagStep(id="s1", tool="ghost_tool", input={}))
+    errors = PlanGuardrail(registry).validate(plan)
+    assert any(unknown_tool_message("ghost_tool") in e for e in errors)

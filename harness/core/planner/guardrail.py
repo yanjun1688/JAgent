@@ -47,9 +47,11 @@ class PlanGuardrail:
                 errors.append(f"Step {i} is missing 'id' field")
                 continue
 
-            tool_def = self.registry.get_tool_def(step.tool)
+            tool_def, unknown_error = self.registry.tool_def_or_error(step.tool)
             if tool_def is None:
-                errors.append(f"Step '{step.id}': unknown tool '{step.tool}'")
+                # collect-all, not fail-fast: append and keep scanning so one LLM
+                # retry sees every bad step at once (R7 primitive, shared message).
+                errors.append(f"Step '{step.id}': {unknown_error}")
                 continue
 
             # v2.2 (D10): probe 信任校验 — 仅无副作用（只读/查询）工具可标 probe，
