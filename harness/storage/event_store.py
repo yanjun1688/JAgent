@@ -151,7 +151,6 @@ class EventStore:
         # events on the same run whose payload lacks this field.
         self._run_to_conv: dict[str, str] = {}
         self._run_to_workspace: dict[str, str] = {}
-        self._request_claim_lock = asyncio.Lock()
 
     async def _migrate_add_conversation_id_column(self) -> None:
         """Add conversation_id column to events table for legacy persistent DBs.
@@ -281,20 +280,28 @@ class EventStore:
         The unique claim is storage-backed, so the route cannot race between
         checking history and creating a second run. The returned bool is true
         only for the request that created the claim.
+
+        Runs under ``_write_txn`` (the same global write lock + cancel-safe
+        transaction used by every other write): the claim row and the seq=1
+        RUN_STARTED event are two tables updated on one shared connection, so
+        they must serialize against ``append_event``'s BEGIN IMMEDIATE exactly
+        like any other write. A separate claim lock would let the two INSERTs
+        interleave with a concurrent append's transaction (same orphan-txn
+        class as the workspace/conversation writers).
         """
         _validate_payload(EventType.RUN_STARTED, run_started_payload)
-        async with self._request_claim_lock:
-            cursor = await self.conn.execute(
-                "SELECT run_id FROM client_request_claims "
-                "WHERE tenant_id = ? AND conversation_id = ? AND client_request_id = ?",
-                (tenant_id, conversation_id, client_request_id),
-            )
-            existing = await cursor.fetchone()
-            if existing is not None:
-                return str(existing["run_id"]), False
+        cursor = await self.conn.execute(
+            "SELECT run_id FROM client_request_claims "
+            "WHERE tenant_id = ? AND conversation_id = ? AND client_request_id = ?",
+            (tenant_id, conversation_id, client_request_id),
+        )
+        existing = await cursor.fetchone()
+        if existing is not None:
+            return str(existing["run_id"]), False
 
-            now = time.time()
-            try:
+        now = time.time()
+        try:
+            async with self._write_txn():
                 await self.conn.execute(
                     "INSERT INTO client_request_claims "
                     "(tenant_id, conversation_id, client_request_id, run_id, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -314,38 +321,37 @@ class EventStore:
                         0,
                     ),
                 )
-                await self.conn.commit()
-            except sqlite3.IntegrityError:
-                await self.conn.rollback()
-                cursor = await self.conn.execute(
-                    "SELECT run_id FROM client_request_claims "
-                    "WHERE tenant_id = ? AND conversation_id = ? AND client_request_id = ?",
-                    (tenant_id, conversation_id, client_request_id),
-                )
-                existing = await cursor.fetchone()
-                if existing is not None:
-                    return str(existing["run_id"]), False
-                raise
-            self._run_to_conv[run_id] = conversation_id
-            if workspace_id is not None:
-                self._run_to_workspace[run_id] = workspace_id
-
-            event = Event(
-                run_id=run_id,
-                seq=1,
-                event_type=EventType.RUN_STARTED,
-                payload=run_started_payload,
-                idempotency_key=f"client-request:{conversation_id}:{client_request_id}",
-                created_at=now,
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
+        except sqlite3.IntegrityError:
+            # _write_txn 已先 rollback（取消安全），此处事务已闭合，可安全重读。
+            cursor = await self.conn.execute(
+                "SELECT run_id FROM client_request_claims "
+                "WHERE tenant_id = ? AND conversation_id = ? AND client_request_id = ?",
+                (tenant_id, conversation_id, client_request_id),
             )
-            for cb in self._post_append:
-                try:
-                    await cb(event)
-                except Exception as exc:
-                    _log_write.error("on_append callback failed: %s", exc)
-            return run_id, True
+            existing = await cursor.fetchone()
+            if existing is not None:
+                return str(existing["run_id"]), False
+            raise
+        self._run_to_conv[run_id] = conversation_id
+        if workspace_id is not None:
+            self._run_to_workspace[run_id] = workspace_id
+
+        event = Event(
+            run_id=run_id,
+            seq=1,
+            event_type=EventType.RUN_STARTED,
+            payload=run_started_payload,
+            idempotency_key=f"client-request:{conversation_id}:{client_request_id}",
+            created_at=now,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+        for cb in self._post_append:
+            try:
+                await cb(event)
+            except Exception as exc:
+                _log_write.error("on_append callback failed: %s", exc)
+        return run_id, True
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -779,12 +785,12 @@ class EventStore:
 
     async def ensure_tenant(self, tenant_id: str, name: str = "") -> Tenant:
         now = time.time()
-        await self.conn.execute(
-            "INSERT INTO tenants (tenant_id, name, created_at, updated_at) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(tenant_id) DO UPDATE SET updated_at=excluded.updated_at",
-            (tenant_id, name, now, now),
-        )
-        await self.conn.commit()
+        async with self._write_txn():
+            await self.conn.execute(
+                "INSERT INTO tenants (tenant_id, name, created_at, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(tenant_id) DO UPDATE SET updated_at=excluded.updated_at",
+                (tenant_id, name, now, now),
+            )
         return Tenant(tenant_id=tenant_id, name=name, created_at=now, updated_at=now)
 
     async def get_tenant(self, tenant_id: str) -> Tenant | None:
@@ -797,30 +803,27 @@ class EventStore:
         # on the same connection: otherwise a concurrent append may start its
         # transaction in the window between this INSERT and commit, producing
         # "cannot start a transaction within a transaction" (500). (P2 — found
-        # by blackbox concurrent workspace creation.)
-        async with self._db_write_lock:
-            return await self._create_workspace_unlocked(workspace)
-
-    async def _create_workspace_unlocked(self, workspace: Workspace) -> Workspace:
+        # by blackbox concurrent workspace creation.) _write_txn holds the
+        # global write lock AND wraps the write in a cancel-safe transaction.
         try:
-            await self.conn.execute(
-                "INSERT INTO workspaces (workspace_id, tenant_id, name, description, scope, status, "
-                "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    workspace.workspace_id,
-                    workspace.tenant_id,
-                    workspace.name,
-                    workspace.description,
-                    workspace.scope.model_dump_json(),
-                    workspace.status,
-                    workspace.created_at,
-                    workspace.updated_at,
-                ),
-            )
-            await self.conn.commit()
+            async with self._write_txn():
+                await self.conn.execute(
+                    "INSERT INTO workspaces (workspace_id, tenant_id, name, description, scope, status, "
+                    "created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        workspace.workspace_id,
+                        workspace.tenant_id,
+                        workspace.name,
+                        workspace.description,
+                        workspace.scope.model_dump_json(),
+                        workspace.status,
+                        workspace.created_at,
+                        workspace.updated_at,
+                    ),
+                )
         except sqlite3.IntegrityError:
-            await self.conn.rollback()
+            # _write_txn 已先 rollback（取消安全），此处事务已闭合。
             existing = await self.get_workspace(workspace.workspace_id)
             # P1-A: 只有同租户的既有工作区可复用。跨租户 id 冲突（如共享
             # "default"）必须抛错，绝不能让调用方继承他人租户的工作区定义
@@ -858,30 +861,27 @@ class EventStore:
 
     async def update_workspace(self, workspace_id: str, update: WorkspaceUpdate) -> Workspace | None:
         # Serialize against append_event writes on the shared connection
-        # (same rationale as create_workspace).
-        async with self._db_write_lock:
-            return await self._update_workspace_unlocked(workspace_id, update)
-
-    async def _update_workspace_unlocked(self, workspace_id: str, update: WorkspaceUpdate) -> Workspace | None:
-        current = await self.get_workspace(workspace_id)
-        if current is None:
-            return None
-        changes = update.model_dump(exclude_unset=True)
-        values = current.model_dump()
-        values.update(changes)
-        values["updated_at"] = time.time()
-        updated = Workspace(**values)
-        await self.conn.execute(
-            "UPDATE workspaces SET name=?, description=?, scope=?, updated_at=? WHERE workspace_id=?",
-            (updated.name, updated.description, updated.scope.model_dump_json(), updated.updated_at, workspace_id),
-        )
-        await self.conn.commit()
-        return updated
+        # (same rationale as create_workspace). Read-modify-write runs inside
+        # the same cancel-safe transaction so the UPDATE reflects the read.
+        async with self._write_txn():
+            current = await self.get_workspace(workspace_id)
+            if current is None:
+                return None
+            changes = update.model_dump(exclude_unset=True)
+            values = current.model_dump()
+            values.update(changes)
+            values["updated_at"] = time.time()
+            updated = Workspace(**values)
+            await self.conn.execute(
+                "UPDATE workspaces SET name=?, description=?, scope=?, updated_at=? WHERE workspace_id=?",
+                (updated.name, updated.description, updated.scope.model_dump_json(), updated.updated_at, workspace_id),
+            )
+            return updated
 
     async def delete_workspace(self, workspace_id: str) -> Workspace | None:
         # Serialize against append_event writes on the shared connection
         # (same rationale as create_workspace).
-        async with self._db_write_lock:
+        async with self._write_txn():
             current = await self.get_workspace(workspace_id)
             if current is None:
                 return None
@@ -890,7 +890,6 @@ class EventStore:
                 "UPDATE workspaces SET status='deleted', updated_at=? WHERE workspace_id=?",
                 (updated.updated_at, workspace_id),
             )
-            await self.conn.commit()
             return updated
 
     # ── Read-only query helpers (for analysis/reporting) ─────────
@@ -921,15 +920,15 @@ class EventStore:
         tenant_id: str = "default",
     ) -> None:
         now = time.time()
-        await self.conn.execute(
-            """INSERT INTO conversations (conversation_id, tenant_id, user_id, title, status,
-               created_at, updated_at, message_count)
-               VALUES (?, ?, ?, ?, 'active', ?, ?, 0)
-               ON CONFLICT(conversation_id) DO UPDATE SET
-               title = excluded.title, updated_at = excluded.updated_at""",
-            (conversation_id, tenant_id, user_id, title, now, now),
-        )
-        await self.conn.commit()
+        async with self._write_txn():
+            await self.conn.execute(
+                """INSERT INTO conversations (conversation_id, tenant_id, user_id, title, status,
+                   created_at, updated_at, message_count)
+                   VALUES (?, ?, ?, ?, 'active', ?, ?, 0)
+                   ON CONFLICT(conversation_id) DO UPDATE SET
+                   title = excluded.title, updated_at = excluded.updated_at""",
+                (conversation_id, tenant_id, user_id, title, now, now),
+            )
 
     async def list_conversations(
         self,
@@ -979,11 +978,11 @@ class EventStore:
 
     async def delete_conversation(self, conversation_id: str) -> None:
         now = time.time()
-        await self.conn.execute(
-            "UPDATE conversations SET status = 'archived', updated_at = ? WHERE conversation_id = ?",
-            (now, conversation_id),
-        )
-        await self.conn.commit()
+        async with self._write_txn():
+            await self.conn.execute(
+                "UPDATE conversations SET status = 'archived', updated_at = ? WHERE conversation_id = ?",
+                (now, conversation_id),
+            )
 
     async def update_conversation(
         self,
@@ -1002,17 +1001,17 @@ class EventStore:
             params.append(status)
         params.append(conversation_id)
         sql = f"UPDATE conversations SET {', '.join(updates)} WHERE conversation_id = ?"
-        cursor = await self.conn.execute(sql, params)
-        await self.conn.commit()
-        return cursor.rowcount > 0
+        async with self._write_txn():
+            cursor = await self.conn.execute(sql, params)
+            return cursor.rowcount > 0
 
     async def increment_message_count(self, conversation_id: str) -> None:
         now = time.time()
-        await self.conn.execute(
-            "UPDATE conversations SET message_count = message_count + 1, updated_at = ? WHERE conversation_id = ?",
-            (now, conversation_id),
-        )
-        await self.conn.commit()
+        async with self._write_txn():
+            await self.conn.execute(
+                "UPDATE conversations SET message_count = message_count + 1, updated_at = ? WHERE conversation_id = ?",
+                (now, conversation_id),
+            )
 
     async def get_events_for_conversation(self, conversation_id: str) -> list[Event]:
         """Return all events associated with a conversation, as a coherent timeline.
