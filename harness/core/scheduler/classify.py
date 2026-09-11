@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-import time
 
+from harness.core.llm_client import timed_chat
 from harness.core.logger import agent_logger
 from harness.core.system_prompt import AgentPhase, get_prompt
 from harness.models.events import DeliveryContractsResolvedPayload, EventType
@@ -136,22 +136,18 @@ class ClassifyMixin:
             truncated[:80],
         )
         try:
-            _t0 = time.monotonic()
             chat_resp = await self._phase_call(
                 run_id,
                 "classify",
-                self.planner.llm.chat(
+                timed_chat(
+                    self.planner.llm,
+                    _sched_ctrl,
+                    "classify",
                     [{"role": "system", "content": prompt}],
+                    run_id=run_id,
                     temperature=0.0,
                     max_tokens=4,
-                    run_id=run_id,
                 ),
-            )
-            _sched_ctrl.info(
-                "[llm] phase=classify run=%s duration_ms=%d chars=%d",
-                run_id,
-                int((time.monotonic() - _t0) * 1000),
-                len(chat_resp.content) if chat_resp and chat_resp.content else 0,
             )
         except asyncio.TimeoutError:
             _sched_think.warning("[classify] Phase timed out — assuming needs_tools=True (conservative)")

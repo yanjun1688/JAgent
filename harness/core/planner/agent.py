@@ -7,12 +7,11 @@ execution; repair proposals are mechanically re-validated by the Scheduler.
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 from harness.core.dag_types import StepResult
 from harness.core.fold import RunState
-from harness.core.llm_client import LLMClient
+from harness.core.llm_client import LLMClient, timed_chat
 from harness.core.logger import agent_logger, fmtkv
 from harness.core.planner.guardrail import PlanGuardrail
 from harness.core.planner.parsing import parse_local_repair_proposal, parse_plan_response
@@ -60,28 +59,11 @@ class Planner:
         messages: list[dict[str, Any]],
         **kwargs: Any,
     ):
-        """S11 (问题八 观测侧): LLM 调用结构化日志 — run_id/phase/耗时/异常类型。"""
-        _t0 = time.monotonic()
-        try:
-            resp = await self.llm.chat(messages, run_id=run_id, **kwargs)
-            _log.info(
-                "[llm] phase=%s run=%s duration_ms=%d chars=%d",
-                phase,
-                run_id or "",
-                int((time.monotonic() - _t0) * 1000),
-                len(resp.content) if resp and resp.content else 0,
-            )
-            return resp
-        except Exception as exc:
-            _log.error(
-                "[llm] phase=%s run=%s duration_ms=%d error=%s:%s",
-                phase,
-                run_id or "",
-                int((time.monotonic() - _t0) * 1000),
-                type(exc).__name__,
-                str(exc)[:200],
-            )
-            raise
+        """S11 (问题八 观测侧): LLM 调用结构化日志 — run_id/phase/耗时/异常类型。
+
+        T-R8b-4: 计时/异常日志与 classify 同源（llm_client.timed_chat）。
+        """
+        return await timed_chat(self.llm, _log, phase, messages, run_id=run_id, **kwargs)
 
     async def plan(
         self,

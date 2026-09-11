@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
 from typing import Any
@@ -23,6 +24,48 @@ from harness.monitoring.langfuse_tracer import _get_current_trace_ctx, _get_curr
 _logger = agent_logger("llm")
 
 _STOP_MARKER = "<STOP>"
+
+
+async def timed_chat(
+    llm: LLMClient,
+    logger: logging.Logger,
+    phase: str,
+    messages: list[dict[str, Any]],
+    *,
+    run_id: str | None = None,
+    **kwargs: Any,
+) -> ChatResponse:
+    """Single-source LLM chat wrapper: uniform ``[llm] phase=...`` timing log.
+
+    Emits one INFO line on success (phase/run/duration_ms/chars) and one ERROR
+    line on failure (exception type + truncated message) before re-raising.
+    CancelledError is a BaseException and deliberately NOT caught here, so run
+    cancellation propagates untouched (AGENTS.md §6.1). T-R8b-4 replaces the two
+    hand-copied timing blocks in planner/agent.py and scheduler/classify.py.
+    """
+    _t0 = time.monotonic()
+    try:
+        resp = await llm.chat(messages, run_id=run_id, **kwargs)
+        logger.info(
+            "[llm] phase=%s run=%s duration_ms=%d chars=%d",
+            phase,
+            run_id or "",
+            int((time.monotonic() - _t0) * 1000),
+            len(resp.content) if resp and resp.content else 0,
+        )
+        return resp
+    except BaseException as exc:
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        logger.error(
+            "[llm] phase=%s run=%s duration_ms=%d error=%s:%s",
+            phase,
+            run_id or "",
+            int((time.monotonic() - _t0) * 1000),
+            type(exc).__name__,
+            str(exc)[:200],
+        )
+        raise
 
 
 class ToolCall(BaseModel):
