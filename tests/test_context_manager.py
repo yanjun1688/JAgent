@@ -1172,6 +1172,26 @@ class TestEpisodeLLMTransportResilience:
                 compress_results=[],
             )
 
+    @pytest.mark.asyncio
+    async def test_run_id_propagated_to_episode_chat(self):
+        """T-R8b-1: episode 摘要调用必须把 run_id 透传给 llm.chat。"""
+        from harness.core.fold import ThoughtEntry
+
+        llm = MockLLMClient(['{"title":"t","summary":"s","key_decisions":["d"]}'])
+        cm = self._cm_with_llm(llm)
+        thoughts = [ThoughtEntry(seq=1, thought="meaningful work")]
+        await cm._generate_episode(
+            RunState(run_id="run-ep"),
+            episode_range=(1, 1),
+            original_event_refs=[1],
+            original_tokens=100,
+            compress_thoughts=thoughts,
+            compress_results=[],
+            run_id="run-ep",
+        )
+        assert len(llm.calls) == 1
+        assert llm.calls[0].get("run_id") == "run-ep"
+
 
 # ── V3.0 Phase 1: fold.py new event types ──────────────────────
 

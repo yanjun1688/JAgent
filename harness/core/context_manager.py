@@ -262,6 +262,7 @@ class ContextManager:
             original_tokens=token_count,
             compress_thoughts=compress_thoughts,
             compress_results=compress_results,
+            run_id=run_id,
         )
         _gen_ms = (time.monotonic() - _t_gen) * 1000
         summary_tokens = await self._async_estimate_text_tokens(episode.model_dump_json())
@@ -342,6 +343,7 @@ class ContextManager:
             compress_thoughts=compress_thoughts,
             compress_results=compress_results,
             emergency=True,
+            run_id=run_id,
         )
         _gen_ms = (time.monotonic() - _t_gen) * 1000
         summary_tokens = await self._async_estimate_text_tokens(episode.model_dump_json())
@@ -480,6 +482,7 @@ class ContextManager:
         compress_thoughts: list | None = None,
         compress_results: list | None = None,
         emergency: bool = False,
+        run_id: str | None = None,
     ) -> Episode:
         """Call LLM to generate a structured Episode.
 
@@ -577,6 +580,7 @@ class ContextManager:
                 ],
                 temperature=0.0,
                 max_tokens=2048,
+                run_id=run_id,
             )
             response = chat_resp.content
 

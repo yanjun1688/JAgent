@@ -139,3 +139,22 @@ class TestExtractPartialValid:
         assert len(contracts) == 1
         assert contracts[0].input["path"] == "/tmp/ok.txt"
         assert len(llm.calls) == 1
+
+
+class TestExtractRunIdPropagation:
+    """T-R8b-1: extract 必须把 run_id 透传给 llm.chat（日志打标/追踪）。"""
+
+    @pytest.mark.asyncio
+    async def test_run_id_propagated_to_chat(self):
+        llm = MockLLMClient([_valid_ops_json()])
+        ex = _extractor(llm)
+        await ex.extract("read /tmp/f1.txt", run_id="run-xyz")
+        assert len(llm.calls) == 1
+        assert llm.calls[0]["run_id"] == "run-xyz"
+
+    @pytest.mark.asyncio
+    async def test_run_id_defaults_none(self):
+        llm = MockLLMClient([_valid_ops_json()])
+        ex = _extractor(llm)
+        await ex.extract("read /tmp/f1.txt")
+        assert llm.calls[0]["run_id"] is None

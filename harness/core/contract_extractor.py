@@ -137,7 +137,7 @@ class ContractExtractor:
             return contracts, ""
         return [], "all listed operations were rejected: " + " | ".join(dropped)
 
-    async def extract(self, intent: str) -> list[DeliveryContract]:
+    async def extract(self, intent: str, run_id: str | None = None) -> list[DeliveryContract]:
         """抽取兜底：intent → contracts（source=extracted）。
 
         对齐 Planner.plan/revise 的重试语义：LLM 调用异常、JSON 解析失败、
@@ -158,7 +158,7 @@ class ContractExtractor:
                     {"role": "user", "content": _RETRY_HINT.format(error=last_err, tool_names=tool_names)}
                 )
             try:
-                chat_resp = await self.llm.chat(messages, temperature=0.0)
+                chat_resp = await self.llm.chat(messages, temperature=0.0, run_id=run_id)
             except Exception as exc:
                 last_err = repr(exc)
                 _guard.warning(

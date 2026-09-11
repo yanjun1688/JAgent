@@ -71,6 +71,7 @@ class AgentKernel(ABC):
         tool_defs: list[ToolDefinition],
         state: RunState,
         feedback: str | None = None,
+        run_id: str | None = None,
     ) -> list[ThinkResult]: ...
 
 

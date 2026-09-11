@@ -80,7 +80,7 @@ class ClassifyMixin:
         remaining = self._run_remaining_s(run_id)
         cap = CONTRACT_EXTRACT_TIMEOUT if remaining is None else min(CONTRACT_EXTRACT_TIMEOUT, remaining)
         try:
-            extracted = await asyncio.wait_for(extractor.extract(intent), timeout=cap)
+            extracted = await asyncio.wait_for(extractor.extract(intent, run_id=run_id), timeout=cap)
             await self._append_run_event(
                 run_id,
                 EventType.DELIVERY_CONTRACTS_RESOLVED,

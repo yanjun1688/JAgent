@@ -100,6 +100,18 @@ async def test_scheduler_completes_simple_task(store: EventStore):
 
 
 @pytest.mark.asyncio
+async def test_scheduler_passes_run_id_to_kernel_think(store: EventStore):
+    """T-R8b-1: serial loop 必须把 run_id 透传给 kernel.think（进而到 llm.chat）。"""
+    kernel = MockAgentKernel([ThinkResult(thought="done", tool_name=None)])
+    executor = ToolExecutor(store)
+    scheduler = AgentLoopScheduler(store, executor, kernel, [], {})
+    state = await scheduler.run("run-rid", "just answer")
+    assert state.status == RunStatus.COMPLETED
+    assert kernel.think_calls, "kernel.think 至少被调用一次"
+    assert kernel.think_calls[0]["run_id"] == "run-rid"
+
+
+@pytest.mark.asyncio
 async def test_scheduler_multiple_tool_calls(store: EventStore):
     kernel = MockAgentKernel(
         [

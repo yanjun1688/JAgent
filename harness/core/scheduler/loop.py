@@ -155,7 +155,9 @@ class AgentLoopScheduler(BaseScheduler):
 
         _sched_think.info("[think] Calling LLM%s", " with feedback" if feedback_text else "")
         _think_start = time.monotonic()
-        think_results = await self.kernel.think(intent, self.tool_defs, state, feedback=feedback_text)
+        think_results = await self.kernel.think(
+            intent, self.tool_defs, state, feedback=feedback_text, run_id=run_id
+        )
         _think_ms = (time.monotonic() - _think_start) * 1000
 
         tool_names = [r.tool_name for r in think_results if r.tool_name]

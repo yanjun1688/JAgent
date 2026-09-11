@@ -360,8 +360,8 @@ async def test_llm_kernel_stop_summary_failure_does_not_break():
     """When summary generation fails, direct_answer stays None but think still succeeds."""
 
     class _FailingSummaryClient(MockLLMClient):
-        async def chat(self, messages, *, tools=None, temperature=0.0, max_tokens=4096):
-            self.calls.append({"messages": messages, "tools": tools})
+        async def chat(self, messages, *, tools=None, temperature=0.0, max_tokens=4096, run_id=None):
+            self.calls.append({"messages": messages, "tools": tools, "run_id": run_id})
             if self._idx >= len(self.responses):
                 raise RuntimeError("simulated LLM failure")
             response = self.responses[self._idx]
@@ -377,3 +377,39 @@ async def test_llm_kernel_stop_summary_failure_does_not_break():
     assert len(results) == 1
     assert results[0].tool_name is None
     assert results[0].direct_answer is None
+
+
+# ── T-R8b-1: run_id propagation through serial kernel think ──────────
+
+
+@pytest.mark.asyncio
+async def test_llm_kernel_think_propagates_run_id_to_chat():
+    """serial think 必须把 run_id 透传给 llm.chat（[run=...] 日志/追踪）。"""
+    client = MockLLMClient([ChatResponse(content="plain thought, no stop")])
+    kernel = LLMAgentKernel(client)
+    await kernel.think("just chat", [], RunState(run_id="run-abc"), run_id="run-abc")
+    assert client.calls[0]["run_id"] == "run-abc"
+
+
+@pytest.mark.asyncio
+async def test_llm_kernel_stop_summary_propagates_run_id():
+    """<STOP> 触发的 stop-summary 二次调用也必须携带同一 run_id。"""
+    client = MockLLMClient(
+        [
+            ChatResponse(content="<STOP>"),
+            ChatResponse(content="all done, summarized"),
+        ]
+    )
+    kernel = LLMAgentKernel(client)
+    results = await kernel.think("finish", [], RunState(run_id="run-sum"), run_id="run-sum")
+    assert results[0].direct_answer == "all done, summarized"
+    assert len(client.calls) == 2
+    assert all(c["run_id"] == "run-sum" for c in client.calls), "主调用与 summary 调用都必须带 run_id"
+
+
+@pytest.mark.asyncio
+async def test_llm_kernel_think_run_id_defaults_none():
+    client = MockLLMClient([ChatResponse(content="hi")])
+    kernel = LLMAgentKernel(client)
+    await kernel.think("hi", [], RunState(run_id="r"))
+    assert client.calls[0]["run_id"] is None

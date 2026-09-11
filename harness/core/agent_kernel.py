@@ -61,8 +61,11 @@ class MockAgentKernel(AgentKernel):
         tool_defs: list[ToolDefinition],
         state: RunState,
         feedback: str | None = None,
+        run_id: str | None = None,
     ) -> list[ThinkResult]:
-        self.think_calls.append({"intent": intent, "tool_defs": tool_defs, "state": state, "feedback": feedback})
+        self.think_calls.append(
+            {"intent": intent, "tool_defs": tool_defs, "state": state, "feedback": feedback, "run_id": run_id}
+        )
         if self._idx >= len(self.responses):
             return [ThinkResult(thought="Task complete (no more pre-programmed responses)")]
         result = self.responses[self._idx]
@@ -81,7 +84,12 @@ class LLMAgentKernel(AgentKernel):
     def __init__(self, client: LLMClient) -> None:
         self.client = client
 
-    async def _generate_stop_summary(self, messages: list[dict[str, Any]], response_text: str) -> str | None:
+    async def _generate_stop_summary(
+        self,
+        messages: list[dict[str, Any]],
+        response_text: str,
+        run_id: str | None = None,
+    ) -> str | None:
         summary_messages = [
             {
                 "role": "system",
@@ -101,7 +109,7 @@ class LLMAgentKernel(AgentKernel):
             },
         ]
         try:
-            resp = await self.client.chat(summary_messages, max_tokens=512)
+            resp = await self.client.chat(summary_messages, max_tokens=512, run_id=run_id)
             summary = resp.content.removeprefix("ANSWER:").removeprefix("THOUGHT:").strip()
             _logger.info("[summary] Generated user-facing answer: %s", summary)
             return summary
@@ -181,6 +189,7 @@ class LLMAgentKernel(AgentKernel):
         tool_defs: list[ToolDefinition],
         state: RunState,
         feedback: str | None = None,
+        run_id: str | None = None,
     ) -> list[ThinkResult]:
         schemas = build_tool_schemas(tool_defs) if tool_defs else None
         use_fn = schemas is not None
@@ -223,10 +232,19 @@ class LLMAgentKernel(AgentKernel):
             sum(len(m.get("content", "")) for m in messages),
         )
 
-        resp = await self.client.chat(messages, tools=schemas) if schemas else await self.client.chat(messages)
-        return await self._consume_response(resp, messages)
+        resp = (
+            await self.client.chat(messages, tools=schemas, run_id=run_id)
+            if schemas
+            else await self.client.chat(messages, run_id=run_id)
+        )
+        return await self._consume_response(resp, messages, run_id=run_id)
 
-    async def _consume_response(self, resp: ChatResponse, messages: list[dict[str, Any]]) -> list[ThinkResult]:
+    async def _consume_response(
+        self,
+        resp: ChatResponse,
+        messages: list[dict[str, Any]],
+        run_id: str | None = None,
+    ) -> list[ThinkResult]:
         results: list[ThinkResult] = []
         if resp.tool_calls:
             thought = resp.content or ""
@@ -254,7 +272,7 @@ class LLMAgentKernel(AgentKernel):
             return [ThinkResult(thought=thought, tool_name=None, direct_answer=answer)]
 
         if _STOP_MARKER in content or "ANSWER:" in content:
-            summary = await self._generate_stop_summary(messages, content)
+            summary = await self._generate_stop_summary(messages, content, run_id=run_id)
             if summary:
                 thought = content
                 if "\n<STOP>" in thought:
