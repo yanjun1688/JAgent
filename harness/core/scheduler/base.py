@@ -50,6 +50,11 @@ _sched_act = agent_logger("scheduler.act")
 _sched_ctrl = agent_logger("scheduler.control")
 _sched_breaker = guard_logger("scheduler.breaker")
 
+# T-R8b-2: 阶段边界相对 run 总 watchdog 提前的安全垫（毫秒）。仅够一次 Event Store
+# 追加（PHASE_TIMED_OUT 落库），防止内层与外层 wait_for 同时到期时外层取消抢先、
+# 把结构化超时事件的写入打断。
+_PHASE_DEADLINE_MARGIN_MS = 50
+
 
 @dataclass
 class ThinkResult:
@@ -528,11 +533,17 @@ class BaseScheduler(ABC):
         无 deadline（run_timeout_ms=0）→ 直接 await（总预算禁用）。
         剩余时间耗尽 → PHASE_TIMED_OUT → 抛 TimeoutError。调用方（run() 的
         watchdog）负责将超时收敛为 RunFailed + 取消流程。
+
+        阶段边界比总 watchdog 提前 ``_PHASE_DEADLINE_MARGIN_S``：两者共享同一
+        绝对 deadline，若不留安全垫，watchdog 的 wait_for 与内层 wait_for 同时
+        到期时，外层对 _run_loop 的取消会抢先注入，导致结构化 PHASE_TIMED_OUT
+        在 ``_record_phase_timeout`` 的 await 点被 CancelledError 打断而丢失。
+        提前一个小垫确保受信结构化事件先于粗暴取消落库。
         """
         deadline = self._deadlines.get(run_id)
         if deadline is None:
             return await coro
-        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        remaining_ms = int((deadline - time.monotonic()) * 1000) - _PHASE_DEADLINE_MARGIN_MS
         if remaining_ms <= 0:
             await self._record_phase_timeout(run_id, phase, 0)
             raise asyncio.TimeoutError

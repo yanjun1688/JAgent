@@ -2366,3 +2366,44 @@ async def test_run_watchdog_times_out_and_writes_run_failed(store: EventStore):
     failed = [e for e in events if e.event_type == EventType.RUN_FAILED]
     assert failed, "watchdog 必须写 RUN_FAILED"
     assert "timed out" in (failed[-1].payload.get("final_error") or "")
+    phase_timeouts = [e for e in events if e.event_type == EventType.PHASE_TIMED_OUT]
+    assert phase_timeouts, "serial think 必须纳入 run deadline，耗尽时写 PHASE_TIMED_OUT"
+    assert phase_timeouts[-1].payload.get("phase") == "serial_think"
+
+
+@pytest.mark.asyncio
+async def test_run_budget_caps_context_compression(store: EventStore):
+    """T-R8b-2: episode 摘要（maybe_compress）必须纳入 run deadline，不再靠 httpx 120s 兜底。"""
+
+    class _HangingContextManager:
+        async def maybe_compress(self, *args, **kwargs):
+            await asyncio.sleep(30)
+
+        async def try_checkpoint(self, *args, **kwargs):
+            return None
+
+        def cleanup(self, *args, **kwargs):
+            return None
+
+    class _Kernel:
+        async def think(self, *args, **kwargs):
+            return [ThinkResult(thought="never reached", tool_name=None)]
+
+    executor = ToolExecutor(store)
+    config = SchedulerConfig(max_iterations=5, run_timeout_ms=200)
+    scheduler = AgentLoopScheduler(
+        store,
+        executor,
+        _Kernel(),
+        [],
+        {},
+        config=config,
+        context_manager=_HangingContextManager(),
+    )
+
+    state = await scheduler.run("run-compress-budget", "compress hang")
+    assert state.status == RunStatus.FAILED
+    events = await store.get_events("run-compress-budget")
+    phase_timeouts = [e for e in events if e.event_type == EventType.PHASE_TIMED_OUT]
+    assert phase_timeouts, "压缩挂起必须在 run 预算内被 PHASE_TIMED_OUT 收敛"
+    assert phase_timeouts[-1].payload.get("phase") == "context_compress"

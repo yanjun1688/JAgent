@@ -128,7 +128,11 @@ class AgentLoopScheduler(BaseScheduler):
         )
 
         if self.context_manager:
-            await self.context_manager.maybe_compress(run_id, _iteration, state)
+            await self._phase_call(
+                run_id,
+                "context_compress",
+                self.context_manager.maybe_compress(run_id, _iteration, state),
+            )
             await self.context_manager.try_checkpoint(run_id, _iteration, state)
 
         if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
@@ -155,8 +159,10 @@ class AgentLoopScheduler(BaseScheduler):
 
         _sched_think.info("[think] Calling LLM%s", " with feedback" if feedback_text else "")
         _think_start = time.monotonic()
-        think_results = await self.kernel.think(
-            intent, self.tool_defs, state, feedback=feedback_text, run_id=run_id
+        think_results = await self._phase_call(
+            run_id,
+            "serial_think",
+            self.kernel.think(intent, self.tool_defs, state, feedback=feedback_text, run_id=run_id),
         )
         _think_ms = (time.monotonic() - _think_start) * 1000
 

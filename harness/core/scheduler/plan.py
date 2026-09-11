@@ -510,7 +510,11 @@ class PlanningExecutorScheduler(
                     return await self._refresh_state(run_id), consecutive_failures
                 if self.context_manager:
                     state = await self._refresh_state(run_id)
-                    await self.context_manager.maybe_compress(run_id, state.seq, state)
+                    await self._phase_call(
+                        run_id,
+                        "context_compress",
+                        self.context_manager.maybe_compress(run_id, state.seq, state),
+                    )
                     await self.context_manager.try_checkpoint(run_id, state.seq, state)
                 try:
                     ok = await self.dag_executor.execute_layer(
@@ -1047,7 +1051,11 @@ class PlanningExecutorScheduler(
         )
         if self.context_manager:
             state = await self._refresh_state(run_id)
-            await self.context_manager.maybe_compress(run_id, state.seq, state)
+            await self._phase_call(
+                run_id,
+                "context_compress",
+                self.context_manager.maybe_compress(run_id, state.seq, state),
+            )
         await self._finalize_with_summary(
             run_id, intent, fallback_summary, all_normal=True, unmet_step_ids=[], completion=verdict
         )
