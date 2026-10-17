@@ -12,7 +12,9 @@ import asyncio
 from httpx import ASGITransport, AsyncClient
 
 from harness.api.app import HarnessAPI, app, get_hapi
+from harness.api.auth.principal import Principal, Role
 from harness.core.llm_client import MockLLMClient
+from harness.core.tenant import reset_current_principal, set_current_principal
 from harness.models.events import (
     ConversationStartedPayload,
     EventType,
@@ -121,7 +123,18 @@ async def test_failed_run_writes_safe_user_facing_message() -> None:
                 result_summary="DAG execution: 0/1 step(s) completed, 1 tool call(s). Steps not achieved: s1. Task terminated.",
             ).model_dump(),
         )
-        await api._write_assistant_message("run-p0-fail")
+        token = set_current_principal(
+            Principal(
+                subject="test:p0",
+                tenant_id="default",
+                roles={Role.OPERATOR},
+                auth_method="test",
+            )
+        )
+        try:
+            await api._write_assistant_message("run-p0-fail")
+        finally:
+            reset_current_principal(token)
         messages = await store.get_events_for_conversation("conv-p0-fail")
         assistant = next(e for e in messages if (e.event_type == EventType.CONVERSATION and e.phase == "message"))
         content = assistant.payload["content"]

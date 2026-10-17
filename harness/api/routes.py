@@ -8,19 +8,17 @@ for frontend type generation.
 from __future__ import annotations
 
 import asyncio
-import os
 import sqlite3
 import time
 import uuid
 from collections import defaultdict
-from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from harness.api.deps import HarnessAPI, get_hapi
+from harness.api.deps import HarnessAPI, get_hapi, get_principal
 from harness.api.schemas import (
     ConfirmationResponse,
     ConfirmRequest,
@@ -41,6 +39,7 @@ from harness.api.schemas import (
 )
 from harness.core.fold import RunStatus, fold_events
 from harness.core.logger import fmtkv, guard_logger
+from harness.execution.boundary import WorkspaceRootError, validate_workspace_target
 from harness.models.conversation import (
     Conversation,
     ConversationDetail,
@@ -71,55 +70,57 @@ from harness.models.events import (
     WorkspaceUpdatedPayload,
 )
 from harness.models.intent import DeliveryContract, DeliverySource, validate_delivery_contract_input
-from harness.models.workspace import Workspace, WorkspaceUpdate
+from harness.models.principal import Principal
+from harness.models.workspace import ExecutionTarget, Workspace, WorkspaceScope, WorkspaceUpdate
 
 _log = guard_logger("serve")
 router = APIRouter(tags=["runs"])
 
-# P1-B: 本地/沙盒执行根的受信基目录。DIRECTORY 的 filesystem_root 与 SANDBOX
-# 的 host_mount_src 必须解析到该目录之内，防止任意租户把 Agent 的文件操作
-# 指向宿主任意路径（C:\\、/etc、用户目录等）。可用环境变量覆盖。
-WORKSPACE_BASE_DIR = Path(os.environ.get("JAGENT_WORKSPACE_BASE_DIR", "data/workspaces")).resolve()
 
-# 契约提取单次调用超时（秒）。抽取在 scheduler 首轮 plan 前（run 内）执行，
-# 不再占用 API 请求时间（create_run/send_message 立即返回 run_id）。
-# 该上限约束 run 内等待；超时 → contracts=[] + unverified（D-04 兜底）。
-# 定义于 harness.core.contract_extractor，供 scheduler 使用。
+class WhoAmIResponse(BaseModel):
+    subject: str
+    tenant_id: str
+    roles: list[str]
+    expires_at: int | None = None
 
 
-async def _validate_workspace_scope(scope) -> None:
-    target = scope.target
-    if target.type.value == "remote":
-        if target.private_key_path:
-            is_file = await asyncio.to_thread(Path(target.private_key_path).is_file)
-            if not is_file:
-                raise HTTPException(status_code=422, detail="remote private_key_path must point to an existing file")
-        return
-    root_value = target.filesystem_root if target.type.value == "directory" else target.host_mount_src
-    if not root_value:
-        raise HTTPException(status_code=422, detail=f"{target.type.value} target requires a filesystem root")
+@router.get("/api/v1/auth/whoami", response_model=WhoAmIResponse, tags=["auth"])
+async def whoami(principal: Principal = Depends(get_principal)) -> WhoAmIResponse:
+    return WhoAmIResponse(
+        subject=principal.subject,
+        tenant_id=principal.tenant_id,
+        roles=sorted(role.value for role in principal.roles),
+        expires_at=principal.expires_at,
+    )
 
-    # 与 LocalDirectoryBackend / DockerSandboxBackend 相同的解析语义：
-    # 相对路径按进程 CWD resolve 后再做包含性校验，避免"校验通过但实际
-    # 落在基目录之外"。
-    def _assert_within_base() -> None:
-        resolved = Path(root_value).expanduser().resolve()
-        try:
-            resolved.relative_to(WORKSPACE_BASE_DIR)
-        except ValueError as exc:
-            raise PermissionError(
-                f"Execution root '{root_value}' must be inside the workspace base directory {WORKSPACE_BASE_DIR}"
-            ) from exc
+# P1-B / ADR-015: 执行根必须绑定到当前租户目录，基目录本身、租户目录本身
+# 和其它租户目录都不允许，防止经 file_op 跨租户读写。远程 SSH 私钥同样
+# 绑定到租户专属密钥目录，避免 private_key_path 读取任意宿主文件。
 
+
+async def _assert_workspace_target(target: ExecutionTarget, tenant_id: str) -> None:
     try:
-        await asyncio.to_thread(_assert_within_base)
-    except PermissionError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        await asyncio.to_thread(validate_workspace_target, target, tenant_id)
+    except WorkspaceRootError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _validate_workspace_scope(scope: WorkspaceScope, tenant_id: str) -> None:
+    await _assert_workspace_target(scope.target, tenant_id)
+
+
+async def _validate_workspace_runtime(workspace: Workspace, tenant_id: str) -> None:
+    """Re-check a stored workspace before it is used to start a run.
+
+    Creation/update already validates, but a pre-existing row (or a direct DB
+    write) must not become a cross-tenant execution root.
+    """
+    await _assert_workspace_target(workspace.scope.target, tenant_id)
 
 
 @router.post("/api/v1/workspaces", response_model=WorkspaceResponse, status_code=201, tags=["workspaces"])
 async def create_workspace(body: CreateWorkspaceRequest, api: HarnessAPI = Depends(get_hapi)):
-    await _validate_workspace_scope(body.scope)
+    await _validate_workspace_scope(body.scope, api.store.tenant_id)
     now = time.time()
     workspace = Workspace(
         workspace_id=f"ws_{uuid.uuid4().hex[:12]}",
@@ -180,7 +181,7 @@ async def update_workspace(workspace_id: str, body: WorkspaceUpdate, api: Harnes
     if before is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     if body.scope is not None:
-        await _validate_workspace_scope(body.scope)
+        await _validate_workspace_scope(body.scope, api.store.tenant_id)
     after = await api.store.update_workspace(workspace_id, body)
     assert after is not None
     changed = list(body.model_dump(exclude_unset=True))
@@ -316,6 +317,7 @@ async def create_run(body: CreateRunRequest, api: HarnessAPI = Depends(get_hapi)
         workspace = await api.ensure_default_workspace()
     if workspace is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    await _validate_workspace_runtime(workspace, api.store.tenant_id)
     if body.conversation_id:
         conv = await api.store.get_conversation(body.conversation_id)
         if conv:
@@ -442,6 +444,10 @@ async def pause_run(
     api: HarnessAPI = Depends(get_hapi),
 ):
     """Pause a running run. Writes RunPaused event and halts the scheduler loop."""
+    events = await api.store.get_events(run_id)
+    if not events:
+        raise HTTPException(status_code=404, detail="Run not found")
+
     scheduler = api._schedulers.get(run_id)
     if scheduler:
         ok = await scheduler.pause(run_id)
@@ -456,9 +462,6 @@ async def pause_run(
         # same zombie class as the resume path. After restart the startup orphan
         # sweep terminates such runs as FAILED; a live run always has a
         # scheduler. Fail closed rather than record an unenforceable pause.
-        events = await api.store.get_events(run_id)
-        if not events:
-            raise HTTPException(status_code=404, detail="Run not found")
         return JSONResponse(
             status_code=409,
             content={
@@ -474,6 +477,10 @@ async def pause_run(
 @router.post("/api/v1/runs/{run_id}/resume", response_model=RunControlResponse)
 async def resume_run(run_id: str, api: HarnessAPI = Depends(get_hapi)):
     """Resume a paused run. Writes RunResumed event and wakes the scheduler loop."""
+    events = await api.store.get_events(run_id)
+    if not events:
+        raise HTTPException(status_code=404, detail="Run not found")
+
     scheduler = api._schedulers.get(run_id)
     if scheduler:
         ok = await scheduler.resume(run_id)
@@ -489,9 +496,6 @@ async def resume_run(run_id: str, api: HarnessAPI = Depends(get_hapi)):
         # scheduler therefore cannot be driven forward — writing a RunResumed
         # event here would create a fake-RUNNING zombie with nobody executing it.
         # Fail closed and tell the operator to re-submit the task.
-        events = await api.store.get_events(run_id)
-        if not events:
-            raise HTTPException(status_code=404, detail="Run not found")
         return JSONResponse(
             status_code=409,
             content={
@@ -505,7 +509,12 @@ async def resume_run(run_id: str, api: HarnessAPI = Depends(get_hapi)):
 
 
 @router.post("/api/v1/runs/{run_id}/confirm", response_model=ConfirmationResponse)
-async def confirm_run(run_id: str, body: ConfirmRequest, api: HarnessAPI = Depends(get_hapi)):
+async def confirm_run(
+    run_id: str,
+    body: ConfirmRequest,
+    api: HarnessAPI = Depends(get_hapi),
+    principal: Principal = Depends(get_principal),
+):
     """Submit an operator confirmation decision. Idempotent per confirmation_id."""
     events = await api.store.get_events(run_id)
     if not events:
@@ -550,7 +559,7 @@ async def confirm_run(run_id: str, body: ConfirmRequest, api: HarnessAPI = Depen
         ConfirmationReceivedPayload(
             confirmation_id=body.confirmation_id,
             confirmed=body.confirmed,
-            operator_id=body.operator_id,
+            operator_id=principal.subject,
             step_id=requested.step_id,
         ).model_dump(),
         idempotency_key=f"confirm_{body.confirmation_id}",
@@ -762,6 +771,7 @@ async def send_message(
         workspace = await api.ensure_default_workspace()
     if workspace is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    await _validate_workspace_runtime(workspace, api.store.tenant_id)
     conversation_context = await _build_conversation_context(api.store, conversation_id)
 
     contract_request = CreateRunRequest(

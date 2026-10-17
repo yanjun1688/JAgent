@@ -5,6 +5,33 @@
     "version": "0.3.0"
   },
   "paths": {
+    "/api/v1/auth/whoami": {
+      "get": {
+        "tags": [
+          "runs",
+          "auth"
+        ],
+        "summary": "Whoami",
+        "operationId": "whoami_api_v1_auth_whoami_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmIResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces": {
       "post": {
         "tags": [
@@ -13,6 +40,11 @@
         ],
         "summary": "Create Workspace",
         "operationId": "create_workspace_api_v1_workspaces_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -53,6 +85,11 @@
         ],
         "summary": "List Workspaces",
         "operationId": "list_workspaces_api_v1_workspaces_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "limit",
@@ -114,6 +151,11 @@
         ],
         "summary": "Get Workspace",
         "operationId": "get_workspace_api_v1_workspaces__workspace_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "workspace_id",
@@ -155,6 +197,11 @@
         ],
         "summary": "Update Workspace",
         "operationId": "update_workspace_api_v1_workspaces__workspace_id__patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "workspace_id",
@@ -206,6 +253,11 @@
         ],
         "summary": "Delete Workspace",
         "operationId": "delete_workspace_api_v1_workspaces__workspace_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "workspace_id",
@@ -249,6 +301,11 @@
         ],
         "summary": "Get Workspace Events",
         "operationId": "get_workspace_events_api_v1_workspaces__workspace_id__events_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "workspace_id",
@@ -319,6 +376,11 @@
         "summary": "List Runs",
         "description": "List all runs with folded state summary, ordered by most recent.",
         "operationId": "list_runs_api_v1_runs_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "limit",
@@ -396,6 +458,11 @@
         "summary": "Create Run",
         "description": "Create a new run and write the RunStarted event.\n\n写入 RunStarted 后立即通过 start_run() 拉起 PlanningExecutorScheduler 的后台循环。\nScheduler 自动执行 plan→execute→revise，事件写入后通过 WebSocket 广播。\nAPI 响应不等待 Scheduler 完成——循环运行在 asyncio.Task 中。\n注：当 Planner 生成 Plan 失败时，Run 直接诚实判失败（不再降级到串行轨道）。",
         "operationId": "create_run_api_v1_runs_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -438,6 +505,11 @@
         "summary": "Get Run",
         "description": "Get the folded state snapshot of a single run.",
         "operationId": "get_run_api_v1_runs__run_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -479,6 +551,11 @@
         "summary": "Delete Run",
         "description": "Cancel a run and write a RunFailed termination event.",
         "operationId": "delete_run_api_v1_runs__run_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -522,6 +599,11 @@
         "summary": "Get Run Events",
         "description": "Get the event stream for a run, optionally from a given seq.",
         "operationId": "get_run_events_api_v1_runs__run_id__events_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -605,6 +687,11 @@
         "summary": "Pause Run",
         "description": "Pause a running run. Writes RunPaused event and halts the scheduler loop.",
         "operationId": "pause_run_api_v1_runs__run_id__pause_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -665,6 +752,11 @@
         "summary": "Resume Run",
         "description": "Resume a paused run. Writes RunResumed event and wakes the scheduler loop.",
         "operationId": "resume_run_api_v1_runs__run_id__resume_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -708,6 +800,11 @@
         "summary": "Confirm Run",
         "description": "Submit an operator confirmation decision. Idempotent per confirmation_id.",
         "operationId": "confirm_run_api_v1_runs__run_id__confirm_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -761,6 +858,11 @@
         "summary": "Operator Feedback",
         "description": "Operator injects manual feedback into a running run.\n\nFeedback goes through EventStore → fold → Scheduler path,\nsame as Monitor-injected feedback.",
         "operationId": "operator_feedback_api_v1_runs__run_id__feedback_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -814,6 +916,11 @@
         "summary": "Create Conversation",
         "description": "Create a new conversation and write ConversationStarted event.",
         "operationId": "create_conversation_api_v1_conversations_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -861,6 +968,11 @@
         "summary": "List Conversations",
         "description": "List all active conversations, ordered by most recent.",
         "operationId": "list_conversations_api_v1_conversations_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "limit",
@@ -922,6 +1034,11 @@
         "summary": "Get Conversation",
         "description": "Get conversation details with message list.",
         "operationId": "get_conversation_api_v1_conversations__conversation_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "conversation_id",
@@ -963,6 +1080,11 @@
         "summary": "Delete Conversation",
         "description": "Soft-delete a conversation (marks as archived).",
         "operationId": "delete_conversation_api_v1_conversations__conversation_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "conversation_id",
@@ -1004,6 +1126,11 @@
         "summary": "Update Conversation",
         "description": "Update conversation title or status.",
         "operationId": "update_conversation_api_v1_conversations__conversation_id__patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "conversation_id",
@@ -1057,6 +1184,11 @@
         "summary": "Send Message",
         "description": "Send a message in a conversation, creating a new Run with context.",
         "operationId": "send_message_api_v1_conversations__conversation_id__messages_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "conversation_id",
@@ -1109,6 +1241,11 @@
         ],
         "summary": "Analysis Dashboard",
         "operationId": "analysis_dashboard_api_v1_analysis_dashboard_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "since",
@@ -1178,6 +1315,11 @@
         ],
         "summary": "Analysis Tool Stats",
         "operationId": "analysis_tool_stats_api_v1_analysis_tools_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "since",
@@ -1247,6 +1389,11 @@
         ],
         "summary": "Analysis Guardrail Stats",
         "operationId": "analysis_guardrail_stats_api_v1_analysis_guardrails_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "since",
@@ -1316,6 +1463,11 @@
         ],
         "summary": "Analysis Run Detail",
         "operationId": "analysis_run_detail_api_v1_analysis_runs__run_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -1358,6 +1510,11 @@
         ],
         "summary": "Analysis Run Timeline",
         "operationId": "analysis_run_timeline_api_v1_analysis_runs__run_id__timeline_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -1425,6 +1582,11 @@
         ],
         "summary": "Analysis Run Tool Traces",
         "operationId": "analysis_run_tool_traces_api_v1_analysis_runs__run_id__tool_traces_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -1476,7 +1638,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
       }
     },
     "/api/v1/replay/runs/{run_id}/meta": {
@@ -1486,6 +1653,11 @@
         ],
         "summary": "Replay Run Meta",
         "operationId": "replay_run_meta_api_v1_replay_runs__run_id__meta_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -1528,6 +1700,11 @@
         ],
         "summary": "Replay Run Timeline",
         "operationId": "replay_run_timeline_api_v1_replay_runs__run_id__timeline_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -1595,6 +1772,11 @@
         ],
         "summary": "Replay Run State",
         "operationId": "replay_run_state_api_v1_replay_runs__run_id__state_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -1656,6 +1838,11 @@
         ],
         "summary": "Replay Run Diff",
         "operationId": "replay_run_diff_api_v1_replay_runs__run_id__diff_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "run_id",
@@ -4219,6 +4406,43 @@
         ],
         "title": "ValidationError"
       },
+      "WhoAmIResponse": {
+        "properties": {
+          "subject": {
+            "type": "string",
+            "title": "Subject"
+          },
+          "tenant_id": {
+            "type": "string",
+            "title": "Tenant Id"
+          },
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Roles"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "subject",
+          "tenant_id",
+          "roles"
+        ],
+        "title": "WhoAmIResponse"
+      },
       "WorkspaceListResponse": {
         "properties": {
           "workspaces": {
@@ -4355,6 +4579,12 @@
         },
         "type": "object",
         "title": "WorkspaceUpdate"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
       }
     }
   }

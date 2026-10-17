@@ -27,6 +27,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from harness.api.app import app  # noqa: F401
+from harness.api.auth import JwtAuthProvider, configure_auth_provider
 from harness.api.deps import HarnessAPI, configure_hapi
 from harness.api.loop import configure_event_loop_policy
 from harness.core.context_manager import ContextManager
@@ -47,6 +48,15 @@ from harness.tools.registry import ToolRegistry
 configure_event_loop_policy()
 
 _logger = guard_logger("serve")
+
+# Fail closed: there is no anonymous deployment mode. Invalid/missing JWT
+# configuration aborts startup instead of serving the control plane openly.
+configure_auth_provider(JwtAuthProvider.from_env())
+
+if os.environ.get("JAGENT_DOCS_ENABLED", "true").strip().lower() in {"0", "false", "no"}:
+    app.docs_url = None
+    app.redoc_url = None
+    app.openapi_url = None
 
 
 class _RoleFormatter(logging.Formatter):

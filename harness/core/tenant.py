@@ -1,31 +1,59 @@
-"""Request-scoped tenant identity."""
+"""Request-scoped authenticated identity and tenant helpers."""
 
+from __future__ import annotations
+
+import hashlib
 import re
 from contextvars import ContextVar, Token
 
-current_tenant: ContextVar[str] = ContextVar("current_tenant", default="default")
+from harness.models.principal import Principal
+
+# Single source of truth for what a tenant id may look like. The first and
+# last characters must be alphanumeric, so ".", "..", "acme." and ".acme"
+# cannot become valid identities (they would otherwise be rewritten into a
+# different directory component).
+TENANT_ID_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9])?$")
+
+current_principal: ContextVar[Principal | None] = ContextVar("current_principal", default=None)
 
 
-def set_current_tenant(tenant_id: str) -> Token[str]:
-    normalized = tenant_id.strip()
-    if not normalized:
-        normalized = "default"
-    if len(normalized) > 128:
-        raise ValueError("tenant_id must be a non-empty value of at most 128 characters")
-    return current_tenant.set(normalized)
+def set_current_principal(principal: Principal) -> Token[Principal | None]:
+    return current_principal.set(principal)
 
 
-def reset_current_tenant(token: Token[str]) -> None:
-    current_tenant.reset(token)
+def reset_current_principal(token: Token[Principal | None]) -> None:
+    current_principal.reset(token)
+
+
+def get_current_principal() -> Principal | None:
+    return current_principal.get()
+
+
+def current_tenant_id() -> str:
+    principal = current_principal.get()
+    if principal is None:
+        raise RuntimeError("No authenticated principal in context")
+    return principal.tenant_id
+
+
+def current_tenant_id_or_none() -> str | None:
+    principal = current_principal.get()
+    return principal.tenant_id if principal is not None else None
 
 
 def safe_tenant_dir_component(tenant_id: str) -> str:
-    """Sanitize a tenant id into a safe single path component.
+    """Map a tenant id to an injective, single-component directory name.
 
-    Used to build per-tenant filesystem roots so two tenants can never share
-    (or escape) the same on-disk directory. Rejects traversal components and
-    any character outside [A-Za-z0-9_.-].
+    Valid tenant ids (``TENANT_ID_RE``) pass through unchanged. Anything that
+    had to be rewritten (invalid characters, leading/trailing dots, overlong
+    values, legacy data) gets a short hash suffix, so two distinct tenant ids
+    can never silently share one directory.
     """
-    value = re.sub(r"[^A-Za-z0-9_.-]", "_", tenant_id)
+    raw = tenant_id
+    value = re.sub(r"[^A-Za-z0-9_.-]", "_", raw)
     value = value.strip(".")
-    return (value[:64] or "tenant").strip(".") or "tenant"
+    value = (value[:64] or "tenant").strip(".") or "tenant"
+    if value != raw:
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+        value = f"{value[:48]}_{digest}"
+    return value

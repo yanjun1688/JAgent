@@ -12,6 +12,7 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "websockets>=12",
+    "pyjwt[crypto]>=2.8",
     "langfuse>=2.0.0",
 ]
 

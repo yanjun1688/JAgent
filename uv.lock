@@ -547,6 +547,7 @@ dependencies = [
     { name = "langfuse" },
     { name = "mcp" },
     { name = "pydantic" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "uvicorn", extra = ["standard"] },
     { name = "websockets" },
 ]
@@ -572,6 +573,7 @@ requires-dist = [
     { name = "langfuse", specifier = ">=2.0.0" },
     { name = "mcp", specifier = ">=1.0" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
     { name = "websockets", specifier = ">=12" },
 ]

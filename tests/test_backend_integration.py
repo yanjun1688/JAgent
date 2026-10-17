@@ -26,6 +26,7 @@ from harness.models.events import (
 )
 from harness.storage.event_store import EventStore
 from harness.tools.executor import ToolExecutor
+from tests.support.auth import auth_headers
 
 
 @pytest.fixture
@@ -44,9 +45,9 @@ def directory_scope(root: str | None = None) -> dict:
     # 跨平台：默认 root 从受信 WORKSPACE_BASE_DIR 派生，保证通过基目录包含性校验，
     # 不写死仅存在于开发机的 Windows 绝对路径（Linux CI 上会被判在基目录外 → 422）。
     if root is None:
-        from harness.api.routes import WORKSPACE_BASE_DIR
+        from harness.execution.boundary import WORKSPACE_BASE_DIR
 
-        root = str(WORKSPACE_BASE_DIR / "integration" / "work")
+        root = str(WORKSPACE_BASE_DIR / "default" / "integration" / "work")
     return {"target": {"type": "directory", "filesystem_root": root}}
 
 
@@ -198,42 +199,48 @@ class TestAnalysisQueryIntegration:
 
 
 class TestTenantAndWebSocketIntegration:
-    async def test_empty_tenant_header_falls_back_to_default(self, backend):
-        """Bug A 回归（P1-13 13.3）：空 `X-Tenant-Id: ""` 必须回退 default，
-        不得触发 `set_current_tenant("")` 的 ValueError → 500。"""
+    async def test_empty_tenant_header_does_not_change_identity(self, backend):
+        """X-Tenant-Id is no longer an identity source (ADR-015)."""
         _, store, client = backend
         response = await client.post(
             "/api/v1/runs",
-            headers={"X-Tenant-Id": ""},
+            headers={**auth_headers("tenant-a"), "X-Tenant-Id": ""},
             json={"intent": "list"},
         )
         assert response.status_code == 200, response.text
         run_id = response.json()["run_id"]
         events = await store.get_events(run_id)
-        assert events and events[0].tenant_id == "default"
+        assert events and events[0].tenant_id == "tenant-a"
 
-    async def test_blank_tenant_header_falls_back_to_default(self, backend):
-        _, _, client = backend
+    async def test_blank_tenant_header_does_not_change_identity(self, backend):
+        _, store, client = backend
         response = await client.post(
             "/api/v1/runs",
-            headers={"X-Tenant-Id": "   "},
+            headers={**auth_headers("tenant-a"), "X-Tenant-Id": "   "},
             json={"intent": "list"},
         )
         assert response.status_code == 200, response.text
+        events = await store.get_events(response.json()["run_id"])
+        assert events and events[0].tenant_id == "tenant-a"
 
     async def test_tenant_header_isolation_applies_to_http_storage(self, backend):
         _, _, client = backend
+        from harness.execution.boundary import WORKSPACE_BASE_DIR
+
         created = await client.post(
             "/api/v1/workspaces",
-            headers={"X-Tenant-Id": "tenant-a"},
-            json={"name": "same-name", "scope": directory_scope()},
+            headers=auth_headers("tenant-a"),
+            json={
+                "name": "same-name",
+                "scope": directory_scope(str(WORKSPACE_BASE_DIR / "tenant-a" / "work")),
+            },
         )
         assert created.status_code == 201
         workspace_id = created.json()["workspace_id"]
 
-        hidden = await client.get(f"/api/v1/workspaces/{workspace_id}", headers={"X-Tenant-Id": "tenant-b"})
+        hidden = await client.get(f"/api/v1/workspaces/{workspace_id}", headers=auth_headers("tenant-b"))
         assert hidden.status_code == 404
-        visible = await client.get(f"/api/v1/workspaces/{workspace_id}", headers={"X-Tenant-Id": "tenant-a"})
+        visible = await client.get(f"/api/v1/workspaces/{workspace_id}", headers=auth_headers("tenant-a"))
         assert visible.status_code == 200
 
     async def test_websocket_broadcast_crosses_event_store_callback(self, backend):

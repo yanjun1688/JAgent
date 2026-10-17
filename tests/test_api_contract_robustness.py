@@ -40,9 +40,9 @@ def directory_scope() -> dict:
     # 跨平台：filesystem_root 必须落在受信 WORKSPACE_BASE_DIR 之内，否则
     # _validate_workspace_scope 返回 422。不能写死 Windows 绝对路径（Linux CI 上
     # 会解析到基目录之外）。子目录无需预先存在，校验只做包含性判断。
-    from harness.api.routes import WORKSPACE_BASE_DIR
+    from harness.execution.boundary import WORKSPACE_BASE_DIR
 
-    root = WORKSPACE_BASE_DIR / "test" / "work"
+    root = WORKSPACE_BASE_DIR / "default" / "test" / "work"
     return {"target": {"type": "directory", "filesystem_root": str(root)}}
 
 
@@ -154,7 +154,7 @@ class TestRequestBoundaries:
         inside = {
             "name": "inside",
             "scope": {
-                "target": {"type": "directory", "filesystem_root": "data/workspaces/inside/work"}
+                "target": {"type": "directory", "filesystem_root": "data/workspaces/default/inside/work"}
             },
         }
         response = await client.post("/api/v1/workspaces", json=inside)

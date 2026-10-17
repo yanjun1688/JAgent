@@ -11,6 +11,10 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from harness.api.auth.principal import Principal, Role
+from harness.core.tenant import reset_current_principal, set_current_principal
 from harness.models.browser import BrowserConfig, BrowserMode
 from harness.models.tools import SideEffect
 from harness.tools.browser_command import BrowserCommandNotFoundError
@@ -93,6 +97,20 @@ def _patch_spawn(pool: BrowserPool, session: AsyncMock, tool_names: list[str]) -
 
 def _run_sync(tool: BrowserMcpTool, input: dict) -> dict:
     return asyncio.run(tool.run(input))
+
+
+@pytest.fixture(autouse=True)
+def _browser_principal():
+    token = set_current_principal(
+        Principal(
+            subject="test:browser",
+            tenant_id="default",
+            roles={Role.OPERATOR},
+            auth_method="test",
+        )
+    )
+    yield
+    reset_current_principal(token)
 
 
 class TestBrowserMcpToolRouting:

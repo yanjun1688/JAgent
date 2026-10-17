@@ -17,15 +17,16 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from fastapi import WebSocket
+from fastapi import HTTPException, Request, WebSocket
 
 from harness.core.fold import fold_events
 from harness.core.logger import guard_logger
 from harness.core.scheduler import PlanningExecutorScheduler, SchedulerConfig
-from harness.core.tenant import current_tenant, safe_tenant_dir_component
+from harness.core.tenant import current_principal, safe_tenant_dir_component
+from harness.execution.boundary import WORKSPACE_BASE_DIR
+from harness.models.principal import Principal
 from harness.models.workspace import ExecutionTarget, ExecutionTargetType, Workspace, WorkspaceScope
 from harness.storage.scoped import ScopedEventStore
 
@@ -77,8 +78,11 @@ class HarnessAPI:
 
     @property
     def store(self) -> ScopedEventStore:
-        """Return a store fixed to the current request/task tenant."""
-        return ScopedEventStore(self._raw_store, current_tenant.get())
+        """Return a store fixed to the current authenticated principal's tenant."""
+        principal = current_principal.get()
+        if principal is None:
+            raise RuntimeError("No authenticated principal in context")
+        return ScopedEventStore(self._raw_store, principal.tenant_id)
 
     @property
     def raw_store(self) -> EventStore:
@@ -98,7 +102,7 @@ class HarnessAPI:
         if workspace is not None:
             return workspace
         now = time.time()
-        root = Path("data/workspaces") / safe_tenant_dir_component(scoped.tenant_id) / "default" / "work"
+        root = WORKSPACE_BASE_DIR / safe_tenant_dir_component(scoped.tenant_id) / "default" / "work"
         workspace = Workspace(
             workspace_id=workspace_id,
             tenant_id=scoped.tenant_id,
@@ -319,3 +323,11 @@ def get_hapi() -> HarnessAPI:
     if _hapi is None:
         raise RuntimeError("HarnessAPI not initialized. Call configure_hapi() first.")
     return _hapi
+
+
+def get_principal(request: Request) -> Principal:
+    """Return the principal established by AuthMiddleware (defense in depth)."""
+    principal = getattr(request.state, "principal", None)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return principal

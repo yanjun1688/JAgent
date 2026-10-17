@@ -28,7 +28,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from harness.core.logger import guard_logger
-from harness.core.tenant import current_tenant, safe_tenant_dir_component
+from harness.core.tenant import current_tenant_id_or_none, safe_tenant_dir_component
 from harness.models.browser import BrowserConfig, BrowserMode
 from harness.tools.browser_command import (
     BrowserCommandNotFoundError,
@@ -132,7 +132,9 @@ class BrowserPool:
         tenant_id: str | None = None,
         workspace_id: str | None = None,
     ) -> BrowserLease:
-        tenant_id = tenant_id or current_tenant.get() or "default"
+        tenant_id = tenant_id or current_tenant_id_or_none()
+        if not tenant_id:
+            raise BrowserLeaseUnavailableError("tenant context is required to acquire a browser lease")
         workspace_id = workspace_id or current_workspace_id.get() or "default"
 
         async with self._guard:

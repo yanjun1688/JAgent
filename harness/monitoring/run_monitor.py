@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 from harness.core.fold import fold_events
 from harness.core.logger import fmtkv, monitor_logger
-from harness.core.tenant import current_tenant
+from harness.core.tenant import current_tenant_id
 from harness.models.events import (
     Event,
     EventType,
@@ -143,7 +143,14 @@ class RunMonitor:
                     ),
                 )
                 await self._check_and_inject_feedback(
-                    rid, tool, ep_key, error_type, event.event_type, event.phase, error_detail=error
+                    rid,
+                    tool,
+                    ep_key,
+                    error_type,
+                    event.event_type,
+                    event.phase,
+                    error_detail=error,
+                    tenant_id=event.tenant_id,
                 )
 
         # ── Repeated identical tool call detection ────────────────────────────
@@ -208,7 +215,14 @@ class RunMonitor:
                         ),
                     )
                     await self._check_and_inject_feedback(
-                        rid, tool_name, ep_key, error_type, event.event_type, event.phase, error_detail=err_text
+                        rid,
+                        tool_name,
+                        ep_key,
+                        error_type,
+                        event.event_type,
+                        event.phase,
+                        error_detail=err_text,
+                        tenant_id=event.tenant_id,
                     )
                 _log_anomaly.info(
                     "UNSUCCESSFUL accumulated %s",
@@ -241,7 +255,9 @@ class RunMonitor:
                 _log_anomaly.info(
                     "Endpoint '%s' recovered after %d consecutive failures — sending resolution", ep_key, was
                 )
-                previous_fb_id = await self._find_last_feedback_id(rid, ep_key)
+                previous_fb_id = await self._find_last_feedback_id(
+                    rid, ep_key, tenant_id=event.tenant_id
+                )
                 if previous_fb_id:
                     _log_anomaly.info(
                         "Resolution linking %s",
@@ -260,6 +276,7 @@ class RunMonitor:
                         affected_tool=ep_key,
                         resolves_feedback_id=previous_fb_id,
                         expires_at_seq=event.seq + 10,
+                        tenant_id=event.tenant_id,
                     )
                 else:
                     _log_anomaly.warning(
@@ -301,6 +318,7 @@ class RunMonitor:
                             category=FeedbackCategory.REPEATED_CALL,
                             affected_tool=tool_name,
                             expires_at_seq=event.seq + 50,
+                            tenant_id=event.tenant_id,
                         )
 
     # ── Unified injection logic (per-tool, no dominant derivation) ──────────
@@ -314,6 +332,7 @@ class RunMonitor:
         event_type: EventType,
         phase: str | None,
         error_detail: str = "",
+        tenant_id: str | None = None,
     ) -> None:
         err_map = self._failure_error_map.get(rid, {}).get(tool, {})
         total_errors = sum(err_map.values())
@@ -385,11 +404,16 @@ class RunMonitor:
             error_detail=error_detail,
             suggestion=self._generate_suggestion(tool, error_type),
             expires_at_seq=current_seq + 50,
+            tenant_id=tenant_id,
         )
 
-    async def _find_last_feedback_id(self, rid: str, ep_key: str) -> str | None:
+    async def _find_last_feedback_id(
+        self, rid: str, ep_key: str, tenant_id: str | None = None
+    ) -> str | None:
         try:
-            events = await ScopedEventStore(self.store, current_tenant.get()).get_events(rid)
+            events = await ScopedEventStore(
+                self.store, tenant_id or current_tenant_id()
+            ).get_events(rid)
         except Exception:
             _log_observe.warning("Failed to fetch events for resolution lookup")
             return None
@@ -493,6 +517,7 @@ class RunMonitor:
         suggestion: str | None = None,
         expires_at_seq: int | None = None,
         resolves_feedback_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> str:
         """Write a structured FeedbackInjected event to EventStore."""
         feedback_id = self._compute_feedback_id(run_id, category, affected_tool, error_type)
@@ -510,7 +535,7 @@ class RunMonitor:
             resolves_feedback_id=resolves_feedback_id,
         )
         try:
-            scoped_store = ScopedEventStore(self.store, current_tenant.get())
+            scoped_store = ScopedEventStore(self.store, tenant_id or current_tenant_id())
             await scoped_store.append_event(run_id, EventType.FEEDBACK_INJECTED, payload.model_dump())
             _log_inject.info(
                 "Injected event %s",

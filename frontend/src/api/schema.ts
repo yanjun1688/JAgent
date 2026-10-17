@@ -470,6 +470,13 @@ export interface ValidationError {
   ctx?: Record<string, unknown>
 }
 
+export interface WhoAmIResponse {
+  subject: string
+  tenant_id: string
+  roles: string[]
+  expires_at?: number
+}
+
 export interface WorkspaceListResponse {
   workspaces: WorkspaceResponse[]
   total: number

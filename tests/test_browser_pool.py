@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from harness.core.tenant import safe_tenant_dir_component
 from harness.models.browser import BrowserConfig, BrowserMode
 from harness.models.events import (
     EventType,
@@ -196,7 +197,12 @@ class TestAcquireRelease:
     async def test_output_dir_created_under_tenant_run(self, tmp_path, mcp_fake):
         pool = BrowserPool(make_config(tmp_path))
         await pool.acquire("run-42", tenant_id="Tenant One", workspace_id="ws")
-        out_root = (tmp_path / "out" / "Tenant_One" / "run-42").resolve()
+        out_root = (
+            tmp_path
+            / "out"
+            / safe_tenant_dir_component("Tenant One")
+            / "run-42"
+        ).resolve()
         assert out_root.exists()
 
 

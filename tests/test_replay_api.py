@@ -23,6 +23,7 @@ from harness.storage.event_store import EventStore
 from harness.tools.executor import ToolExecutor
 
 from .replay_fixtures import seed_failed_plan_run
+from tests.support.auth import auth_headers
 
 
 # -- Fixtures (mirrors tests/test_api.py) --
@@ -200,7 +201,7 @@ class TestReplayTenantIsolation:
 
         # The owning tenant can read it.
         ok = await client.get(
-            "/api/v1/replay/runs/secret-run/meta", headers={"X-Tenant-Id": "tenant-a"}
+            "/api/v1/replay/runs/secret-run/meta", headers=auth_headers("tenant-a")
         )
         assert ok.status_code == 200
         assert ok.json()["status"] == "failed"

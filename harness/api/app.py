@@ -18,17 +18,17 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Security
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer
 
 from harness.api.analysis_routes import router as analysis_router
+from harness.api.auth import DEFAULT_POLICY, AuthMiddleware
 from harness.api.deps import HarnessAPI, configure_hapi, get_hapi
 from harness.api.replay_routes import router as replay_router
 from harness.api.routes import router as routes_router
 from harness.api.ws import router as ws_router
 from harness.core.lifecycle import mark_orphans
-from harness.core.tenant import reset_current_tenant, set_current_tenant
 from harness.models.mcp_config import MCPConfig
 from harness.models.workspace import ExecutionTarget, ExecutionTargetType, Workspace, WorkspaceScope
 from harness.tools.http_request import close_client as close_http_client
@@ -172,12 +172,21 @@ async def lifespan(app: FastAPI):
 
 # ── App assembly ──────────────────────────────────────────────
 
+bearer_scheme = HTTPBearer(auto_error=False)
+
 app = FastAPI(
     title="Harness API",
     version="0.3.0",
     lifespan=lifespan,
 )
 
+# Fail closed until serve.py installs the production JWT provider (or a test
+# fixture installs a test provider). No env/header can enable anonymous access.
+app.state.auth_provider = None
+
+# Starlette executes the last-added middleware first: CORS must be outermost
+# so preflight requests are not rejected by AuthMiddleware.
+app.add_middleware(AuthMiddleware, policy=DEFAULT_POLICY, public_paths=("/health",))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -187,19 +196,12 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def tenant_context_middleware(request: Request, call_next):
-    try:
-        token = set_current_tenant(request.headers.get("X-Tenant-Id") or "default")
-    except ValueError:
-        return JSONResponse(status_code=400, content={"detail": "invalid tenant id"})
-    try:
-        return await call_next(request)
-    finally:
-        reset_current_tenant(token)
+@app.get("/health", include_in_schema=False)
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 
-app.include_router(routes_router)
+app.include_router(routes_router, dependencies=[Security(bearer_scheme)])
 app.include_router(ws_router)
-app.include_router(analysis_router)
-app.include_router(replay_router)
+app.include_router(analysis_router, dependencies=[Security(bearer_scheme)])
+app.include_router(replay_router, dependencies=[Security(bearer_scheme)])

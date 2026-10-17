@@ -7,12 +7,23 @@ from pathlib import Path
 
 import pytest
 
+from harness.api.auth.principal import Principal, Role
 from harness.api.deps import HarnessAPI
-from harness.core.tenant import reset_current_tenant, set_current_tenant
+from harness.core.tenant import reset_current_principal, set_current_principal
+from harness.execution.boundary import WORKSPACE_BASE_DIR
 from harness.models.events import EventType, RunStartedPayload
 from harness.models.workspace import ExecutionTarget, ExecutionTargetType, Workspace, WorkspaceScope, WorkspaceUpdate
 from harness.storage.event_store import EventStore
 from harness.storage.scoped import ScopedEventStore
+
+
+def _principal(tenant_id: str) -> Principal:
+    return Principal(
+        subject=f"test:{tenant_id}",
+        tenant_id=tenant_id,
+        roles={Role.ADMIN},
+        auth_method="test",
+    )
 
 
 def make_workspace(tenant_id: str, name: str = "work") -> Workspace:
@@ -158,17 +169,17 @@ async def test_ensure_default_workspace_is_isolated_per_tenant():
         await api.raw_store.ensure_tenant("tenant-a")
         await api.raw_store.ensure_tenant("tenant-b")
 
-        token_a = set_current_tenant("tenant-a")
+        token_a = set_current_principal(_principal("tenant-a"))
         try:
             ws_a = await api.ensure_default_workspace()
         finally:
-            reset_current_tenant(token_a)
+            reset_current_principal(token_a)
 
-        token_b = set_current_tenant("tenant-b")
+        token_b = set_current_principal(_principal("tenant-b"))
         try:
             ws_b = await api.ensure_default_workspace()
         finally:
-            reset_current_tenant(token_b)
+            reset_current_principal(token_b)
 
         assert ws_a.tenant_id == "tenant-a"
         assert ws_b.tenant_id == "tenant-b"
@@ -176,8 +187,16 @@ async def test_ensure_default_workspace_is_isolated_per_tenant():
         root_a = Path(ws_a.scope.target.filesystem_root).resolve()
         root_b = Path(ws_b.scope.target.filesystem_root).resolve()
         assert root_a != root_b
+        assert root_a.is_relative_to(WORKSPACE_BASE_DIR / "tenant-a")
+        assert root_b.is_relative_to(WORKSPACE_BASE_DIR / "tenant-b")
+        assert root_a != WORKSPACE_BASE_DIR / "tenant-a"
+        assert root_b != WORKSPACE_BASE_DIR / "tenant-b"
         # 各自无法看到对方的工作区
-        assert await api.store.get_workspace(ws_b.workspace_id) is None
+        token_a = set_current_principal(_principal("tenant-a"))
+        try:
+            assert await api.store.get_workspace(ws_b.workspace_id) is None
+        finally:
+            reset_current_principal(token_a)
     finally:
         await store.close()
 
@@ -215,18 +234,18 @@ async def test_cross_tenant_workspace_id_collision_does_not_leak():
         with pytest.raises(sqlite3.IntegrityError):
             await api.raw_store.create_workspace(make_ws("tenant-b"))
         # scoped facade 同样失败（含返回值复核路径）
-        token_b = set_current_tenant("tenant-b")
+        token_b = set_current_principal(_principal("tenant-b"))
         try:
             with pytest.raises(sqlite3.IntegrityError):
                 await api.store.create_workspace(make_ws("tenant-b"))
         finally:
-            reset_current_tenant(token_b)
+            reset_current_principal(token_b)
         # 租户 B 通过 ensure_default_workspace 得到的是自己的 default-tenant-b，而非 A 的 "default"
-        token_b = set_current_tenant("tenant-b")
+        token_b = set_current_principal(_principal("tenant-b"))
         try:
             ws_b = await api.ensure_default_workspace()
         finally:
-            reset_current_tenant(token_b)
+            reset_current_principal(token_b)
         assert ws_b.workspace_id == "default-tenant-b"
         assert ws_b.tenant_id == "tenant-b"
     finally:
