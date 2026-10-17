@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from harness.core.logger import agent_logger
+from harness.core.tenant import current_tenant_id_or_none
 from harness.models.tools import Guardrail, SideEffect, SuccessIndicator, ToolDefinition
 from harness.tools.base import BaseTool
 
@@ -68,6 +69,7 @@ async def mcp_call_fn(input: dict[str, Any], *, manager: Any = None) -> dict[str
     server_name = input.get("server_name")
     tool_name = input["tool_name"]
     arguments = input.get("arguments", {})
+    tenant_id = current_tenant_id_or_none()
 
     manager = manager or get_manager()
     if manager is None:
@@ -75,7 +77,13 @@ async def mcp_call_fn(input: dict[str, Any], *, manager: Any = None) -> dict[str
         return {"success": False, "error": "MCP Manager not initialized. No MCP servers configured."}
 
     if server_name:
-        session = manager.get_session(server_name)
+        if manager.is_tenant_scoped(server_name) and tenant_id is None:
+            _logger.warning("mcp_call failed: tenant context required for '%s'", server_name)
+            return {
+                "success": False,
+                "error": f"MCP server '{server_name}' requires an authenticated tenant context.",
+            }
+        session = await manager.get_session_for_tenant(server_name, tenant_id)
         if session is None:
             _logger.warning("mcp_call failed: unknown server '%s'", server_name)
             return {
@@ -83,17 +91,23 @@ async def mcp_call_fn(input: dict[str, Any], *, manager: Any = None) -> dict[str
                 "error": f"No active MCP session for server '{server_name}'.",
             }
     else:
-        servers = manager.server_names
+        servers = manager.available_server_names(tenant_id)
         if not servers:
             _logger.warning("mcp_call failed: no sessions")
             return {"success": False, "error": "No active MCP sessions. Configure MCP servers first."}
-        session = manager.get_session(servers[0])
         server_name = servers[0]
+        session = await manager.get_session_for_tenant(server_name, tenant_id)
+        if session is None:
+            _logger.warning("mcp_call failed: could not open session for '%s'", server_name)
+            return {
+                "success": False,
+                "error": f"No active MCP session for server '{server_name}'.",
+            }
 
     _logger.info("mcp_call %s/%s args=%s", server_name, tool_name, str(arguments))
 
     try:
-        available_tools = manager.get_tool_names(server_name)
+        available_tools = manager.get_tool_names_for_tenant(server_name, tenant_id)
         if available_tools and tool_name not in available_tools:
             prefixed = f"{server_name}/{tool_name}"
             if "/" not in tool_name and prefixed in available_tools:
@@ -156,7 +170,7 @@ async def connect_mcp_server(
         set_manager(manager)
 
     cfg = MCPConnectionConfig(name=server_name, command=command, url=url, enabled=True)
-    result = await manager.connect_server(cfg)
+    result = await manager.connect_server(cfg, tenant_id=current_tenant_id_or_none())
     return result
 
 

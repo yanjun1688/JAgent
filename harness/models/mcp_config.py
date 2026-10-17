@@ -16,6 +16,9 @@ class MCPConnectionConfig(BaseModel):
     environment: dict[str, str] = Field(default_factory=dict)
     auto_register_tools: bool = False
     timeout_ms: int = 120000
+    # Tenant-scoped servers are connected lazily per tenant; their environment
+    # values may reference {tenant_id} and {tenant_state_dir}.
+    tenant_scoped: bool = False
 
 
 class MCPConfig(BaseModel):

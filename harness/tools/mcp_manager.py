@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
@@ -10,10 +12,18 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 
 from harness.core.logger import agent_logger
+from harness.core.tenant import safe_tenant_dir_component
 from harness.models.mcp_config import MCPConfig, MCPConnectionConfig
 from harness.tools.registry import ToolRegistry
 
 _logger = agent_logger("mcp.manager")
+
+_TENANT_SCOPED_SEPARATOR = "@"
+_TENANT_DISCOVERY_ID = "__mcp_discovery__"
+
+
+def _mcp_state_dir() -> Path:
+    return Path(os.environ.get("JAGENT_MCP_STATE_DIR", "data/mcp"))
 
 
 @dataclass
@@ -58,12 +68,28 @@ class MCPServerManager:
         self.config = config
         self.registry = registry
         self._sessions: dict[str, _MCPSession] = {}
+        self._tenant_connect_lock = asyncio.Lock()
 
     async def start_all(self) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for cfg in self.config.servers:
             if not cfg.enabled:
                 _logger.info("MCP server '%s' is disabled, skipping", cfg.name)
+                continue
+            if cfg.tenant_scoped:
+                _logger.info(
+                    "MCP server '%s' is tenant-scoped; connecting lazily per tenant",
+                    cfg.name,
+                )
+                # Discover the tool surface for mcp_call's prompt, then close
+                # the transient session: tenant data must never live in a
+                # process shared by all tenants.
+                discovery = await self.connect_server(cfg, tenant_id=_TENANT_DISCOVERY_ID)
+                if discovery.get("success"):
+                    await self.disconnect_server(
+                        f"{cfg.name}{_TENANT_SCOPED_SEPARATOR}{_TENANT_DISCOVERY_ID}"
+                    )
+                results.append(discovery)
                 continue
             result = await self.connect_server(cfg)
             results.append(result)
@@ -76,15 +102,37 @@ class MCPServerManager:
             except BaseException:
                 _logger.warning("Error disconnecting MCP server '%s' during shutdown", name)
 
-    async def connect_server(self, cfg: MCPConnectionConfig) -> dict[str, Any]:
+    async def connect_server(
+        self,
+        cfg: MCPConnectionConfig,
+        *,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any]:
+        session_name = cfg.name
+        effective_cfg = cfg
         try:
-            if cfg.command:
-                mcp_sess = await asyncio.wait_for(
-                    self._connect_stdio(cfg),
-                    timeout=cfg.timeout_ms / 1000,
+            if cfg.tenant_scoped:
+                if not tenant_id:
+                    return {
+                        "name": cfg.name,
+                        "success": False,
+                        "error": f"MCP server '{cfg.name}' is tenant-scoped and requires a tenant context",
+                    }
+                effective_cfg = cfg.model_copy(
+                    update={
+                        "environment": self._tenant_environment(cfg, tenant_id),
+                        "name": f"{cfg.name}{_TENANT_SCOPED_SEPARATOR}{tenant_id}",
+                    }
                 )
-            elif cfg.url:
-                mcp_sess = await self._connect_sse(cfg)
+                session_name = effective_cfg.name
+
+            if effective_cfg.command:
+                mcp_sess = await asyncio.wait_for(
+                    self._connect_stdio(effective_cfg),
+                    timeout=effective_cfg.timeout_ms / 1000,
+                )
+            elif effective_cfg.url:
+                mcp_sess = await self._connect_sse(effective_cfg)
             else:
                 return {"name": cfg.name, "success": False, "error": "Either command or url must be provided"}
 
@@ -92,11 +140,11 @@ class MCPServerManager:
             # but tests may mock it to return a raw ClientSession.
             if not isinstance(mcp_sess, _MCPSession):
                 mcp_sess = _MCPSession(
-                    name=cfg.name,
+                    name=session_name,
                     session=mcp_sess,
                 )
 
-            self._sessions[cfg.name] = mcp_sess
+            self._sessions[session_name] = mcp_sess
 
             tools_result = await mcp_sess.session.list_tools()
             tools_info = [
@@ -112,27 +160,37 @@ class MCPServerManager:
 
             _logger.debug(
                 "Connected MCP server '%s': %d tools",
-                cfg.name,
+                session_name,
                 len(tools_info),
             )
 
-            if cfg.auto_register_tools and self.registry is not None:
-                self._register_tools(cfg.name, tools_result.tools)
+            if effective_cfg.auto_register_tools and self.registry is not None and not effective_cfg.tenant_scoped:
+                self._register_tools(session_name, tools_result.tools)
 
             return {"name": cfg.name, "success": True, "tools": tools_info}
 
         except asyncio.TimeoutError:
-            _logger.warning("Failed to connect MCP server '%s': timeout (%dms)", cfg.name, cfg.timeout_ms)
-            return {"name": cfg.name, "success": False, "error": f"Connection timed out after {cfg.timeout_ms}ms"}
+            _logger.warning("Failed to connect MCP server '%s': timeout (%dms)", session_name, effective_cfg.timeout_ms)
+            return {
+                "name": cfg.name,
+                "success": False,
+                "error": f"Connection timed out after {effective_cfg.timeout_ms}ms",
+            }
         except BaseException as exc:
             msg = str(exc) or type(exc).__name__
-            _logger.warning("Failed to connect MCP server '%s': %s", cfg.name, msg)
+            _logger.warning("Failed to connect MCP server '%s': %s", session_name, msg)
             return {"name": cfg.name, "success": False, "error": msg}
 
     async def disconnect_server(self, name: str) -> dict[str, Any]:
-        entry = self._sessions.pop(name, None)
-        if isinstance(entry, _MCPSession):
-            await entry.close()
+        keys = [
+            key
+            for key in self._sessions
+            if key == name or key.startswith(f"{name}{_TENANT_SCOPED_SEPARATOR}")
+        ]
+        for key in keys:
+            entry = self._sessions.pop(key, None)
+            if isinstance(entry, _MCPSession):
+                await entry.close()
         _logger.debug("Disconnected MCP server '%s'", name)
         return {"name": name, "success": True}
 
@@ -154,9 +212,73 @@ class MCPServerManager:
 
     @property
     def server_names(self) -> list[str]:
-        return list(self._sessions.keys())
+        return [name for name in self._sessions if _TENANT_SCOPED_SEPARATOR not in name]
+
+    def is_tenant_scoped(self, name: str) -> bool:
+        cfg = self._find_config(name)
+        return cfg is not None and cfg.tenant_scoped
+
+    def available_server_names(self, tenant_id: str | None) -> list[str]:
+        names: list[str] = []
+        for cfg in self.config.servers:
+            if not cfg.enabled:
+                continue
+            if cfg.tenant_scoped and not tenant_id:
+                continue
+            names.append(cfg.name)
+        for name in self.server_names:
+            if name not in names:
+                names.append(name)
+        return names
+
+    async def get_session_for_tenant(self, name: str, tenant_id: str | None) -> ClientSession | None:
+        entry = self._sessions.get(name)
+        if entry is not None:
+            return entry.session if isinstance(entry, _MCPSession) else entry
+
+        cfg = self._find_config(name)
+        if cfg is None or not cfg.tenant_scoped or not tenant_id:
+            return None
+
+        key = f"{name}{_TENANT_SCOPED_SEPARATOR}{tenant_id}"
+        entry = self._sessions.get(key)
+        if entry is None:
+            async with self._tenant_connect_lock:
+                entry = self._sessions.get(key)
+                if entry is None:
+                    result = await self.connect_server(cfg, tenant_id=tenant_id)
+                    if not result.get("success"):
+                        return None
+                    entry = self._sessions.get(key)
+        if entry is None:
+            return None
+        return entry.session if isinstance(entry, _MCPSession) else entry
+
+    def get_tool_names_for_tenant(self, name: str, tenant_id: str | None) -> list[str]:
+        entry = self._sessions.get(name)
+        if entry is None and tenant_id:
+            entry = self._sessions.get(f"{name}{_TENANT_SCOPED_SEPARATOR}{tenant_id}")
+        if isinstance(entry, _MCPSession):
+            return entry.tool_names
+        return []
 
     # ── Private helpers ──────────────────────────────────────────
+
+    def _find_config(self, name: str) -> MCPConnectionConfig | None:
+        return next((cfg for cfg in self.config.servers if cfg.name == name), None)
+
+    def _tenant_environment(self, cfg: MCPConnectionConfig, tenant_id: str) -> dict[str, str]:
+        if not any("{tenant_state_dir}" in value for value in cfg.environment.values()):
+            raise ValueError(
+                f"MCP server '{cfg.name}' is tenant-scoped but its environment does not "
+                "reference {tenant_state_dir}"
+            )
+        tenant_dir = _mcp_state_dir() / safe_tenant_dir_component(tenant_id)
+        tenant_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            key: value.replace("{tenant_id}", tenant_id).replace("{tenant_state_dir}", str(tenant_dir))
+            for key, value in cfg.environment.items()
+        }
 
     async def _connect_stdio(self, cfg: MCPConnectionConfig) -> _MCPSession:
         from harness.tools.browser_command import normalize_command

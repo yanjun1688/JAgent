@@ -10,6 +10,7 @@ services:
       HARNESS_DB_PATH: /app/data/harness.db
       JAGENT_WORKSPACE_BASE_DIR: /app/data/workspaces
       JAGENT_REMOTE_KEY_BASE_DIR: /app/data/remote_keys
+      JAGENT_MCP_STATE_DIR: /app/data/mcp
       HARNESS_LOG_DIR: /app/data/logs
       HARNESS_PORT: "8000"
       JAGENT_AUTH_MODE: jwt

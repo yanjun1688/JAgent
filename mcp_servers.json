@@ -3,7 +3,11 @@
     {
       "name": "memory",
       "command": ["npx", "-y", "@modelcontextprotocol/server-memory"],
-      "enabled": true
+      "enabled": true,
+      "tenant_scoped": true,
+      "environment": {
+        "MEMORY_FILE_PATH": "{tenant_state_dir}/memory.jsonl"
+      }
     },
     {
       "name": "fetch",
