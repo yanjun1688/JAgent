@@ -47,11 +47,17 @@ class TiktokenTokenCounter(TokenCounter):
         return len(self.encoding.encode(text or ""))
 
 
+def _heuristic_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, int(len(text) * HEURISTIC_CHARS_PER_TOKEN))
+
+
 class HeuristicTokenCounter(TokenCounter):
     """Fallback when tiktoken is unavailable: char_count * 0.25."""
 
     async def count(self, text: str) -> int:
-        return max(1, int(len(text or "") * HEURISTIC_CHARS_PER_TOKEN))
+        return _heuristic_tokens(text or "")
 
 
 class ProviderTokenCounter(TokenCounter):
@@ -99,7 +105,7 @@ class ProviderTokenCounter(TokenCounter):
     async def _fallback_count(self, text: str) -> int:
         if self._fallback:
             return await self._fallback.count(text)
-        return max(1, int(len(text or "") * HEURISTIC_CHARS_PER_TOKEN))
+        return _heuristic_tokens(text or "")
 
     async def _call_api(self, text: str) -> int:
         import httpx

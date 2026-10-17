@@ -1446,7 +1446,7 @@ class TestEstimateIncludesSummary:
     async def test_empty_episode_adds_nothing(self):
         tc = HeuristicTokenCounter()
         cm = ContextManagerCls(None, token_counter=tc, token_limit=1000)
-        episode = _minimal_episode(title="")
+        episode = _minimal_episode(title="", key_decisions=[], tools_used=[])
         assert episode.to_context_text() == ""
         state = RunState(run_id="r")
         state.thought_history = [ThoughtEntry(seq=1, thought="x" * 400)]
@@ -1552,7 +1552,7 @@ class TestThresholdBoundaryBehavior:
     @pytest.mark.asyncio
     async def test_summary_pushes_across_archive_boundary(self, store):
         cm_with_summary = self._cm(store)
-        summary_text = "S" * 12_000
+        summary_text = "S" * 12_008
         state = self._state(124_997, summary=summary_text)
         estimate = await cm_with_summary._async_estimate_context_tokens(state)
         assert estimate > 128_000

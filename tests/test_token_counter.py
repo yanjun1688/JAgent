@@ -53,7 +53,7 @@ class TestTiktokenTokenCounter:
 class TestHeuristicTokenCounter:
     async def test_count_empty_string(self):
         tc = HeuristicTokenCounter()
-        assert await tc.count("") == 1
+        assert await tc.count("") == 0
 
     async def test_count_english_text(self):
         tc = HeuristicTokenCounter()

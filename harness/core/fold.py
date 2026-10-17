@@ -336,17 +336,8 @@ def fold_events(events: list[Event]) -> RunState:
                     state.episodes.append(p.episode)
                     state.keep_recent_count = p.keep_recent_count
                     archived_set = set(p.archived_event_refs)
-                    keep = max(p.keep_recent_count, 0)
-                    recent_thought_seqs = {t.seq for t in state.thought_history[-keep:]} if keep > 0 else set()
-                    recent_result_seqs = {tr.event_seq for tr in state.tool_results[-keep:]} if keep > 0 else set()
-                    state.thought_history = [
-                        t for t in state.thought_history if t.seq not in archived_set or t.seq in recent_thought_seqs
-                    ]
-                    state.tool_results = [
-                        tr
-                        for tr in state.tool_results
-                        if tr.event_seq not in archived_set or tr.event_seq in recent_result_seqs
-                    ]
+                    state.thought_history = [t for t in state.thought_history if t.seq not in archived_set]
+                    state.tool_results = [tr for tr in state.tool_results if tr.event_seq not in archived_set]
                 elif isinstance(p, ContextPrunedPayload):
                     pruned_set = set(p.pruned_event_refs)
                     state.thought_history = [t for t in state.thought_history if t.seq not in pruned_set]
