@@ -34,10 +34,11 @@
 - 改造 `harness/tools/file_op.py`（删除全局 _SANDBOX_BASE，改 backend 驱动）
 - 扩展 `harness/models/events.py` / `harness/core/fold.py`（workspace_id 贯通 + 审计事件）
 - 扩展 `harness/core/scheduler/*`（workspace/backend 装配）
-- 扩展 `harness/api/*`（tenant 注入中间件 + workspace CRUD + run 过滤）
+- 扩展 `harness/api/*`（JWT 认证中间件 + workspace CRUD + run 过滤）
 - 扩展前端（Workspace 管理页 + 过滤）
 
-**不做**：JWT（预留接口）、RBAC、历史数据库迁移、容器网络策略。
+**本轮不做**：用户名/密码登录、内置用户库、refresh token、历史数据库迁移、容器网络策略。
+JWT 验签、Principal 与 RBAC 由 [ADR-015](./ADR-015_统一认证与租户身份受信边界.md) 强制。
 
 ---
 
@@ -63,7 +64,7 @@ Tenant（租户）          ← 逻辑隔离边界（tenant_id 列 + ScopedEvent
 
 ```
 ┌─ API 层 ────────────────────────────────────────────────┐
-│  Middleware: X-Tenant-Id → TenantContext (contextvar)   │
+│  AuthMiddleware: 凭据 → Principal/TenantContext (contextvar)   │
 │  workspace CRUD · run CRUD · 审计事件查询                │
 ├─ 受信组件 ──────────────────────────────────────────────┤
 │  ScopedEventStore（自动 WHERE tenant_id=?）             │
@@ -87,7 +88,7 @@ Tenant（租户）          ← 逻辑隔离边界（tenant_id 列 + ScopedEvent
 | 决策点 | 方案 | 理由 |
 |--------|------|------|
 | 多租户隔离 | **逻辑隔离**：共享 Event Store + 业务表 tenant_id 列 + `ScopedEventStore` 强制过滤 | 符合 TODO_v2.1 §9.2 既有规划；改动小、运维简单；无独立库连接管理 |
-| 租户身份 | 当前 `X-Tenant-Id` Header → contextvar；`TenantContext` 抽象预留给 JWT | 现有系统无认证，Header 最简；JWT 接入时只替换中间件内部实现 |
+| 租户身份 | AuthMiddleware 验签 JWT → `Principal.tenant_id` → contextvar；`X-Tenant-Id` 退出授权链 | 见 [ADR-015](./ADR-015_统一认证与租户身份受信边界.md)；JWT 认证是所有部署形态的必选受信组件，不存在 Demo/免认证模式 |
 | Workspace 存储 | 一等实体 + `workspaces` 表（状态源）；审计事件写入事件流 | 状态靠表、审计靠事件，与 Conversation 同构 |
 | 执行载体 | `ExecutionTarget` 三态 + `ExecutionBackend` 接口 + 三实现 | 载体透明：tool 层不感知目录/容器/远端差异 |
 | 载体注入 | Scheduler 装配 `backend = factory.create(target)`，经 ToolExecutor 注入 | 与 current_workspace 对称，受信链路显式传入，executor 不自建 I/O 来源 |
@@ -133,7 +134,7 @@ class ExecutionTarget(BaseModel):
     host: str | None = None
     port: int = 22
     username: str | None = None
-    private_key_path: str | None = None         # 只存密钥路径，不存密钥内容
+    private_key_path: str | None = None         # 只存密钥路径，必须位于 <JAGENT_REMOTE_KEY_BASE_DIR>/<tenant_id>/
     remote_root: str | None = "/workspace"
 
 
@@ -257,10 +258,10 @@ class GuardrailTriggeredPayload(BaseModel):
 `harness/core/tenant.py`：
 
 ```python
-current_tenant: contextvars.ContextVar[str] = contextvars.ContextVar("current_tenant", default="default")
+current_principal: contextvars.ContextVar[Principal | None] = contextvars.ContextVar("current_principal", default=None)
 ```
 
-FastAPI middleware 读 `X-Tenant-Id`（缺省 `default`）→ `current_tenant.set(...)`。`asyncio.create_task` 自动继承当前上下文，Scheduler 后台任务天然获得租户边界。
+AuthMiddleware 验签 JWT 后写入 `current_principal`；`HarnessAPI.store` 从 `Principal.tenant_id` 组装 `ScopedEventStore`，principal 缺失时 fail-closed（不再回退 `default`）。`X-Tenant-Id` 不再作为身份来源。`asyncio.create_task` 自动继承当前上下文，Scheduler 后台任务天然获得租户边界。详见 [ADR-015](./ADR-015_统一认证与租户身份受信边界.md)。
 
 ### 6.2 ScopedEventStore（`harness/storage/scoped.py`）
 
@@ -366,7 +367,7 @@ async def create_backend(target: ExecutionTarget) -> ExecutionBackend:
 ### 7.4 载体不可用策略
 
 - Docker 不存在 / daemon 未启动 → `create_backend` 抛明确错误（`SandboxUnavailableError`），不静默
-- 远端 SSH 连接失败 → 同样显式失败；密钥路径不存在 → 创建 workspace 时校验报错
+- 远端 SSH 连接失败 → 同样显式失败；密钥路径必须存在，且位于 `<JAGENT_REMOTE_KEY_BASE_DIR>/<tenant_id>/`，创建 workspace 时校验报错
 
 ---
 
@@ -386,7 +387,7 @@ create_run(API) → HarnessAPI.start_run()
 ### 8.2 改造后
 
 ```
-[Middleware] X-Tenant-Id → current_tenant
+[AuthMiddleware] 凭据 → Principal.tenant_id → current_principal
 create_run(body.workspace_id?)
   → scoped = ScopedEventStore(store, tenant_id)
   → ws = scoped.get_workspace(workspace_id 或 default)
@@ -553,7 +554,7 @@ class CreateRunRequest(BaseModel):   # 扩展
 | `GET /api/v1/workspaces/{id}/events` | 审计事件查询（workspace_id 事件流） |
 | `POST /api/v1/runs` | 可选 workspace_id，缺省 → 租户默认 workspace |
 | `GET /api/v1/runs?workspace_id=` | 过滤（list_runs 增 tenant_id + workspace_id 条件） |
-| `GET/DELETE /api/v1/tenants` | 租户管理（JWT 前置占位，仅 default 可操作） |
+| `GET/DELETE /api/v1/tenants` | 租户管理（认证由 [ADR-015](./ADR-015_统一认证与租户身份受信边界.md) 中间件统一强制；本轮仍为占位） |
 
 ### 10.3 DI 装配（`harness/api/deps.py` / `serve.py`）
 
@@ -674,9 +675,9 @@ class CreateRunRequest(BaseModel):   # 扩展
 ## 15. 已知技术债务（本期接受）
 
 1. 审计事件暂复用 `workspace_id` 作为 `run_id`，Run 查询必须显式排除 Workspace 审计事件；未来可增加独立 stream 类型
-2. Header 租户注入不提供身份认证，仅适用于可信 Demo 部署；JWT 后续替换 middleware
+2. ~~Header 租户注入不提供身份认证，仅适用于可信 Demo 部署~~ —— **已由 [ADR-015](./ADR-015_统一认证与租户身份受信边界.md) 取代**：JWT 认证中间件是所有部署形态的必选组件；`X-Tenant-Id` 不再作为身份来源，不存在 Demo/免认证模式
 3. `run_command` 接口预留但 directory 载体默认不启用 —— 沙箱/远端载体启用时显式声明命令白名单
-4. tenant 管理端点仅占位，无真实 JWT —— 接入时替换 middleware 内部实现
+4. ~~tenant 管理端点仅占位，无真实 JWT —— 接入时替换 middleware 内部实现~~ —— 认证与租户身份由 ADR-015 的 AuthMiddleware 统一强制；租户管理 API 仍不在本轮范围
 5. 生产执行不再使用旧 `_SANDBOX_BASE`；遗留的模块级全局 `_SANDBOX_BASE`、`set_sandbox_root`、`reset_sandbox_root`、`_resolve_path`、`FILE_OP_DEF`、`file_op_fn` 及 `allow_legacy_fallback` 后门均已删除（方案 A 根治），文件访问统一经受信 ExecutionBackend 注入，测试改用 `FileOpTool().to_definition()` 契约 + `LocalDirectoryBackend` 后端；旧 `.db` 删除重建
 6. Monitor 由基础 EventStore 接收广播，但读取和反馈写入按当前 task 的 tenant 动态包装 ScopedEventStore；脱离请求上下文的 worker 必须显式携带 tenant_id
 7. Workspace DELETE 采用软删除，不递归删除本地目录、Docker mount 或 SSH 远端路径；载体数据清理由独立、显式授权的生命周期操作负责
