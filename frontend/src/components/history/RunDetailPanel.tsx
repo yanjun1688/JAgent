@@ -4,7 +4,6 @@ import {
   X,
   Clock,
   Hash,
-  Coins,
   Wrench,
   ShieldAlert,
   ChevronDown,
@@ -193,14 +192,6 @@ export function RunDetailPanel({ runId, onClose }: RunDetailPanelProps) {
                 </p>
                 <p className="font-display text-lg font-bold text-accent-primary">
                   {summary.tool_trace_count}
-                </p>
-              </div>
-              <div className="rounded-lg border border-border-softer bg-surface-0 px-3 py-2">
-                <p className="flex items-center gap-1 text-[10px] text-text-tertiary">
-                  <Coins size={10} /> Tokens
-                </p>
-                <p className="font-display text-lg font-bold text-text-primary">
-                  {summary.total_tokens}
                 </p>
               </div>
               <div className="rounded-lg border border-border-softer bg-surface-0 px-3 py-2">

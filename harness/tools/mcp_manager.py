@@ -161,7 +161,7 @@ class MCPServerManager:
     async def _connect_stdio(self, cfg: MCPConnectionConfig) -> _MCPSession:
         from harness.tools.browser_command import normalize_command
 
-        command = normalize_command(list(cfg.command))
+        command = normalize_command(list(cfg.command or []))
         server_params = StdioServerParameters(
             command=command[0],
             args=command[1:],
@@ -194,6 +194,8 @@ class MCPServerManager:
             raise
 
     async def _connect_sse(self, cfg: MCPConnectionConfig) -> _MCPSession:
+        if cfg.url is None:
+            raise ValueError(f"MCP SSE server '{cfg.name}' configured without a url")
         transport_cm = sse_client(url=cfg.url)
         read, write = await transport_cm.__aenter__()
         try:
@@ -222,11 +224,14 @@ class MCPServerManager:
 
     def _register_tools(self, server_name: str, tools: list[Any]) -> None:
         # ADR-010 D-05: 动态工具构造 BaseTool 实例走 register_tool（invoker 永不 None）。
+        registry = self.registry
+        if registry is None:
+            raise RuntimeError("MCPServerManager has no tool registry")
         from harness.tools.mcp_call import McpDynamicTool
 
         for t in tools:
             try:
-                self.registry.register_tool(
+                registry.register_tool(
                     McpDynamicTool(
                         name=t.name,
                         description=f"[{server_name}] {t.description}",

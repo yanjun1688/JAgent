@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 
 from harness.core.logger import guard_logger
-from harness.models.events import PAYLOAD_MODEL_MAP, Event, EventType
+from harness.models.events import PAYLOAD_MODEL_MAP, Event, EventType, parse_event_payload
 from harness.models.workspace import Tenant, Workspace, WorkspaceUpdate
 
 _log_write = guard_logger("store.write")
@@ -195,7 +195,7 @@ class EventStore:
         """
         cursor = await self.conn.execute(
             "SELECT run_id, payload FROM events WHERE event_type = ?",
-            (EventType.RUN_STARTED.value,),
+            (EventType.RUN.value,),
         )
         rows = await cursor.fetchall()
         for r in rows:
@@ -289,7 +289,7 @@ class EventStore:
         interleave with a concurrent append's transaction (same orphan-txn
         class as the workspace/conversation writers).
         """
-        _validate_payload(EventType.RUN_STARTED, run_started_payload)
+        run_started_payload = _validate_payload(EventType.RUN, run_started_payload)
         cursor = await self.conn.execute(
             "SELECT run_id FROM client_request_claims "
             "WHERE tenant_id = ? AND conversation_id = ? AND client_request_id = ?",
@@ -313,7 +313,7 @@ class EventStore:
                         run_id,
                         tenant_id,
                         workspace_id,
-                        EventType.RUN_STARTED.value,
+                        EventType.RUN.value,
                         json.dumps(run_started_payload, ensure_ascii=False),
                         f"client-request:{conversation_id}:{client_request_id}",
                         now,
@@ -339,7 +339,7 @@ class EventStore:
         event = Event(
             run_id=run_id,
             seq=1,
-            event_type=EventType.RUN_STARTED,
+            event_type=EventType.RUN,
             payload=run_started_payload,
             idempotency_key=f"client-request:{conversation_id}:{client_request_id}",
             created_at=now,
@@ -450,7 +450,7 @@ class EventStore:
         lifecycle) that must be excluded from ordinary run listings.
         """
         _t0 = time.monotonic()
-        _validate_payload(event_type, payload)
+        payload = _validate_payload(event_type, payload)
 
         if idempotency_key is not None:
             existing = await self.find_by_idempotency_key(run_id, event_type, idempotency_key)
@@ -567,7 +567,7 @@ class EventStore:
         rows = list(await cursor.fetchall())
         _ms = (time.monotonic() - _start) * 1000
         _log_query.debug("get_events(run=%s): %d rows, %dms", run_id, len(rows), _ms)
-        return [e for e in (_row_to_event(dict(r)) for r in rows) if e is not None]
+        return [e for e in (event_from_row(dict(r)) for r in rows) if e is not None]
 
     async def get_event_range(
         self,
@@ -590,7 +590,7 @@ class EventStore:
         rows = list(await cursor.fetchall())
         _ms = (time.monotonic() - _t0) * 1000
         _log_query.debug("get_event_range(run=%s, from=%s): %d rows, %dms", run_id, from_seq, len(rows), _ms)
-        return [e for e in (_row_to_event(dict(r)) for r in rows) if e is not None]
+        return [e for e in (event_from_row(dict(r)) for r in rows) if e is not None]
 
     async def get_latest_seq(self, run_id: str) -> int:
         """Return the highest seq for a run, or 0 if no events exist."""
@@ -642,7 +642,7 @@ class EventStore:
             row["seq"],
             _ms,
         )
-        return _row_to_event(dict(row))
+        return event_from_row(dict(row))
 
     async def list_runs(
         self,
@@ -744,7 +744,7 @@ class EventStore:
         )
         rows = await cursor.fetchall()
         _ms = (time.monotonic() - _t0) * 1000
-        result = [e for e in (_row_to_event(dict(r)) for r in rows) if e is not None]
+        result = [e for e in (event_from_row(dict(r)) for r in rows) if e is not None]
         _log_query.debug("get_events_for_runs(%d runs): %d rows, %dms", len(run_ids), len(result), _ms)
         return result
 
@@ -760,22 +760,22 @@ class EventStore:
             f"SELECT * FROM events WHERE workspace_id = ? AND is_audit = 1{clause} ORDER BY created_at, seq",
             params,
         )
-        return [event for event in (_row_to_event(dict(row)) for row in await cursor.fetchall()) if event is not None]
+        return [event for event in (event_from_row(dict(row)) for row in await cursor.fetchall()) if event is not None]
 
     async def find_confirmation_by_id(self, run_id: str, confirmation_id: str) -> Event | None:
         _t0 = time.monotonic()
         cursor = await self.conn.execute(
             "SELECT * FROM events WHERE run_id = ? AND event_type = ?",
-            (run_id, EventType.CONFIRMATION_RECEIVED.value),
+            (run_id, EventType.CONFIRMATION.value),
         )
         rows = await cursor.fetchall()
         _ms = (time.monotonic() - _t0) * 1000
         for row in rows:
-            event = _row_to_event(dict(row))
+            event = event_from_row(dict(row))
             if event is None:
                 continue
             payload = json.loads(row["payload"])
-            if payload.get("confirmation_id") == confirmation_id:
+            if payload.get("confirmation_id") == confirmation_id and payload.get("phase") == "received":
                 _log_query.debug("find_confirmation(run=%s, id=%s): hit, %dms", run_id, confirmation_id, _ms)
                 return event
         _log_query.debug("find_confirmation(run=%s, id=%s): miss, %dms", run_id, confirmation_id, _ms)
@@ -1043,7 +1043,7 @@ class EventStore:
         )
         rows = await cursor.fetchall()
         _ms = (time.monotonic() - _t0) * 1000
-        result = [e for e in (_row_to_event(dict(r)) for r in rows) if e is not None]
+        result = [e for e in (event_from_row(dict(r)) for r in rows) if e is not None]
         _log_query.debug("get_events_for_conversation(conv=%s): %d rows, %dms", conversation_id, len(result), _ms)
         return result
 
@@ -1065,20 +1065,23 @@ class EventStore:
 # ── Helpers ────────────────────────────────────────────────────
 
 
-def _validate_payload(event_type: EventType, payload: dict[str, Any]) -> None:
-    model_cls = PAYLOAD_MODEL_MAP.get(event_type)
-    if model_cls is None:
+def _validate_payload(event_type: EventType, payload: dict[str, Any]) -> dict[str, Any]:
+    if event_type not in PAYLOAD_MODEL_MAP:
         raise ValueError(f"Unknown event type: {event_type}")
-    model_cls.model_validate(payload)
+    return parse_event_payload(event_type, payload).model_dump(mode="json")
 
 
-def _row_to_event(row: dict[str, Any]) -> Event | None:
-    """Materialize a DB row into an Event.
+def event_from_row(row: dict[str, Any]) -> Event | None:
+    """Materialize a DB row into an Event — the single read-path materializer.
 
     Returns None for rows whose `event_type` no longer exists in the
     EventType enum (e.g. legacy `QualityCheckCompleted` from V0.8 removed
     in f63e474). Append-Only invariant forbids DELETE so we tolerate these
     historical rows on read paths instead of crashing the whole query.
+
+    Tolerant of rows that omit optional columns (tenant_id / workspace_id /
+    is_audit / idempotency_key) and of payload already parsed vs a JSON str,
+    so every read surface (store, analysis) shares one behavior.
     """
     raw = row["event_type"]
     try:
@@ -1092,12 +1095,13 @@ def _row_to_event(row: dict[str, Any]) -> Event | None:
             row.get("seq"),
         )
         return None
+    payload = row["payload"]
     return Event(
         run_id=row["run_id"],
         seq=row["seq"],
         event_type=et,
-        payload=json.loads(row["payload"]),
-        idempotency_key=row["idempotency_key"],
+        payload=json.loads(payload) if isinstance(payload, str) else payload,
+        idempotency_key=row.get("idempotency_key"),
         created_at=row["created_at"],
         tenant_id=row.get("tenant_id", "default"),
         workspace_id=row.get("workspace_id"),

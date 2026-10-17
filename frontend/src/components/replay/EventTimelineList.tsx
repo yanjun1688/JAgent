@@ -1,6 +1,7 @@
 import { memo, useState } from 'react'
 import { ChevronDown, ChevronRight, CircleDot } from 'lucide-react'
 import type { ReplayTimelineEvent } from '../../api/schema'
+import { eventPhase } from '../../api/types'
 import { cn } from '../../design-system/utils/cn'
 import { eventTypeColor } from './statusColors'
 
@@ -68,8 +69,14 @@ const TimelineRow = memo(function TimelineRow({ event, state, onSelect }: RowPro
         </button>
         <CircleDot size={11} className="shrink-0 text-text-tertiary" />
         <span className="shrink-0 font-mono text-[10px] text-text-muted">#{event.seq}</span>
-        <span className={cn('truncate font-mono text-[11px]', eventTypeColor(event.event_type))}>
+        <span
+          className={cn(
+            'truncate font-mono text-[11px]',
+            eventTypeColor(event.event_type, eventPhase(event)),
+          )}
+        >
           {event.event_type}
+          {eventPhase(event) ? `/${eventPhase(event)}` : ''}
         </span>
         {event.tool_name && (
           <span className="hidden truncate text-[10px] text-text-tertiary sm:inline">

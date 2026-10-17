@@ -63,10 +63,10 @@ async def store():
 @pytest.mark.asyncio
 async def test_reap_orphaned_carriers_removes_only_dead_run_containers(store, monkeypatch):
     # r-dead: terminal (FAILED) — its container is a leak after a crash.
-    await store.append_event("r-dead", EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}})
-    await store.append_event("r-dead", EventType.RUN_FAILED, {"final_error": "boom", "event_count": 2})
+    await store.append_event("r-dead", EventType.RUN, {"intent": "x", "context_snapshot": {}})
+    await store.append_event("r-dead", EventType.RUN, {"final_error": "boom", "event_count": 2})
     # r-alive: still RUNNING — its container must be left alone.
-    await store.append_event("r-alive", EventType.RUN_STARTED, {"intent": "y", "context_snapshot": {}})
+    await store.append_event("r-alive", EventType.RUN, {"intent": "y", "context_snapshot": {}})
 
     fake_containers = [
         {"id": "c-dead", "run_id": "r-dead"},

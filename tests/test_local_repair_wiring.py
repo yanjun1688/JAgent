@@ -5,9 +5,10 @@ The pure budget/validation core lives in ``harness/core/recovery.py`` (see
 bounded local think-act loop BEFORE a global revise, and asserts the
 trusted-boundary invariants:
 
-* default-off: with ``SchedulerConfig.local_repair_enabled=False`` the
-  scheduler never writes STEP_LOCAL_REPAIR_* events and never calls the
-  planner's local-repair proposal path;
+* default-on: repair candidates are derived from the registered tool set; only
+  read-only actions pass ``validate_local_repair``. With
+  ``SchedulerConfig.local_repair_enabled=False`` the scheduler writes no
+  STEP_LOCAL_REPAIR_* events and never calls the repair proposal path;
 * only steps that failed with a ``step_repair`` tier (non-transient,
   non-contract-bound) are candidates;
 * an accepted proposal replaces the failing step action in a patched plan and
@@ -70,7 +71,7 @@ async def _make_scheduler(
         dag,
         tool_defs,
         {},
-        config=config or SchedulerConfig(local_repair_enabled=True, local_repair_allowed_tools=("http_request", "fetch_output")),
+        config=config or SchedulerConfig(),
     )
 
 
@@ -123,18 +124,20 @@ class TestLocalRepairCandidates:
 
 
 class TestLocalRepairFunnel:
-    async def test_disabled_by_default_writes_no_repair_events(self):
+    async def test_enabled_by_default_and_disabled_when_off(self):
         store = EventStore(":memory:")
         await store.initialize()
         try:
             sched = await _make_scheduler(store, tool_defs=[_tool_def("http_request", ro_ops=["GET"])])
-            sched.config = SchedulerConfig()  # default: local_repair_disabled
+            # Default config: self-heal is on and candidates derive from the registry.
+            assert sched._local_repair_budget() is not None
+            sched.config = SchedulerConfig(local_repair_enabled=False)
             # Funnel guards on _local_repair_budget() → None when disabled, so the
             # repair method is never reached and no STEP_LOCAL_REPAIR_* is written.
             assert sched._local_repair_budget() is None
             events = await store.get_events("run-x")
             assert not any(
-                e.event_type in (EventType.STEP_LOCAL_REPAIR_STARTED, EventType.STEP_LOCAL_REPAIR_COMPLETED) for e in events
+                e.event_type in (EventType.STEP_REPAIR, EventType.STEP_REPAIR) for e in events
             )
         finally:
             await store.close()
@@ -147,7 +150,6 @@ class TestLocalRepairFunnel:
             sched = await _make_scheduler(store, tool_defs=[http_def])
             sched.config = SchedulerConfig(
                 local_repair_enabled=True,
-                local_repair_allowed_tools=("http_request",),
                 local_repair_max_rounds=2,
             )
             step, r = _failing_result("s1", "browser", "browser unavailable: asyncio not supported")
@@ -164,8 +166,8 @@ class TestLocalRepairFunnel:
             assert patched.steps[0].tool == "http_request"
             events = await store.get_events("run-x")
             types = [e.event_type for e in events]
-            assert EventType.STEP_LOCAL_REPAIR_STARTED in types
-            completed = next(e for e in events if e.event_type == EventType.STEP_LOCAL_REPAIR_COMPLETED)
+            assert EventType.STEP_REPAIR in types
+            completed = next(e for e in events if (e.event_type == EventType.STEP_REPAIR and e.phase == "completed"))
             assert completed.payload["outcome"] == "accepted"
         finally:
             await store.close()
@@ -199,7 +201,6 @@ class TestLocalRepairFunnel:
             sched = await _make_scheduler(store, tool_defs=[http_def])
             sched.config = SchedulerConfig(
                 local_repair_enabled=True,
-                local_repair_allowed_tools=("http_request",),
                 local_repair_max_rounds=1,
             )
             step, r = _failing_result("s1", "browser", "browser unavailable")
@@ -214,9 +215,40 @@ class TestLocalRepairFunnel:
             )
             assert patched is None  # mutating POST rejected → no plan patch → global revise fallback
             events = await store.get_events("run-x")
-            completed = next(e for e in events if e.event_type == EventType.STEP_LOCAL_REPAIR_COMPLETED)
+            completed = next(e for e in events if (e.event_type == EventType.STEP_REPAIR and e.phase == "completed"))
             assert completed.payload["outcome"] == "rejected"
             assert "mutating" in completed.payload["reason"]
+        finally:
+            await store.close()
+
+    async def test_rejects_proposal_repeating_identical_action(self):
+        store = EventStore(":memory:")
+        await store.initialize()
+        try:
+            sched = await _make_scheduler(store, tool_defs=[_tool_def("file_op", ro_ops=["read", "list"])])
+            sched.config = SchedulerConfig(
+                local_repair_enabled=True,
+                local_repair_max_rounds=2,
+            )
+            step = DagStep(id="s1", tool="file_op", input={"operation": "read", "path": "missing_data.csv"})
+            r = StepResult(step_id="s1", exec_state=ExecState.UNSUCCESSFUL, error="File not found: missing_data.csv", tool_call_id=None)
+
+            async def _propose_same(*args, **kwargs):
+                return LocalRepairProposal(
+                    step_id="s1", tool_name="file_op",
+                    input={"operation": "read", "path": "missing_data.csv"},
+                )
+
+            sched.planner.propose_local_repair = _propose_same
+            budget = RecoveryBudget(max_repair_rounds=2, allowed_tools=frozenset({"file_op"}))
+            patched = await sched._attempt_step_local_repair(
+                "run-x", DagPlan(intent="t", steps=[step]), "plan_x", {"s1": r}, {}, budget, []
+            )
+            assert patched is None  # identical repeat rejected → escalate, no patch
+            events = await store.get_events("run-x")
+            completed = next(e for e in events if (e.event_type == EventType.STEP_REPAIR and e.phase == "completed"))
+            assert completed.payload["outcome"] == "rejected"
+            assert "identical" in completed.payload["reason"]
         finally:
             await store.close()
 
@@ -227,7 +259,6 @@ class TestLocalRepairFunnel:
             sched = await _make_scheduler(store, tool_defs=[_tool_def("http_request", ro_ops=["GET"])])
             sched.config = SchedulerConfig(
                 local_repair_enabled=True,
-                local_repair_allowed_tools=("http_request",),
                 local_repair_max_rounds=2,
             )
             step, r = _failing_result("s1", "browser", "browser unavailable")
@@ -284,10 +315,10 @@ class TestLocalRepairFunnel:
                 defs,
                 fns,
                 config=SchedulerConfig(
-                    max_iterations=10,
+                    run_attempt_budget=10,
                     local_repair_enabled=True,
                     local_repair_max_rounds=2,
-                    local_repair_allowed_tools=("file_op",),
+
                 ),
             )
 
@@ -301,12 +332,12 @@ class TestLocalRepairFunnel:
             planner.propose_local_repair = _propose_fix
             state = await sched.run("local_repair_e2e", "复现")
             events = await store.get_events("local_repair_e2e")
-            types = [e.event_type for e in events]
+            repair_phases = [e.phase for e in events if e.event_type == EventType.STEP_REPAIR]
             assert state.status.value == "completed", f"state={state.status} last_error={state.last_error}"
-            assert EventType.STEP_LOCAL_REPAIR_STARTED in types
-            assert EventType.STEP_LOCAL_REPAIR_COMPLETED in types
+            assert "started" in repair_phases
+            assert "completed" in repair_phases
             # The step failure was absorbed by local repair — no global revision.
-            assert EventType.PLAN_REVISED not in types
+            assert not any((e.event_type == EventType.PLAN and e.phase == "revised") for e in events)
         finally:
             await store.close()
 
@@ -319,21 +350,20 @@ class TestEventSync:
         from harness.core.fold import fold_events
         from harness.models.events import Event, PAYLOAD_MODEL_MAP
 
-        assert EventType.STEP_LOCAL_REPAIR_STARTED in PAYLOAD_MODEL_MAP
-        assert EventType.STEP_LOCAL_REPAIR_COMPLETED in PAYLOAD_MODEL_MAP
+        assert EventType.STEP_REPAIR in PAYLOAD_MODEL_MAP
         events = [
-            Event(run_id="r1", seq=1, event_type=EventType.RUN_STARTED, payload={"intent": "x"}, created_at=1.0),
+            Event(run_id="r1", seq=1, event_type=EventType.RUN, payload={"intent": "x"}, created_at=1.0),
             Event(
                 run_id="r1",
                 seq=2,
-                event_type=EventType.STEP_LOCAL_REPAIR_STARTED,
+                event_type=EventType.STEP_REPAIR,
                 payload={"step_id": "s1", "plan_id": "p1", "repair_round": 1, "budget_remaining": 1, "step_tool": "browser"},
                 created_at=2.0,
             ),
             Event(
                 run_id="r1",
                 seq=3,
-                event_type=EventType.STEP_LOCAL_REPAIR_COMPLETED,
+                event_type=EventType.STEP_REPAIR,
                 payload={"step_id": "s1", "plan_id": "p1", "repair_round": 1, "outcome": "accepted", "proposed_tool": "http_request"},
                 created_at=3.0,
             ),

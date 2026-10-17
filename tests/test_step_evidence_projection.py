@@ -20,7 +20,7 @@ def _started(run: str, seq: int, plan_id: str, step_id: str, tool: str, deps=Non
     return _event(
         run,
         seq,
-        EventType.DAG_STEP_STARTED,
+        EventType.STEP,
         {"plan_id": plan_id, "step_id": step_id, "tool_name": tool, "depends_on": deps or []},
     )
 
@@ -37,7 +37,7 @@ def _step_completed(
     return _event(
         run,
         seq,
-        EventType.DAG_STEP_COMPLETED,
+        EventType.STEP,
         {
             "plan_id": plan_id,
             "step_id": step_id,
@@ -53,7 +53,7 @@ def _step_skipped(run: str, seq: int, plan_id: str, step_id: str, reason: str) -
     return _event(
         run,
         seq,
-        EventType.DAG_STEP_SKIPPED,
+        EventType.STEP,
         {"plan_id": plan_id, "step_id": step_id, "reason": reason, "tool_name": "browser"},
     )
 
@@ -62,7 +62,7 @@ def _plan_created(run: str, seq: int, plan_id: str, steps: list[dict]) -> Event:
     return _event(
         run,
         seq,
-        EventType.PLAN_CREATED,
+        EventType.PLAN,
         {
             "plan_id": plan_id,
             "intent": "intent",
@@ -77,7 +77,7 @@ def _tool_completed(run: str, seq: int, tcid: str, tool: str, step_id: str, resu
     return _event(
         run,
         seq,
-        EventType.TOOL_COMPLETED,
+        EventType.TOOL,
         {
             "tool_call_id": tcid,
             "tool_name": tool,
@@ -92,8 +92,6 @@ def _tool_completed(run: str, seq: int, tcid: str, tool: str, step_id: str, resu
 def _episode_archived(run: str, seq: int, archived_refs: list[int], keep: int = 2) -> Event:
     episode = {
         "episode_range": [archived_refs[0], archived_refs[-1]] if archived_refs else [0, 0],
-        "original_tokens": 100,
-        "compressed_tokens": 10,
         "key_decisions": ["d"],
         "tools_used": ["browser"],
         "key_findings": [],
@@ -104,10 +102,8 @@ def _episode_archived(run: str, seq: int, archived_refs: list[int], keep: int = 
     return _event(
         run,
         seq,
-        EventType.EPISODE_ARCHIVED,
+        EventType.CONTEXT,
         {
-            "original_tokens": 100,
-            "compressed_tokens": 10,
             "episode": episode,
             "keep_recent_count": keep,
             "archived_event_refs": archived_refs,
@@ -119,7 +115,7 @@ class TestStepEvidenceProjection:
     def test_completed_step_folded_into_evidence(self):
         run = "r1"
         events = [
-            _event(run, 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event(run, 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _plan_created(run, 2, "p1", [{"step_id": "s1", "tool_name": "http_request", "depends_on": []}]),
             _started(run, 3, "p1", "s1", "http_request"),
             _tool_completed(run, 4, "tc-1", "http_request", "s1"),
@@ -137,7 +133,7 @@ class TestStepEvidenceProjection:
     def test_unsuccessful_and_skipped_reflected(self):
         run = "r2"
         events = [
-            _event(run, 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event(run, 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _plan_created(
                 run,
                 2,
@@ -161,7 +157,7 @@ class TestStepEvidenceProjection:
     def test_episode_archive_does_not_trim_evidence(self):
         run = "r3"
         events = [
-            _event(run, 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event(run, 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _plan_created(run, 2, "p1", [{"step_id": "s1", "tool_name": "http_request", "depends_on": []}]),
             _started(run, 3, "p1", "s1", "http_request"),
             _tool_completed(run, 4, "tc-1", "http_request", "s1"),
@@ -181,7 +177,7 @@ class TestStepEvidenceProjection:
     def test_context_pruned_does_not_trim_evidence(self):
         run = "r4"
         events = [
-            _event(run, 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event(run, 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _plan_created(run, 2, "p1", [{"step_id": "s1", "tool_name": "http_request", "depends_on": []}]),
             _started(run, 3, "p1", "s1", "http_request"),
             _tool_completed(run, 4, "tc-1", "http_request", "s1"),
@@ -189,8 +185,8 @@ class TestStepEvidenceProjection:
             _event(
                 run,
                 6,
-                EventType.CONTEXT_PRUNED,
-                {"pruned_event_refs": [4], "pruned_token_count": 50, "pruned_seq_count": 1, "reason": "lazy_clear"},
+                EventType.CONTEXT,
+                {"pruned_event_refs": [4], "pruned_seq_count": 1, "reason": "lazy_clear"},
             ),
         ]
         state = fold_events(events)
@@ -201,7 +197,7 @@ class TestStepEvidenceProjection:
         # Folding a prefix vs full stream: evidence at a given seq must be stable.
         run = "r5"
         full = [
-            _event(run, 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event(run, 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _plan_created(
                 run,
                 2,

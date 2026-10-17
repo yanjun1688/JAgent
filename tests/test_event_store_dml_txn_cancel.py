@@ -85,7 +85,7 @@ async def _assert_cancel_during_commit_is_safe(
         store.append_event(
             "post-cancel",
             EventType.AGENT_THOUGHT,
-            {"thought": "after cancel", "token_count": 1},
+            {"thought": "after cancel"},
         ),
         timeout=2,
     )
@@ -191,7 +191,7 @@ async def test_concurrent_mixed_writes_and_appends_serialize(store: EventStore):
         await store.upsert_conversation(conv, f"Title {idx}")
         await store.append_event(
             f"run-{idx}",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="x", conversation_id=conv).model_dump(),
             workspace_id=ws.workspace_id,
         )
@@ -215,7 +215,7 @@ async def test_concurrent_claims_and_appends_share_the_write_lock(store: EventSt
     async def appender(idx: int) -> None:
         await store.append_event(
             f"append-run-{idx}",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="x").model_dump(),
         )
 

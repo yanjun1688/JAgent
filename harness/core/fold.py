@@ -4,12 +4,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from harness.core.dag_types import exec_state_is_normal
 from harness.models.events import (
     AgentThoughtPayload,
     ConfirmationReceivedPayload,
     ConfirmationRequestedPayload,
     ContextCheckpointedPayload,
-    ContextCompressedPayload,
     ContextPrunedPayload,
     DagStepCompletedPayload,
     DagStepFailedPayload,
@@ -37,6 +37,7 @@ from harness.models.events import (
     ToolFailedPayload,
     ToolResultType,
     ToolTimeoutPayload,
+    parse_event_payload,
 )
 from harness.models.intent import DeliveryContract
 
@@ -61,7 +62,6 @@ class ThoughtEntry:
     seq: int
     thought: str
     tool_choice: str | None = None
-    token_count: int = 0
 
 
 @dataclass
@@ -105,14 +105,8 @@ class StepEvidence:
 
     @property
     def step_normal(self) -> bool:
-        """完成门原子判据（与 dag_types.StepResult.step_normal 同语义，纯函数）。
-
-        completed/idempotent 正常；unsuccessful 仅在 probe（探测型步骤）时正常。
-        不读取任何 LLM 便签（task_state/step_tasks）。
-        """
-        if self.exec_state in ("completed", "idempotent"):
-            return True
-        return self.exec_state == "unsuccessful" and self.probe
+        """完成门原子判据 —— 复用 ``dag_types.exec_state_is_normal`` 单一谓词。"""
+        return exec_state_is_normal(self.exec_state, self.probe)
 
 
 @dataclass
@@ -166,7 +160,6 @@ def fold_events(events: list[Event]) -> RunState:
 
     run_id = events[0].run_id
     state = RunState(run_id=run_id)
-    p: Any = None
 
     def _evidence(step_id: str, plan_id: str = "", seq: int = 0) -> StepEvidence:
         """Get-or-create the trusted evidence record for a step."""
@@ -206,18 +199,43 @@ def fold_events(events: list[Event]) -> RunState:
         state.seq = max(state.seq, event.seq)
 
         match event.event_type:
-            case EventType.RUN_STARTED:
-                p = RunStartedPayload(**event.payload)
-                state.intent = p.intent
-                state.current_request = p.current_request or p.intent
-                state.context_snapshot = p.context_snapshot
-                state.status = RunStatus.RUNNING
-                state.conversation_id = p.conversation_id
-                state.workspace_id = p.workspace_id
-                # S05: 原始意图与交付契约折叠（intent_raw 不可变，Planner 不得覆盖）
-                state.intent_raw = p.intent_raw or p.intent
-                state.delivery_contracts = list(p.contracts)
-                state.requires_contract_extraction = p.requires_contract_extraction
+            case EventType.RUN:
+                p = parse_event_payload(event.event_type, event.payload)
+                if isinstance(p, RunStartedPayload):
+                    state.intent = p.intent
+                    state.current_request = p.current_request or p.intent
+                    state.context_snapshot = p.context_snapshot
+                    state.status = RunStatus.RUNNING
+                    state.conversation_id = p.conversation_id
+                    state.workspace_id = p.workspace_id
+                    # S05: 原始意图与交付契约折叠（intent_raw 不可变，Planner 不得覆盖）
+                    state.intent_raw = p.intent_raw or p.intent
+                    state.delivery_contracts = list(p.contracts)
+                    state.requires_contract_extraction = p.requires_contract_extraction
+                elif isinstance(p, RunPausedPayload):
+                    state.status = RunStatus.PAUSED
+                    state.pause_reason = p.reason
+                elif isinstance(p, RunResumedPayload):
+                    state.status = RunStatus.RUNNING
+                    state.pause_reason = None
+                elif isinstance(p, RunCompletedPayload):
+                    state.status = RunStatus.COMPLETED
+                    state.summary = p.result_summary
+                    state.completion_evidence = {
+                        "all_normal": p.all_normal,
+                        "unmet_step_ids": list(p.unmet_step_ids),
+                        # S06 (D-03/D-04): 交付契约维度折叠（met 由 status 派生）
+                        "deliverable_status": p.deliverable_status,
+                        "deliverable_summary": list(p.deliverable_summary),
+                    }
+                elif isinstance(p, RunFailedPayload):
+                    state.status = RunStatus.FAILED
+                    state.last_error = p.final_error
+                    state.user_facing_message = p.user_facing_message
+                    if p.result_summary:
+                        state.summary = p.result_summary
+                elif isinstance(p, RunOrphanedPayload):
+                    state.orphaned = True
 
             case EventType.DELIVERY_CONTRACTS_RESOLVED:
                 p = DeliveryContractsResolvedPayload(**event.payload)
@@ -230,153 +248,109 @@ def fold_events(events: list[Event]) -> RunState:
                         seq=event.seq,
                         thought=p.thought,
                         tool_choice=p.tool_choice,
-                        token_count=p.token_count,
                     )
                 )
                 state.latest_thought = state.thought_history[-1]
 
-            case EventType.TOOL_CALLED:
-                p = ToolCalledPayload(**event.payload)
-                state.tool_calls.append(p)
-
-            case EventType.TOOL_COMPLETED:
-                p = ToolCompletedPayload(**event.payload)
-                state.tool_results.append(
-                    ToolResult(
-                        tool_call_id=p.tool_call_id,
-                        tool_name=p.tool_name,
-                        status=(
-                            ToolResultStatus.UNSUCCESSFUL
-                            if p.result_type == ToolResultType.UNSUCCESSFUL
-                            else ToolResultStatus.COMPLETED
-                        ),
-                        output=p.output,
-                        duration_ms=p.duration_ms,
-                        event_seq=event.seq,
-                        error=p.error,
+            case EventType.TOOL:
+                p = parse_event_payload(event.event_type, event.payload)
+                if isinstance(p, ToolCalledPayload):
+                    state.tool_calls.append(p)
+                elif isinstance(p, ToolCompletedPayload):
+                    state.tool_results.append(
+                        ToolResult(
+                            tool_call_id=p.tool_call_id,
+                            tool_name=p.tool_name,
+                            status=(
+                                ToolResultStatus.UNSUCCESSFUL
+                                if p.result_type == ToolResultType.UNSUCCESSFUL
+                                else ToolResultStatus.COMPLETED
+                            ),
+                            output=p.output,
+                            duration_ms=p.duration_ms,
+                            event_seq=event.seq,
+                            error=p.error,
+                        )
                     )
-                )
-                # v3.4 (F-4): attach the tool output to the step evidence so a
-                # resumed run can rebuild downstream inputs. Never trimmed by
-                # compression (evidence is independent of the LLM working view).
-                if p.step_id:
-                    ev = _evidence(p.step_id, "", event.seq)
-                    ev.output = p.output
-                    ev.tool_name = p.tool_name or ev.tool_name
-                    if p.tool_call_id:
-                        ev.tool_call_id = p.tool_call_id
-                    if isinstance(p.output, dict) and p.output.get("ref") and p.output.get("sha256"):
-                        ev.output_ref = str(p.output["ref"])
-
-            case EventType.TOOL_FAILED:
-                p = ToolFailedPayload(**event.payload)
-                state.tool_results.append(
-                    ToolResult(
-                        tool_call_id=p.tool_call_id,
-                        tool_name=p.tool_name,
-                        status=ToolResultStatus.FAILED,
-                        error=p.error,
-                        event_seq=event.seq,
+                    # v3.4 (F-4): attach the tool output to the step evidence so a
+                    # resumed run can rebuild downstream inputs. Never trimmed by
+                    # compression (evidence is independent of the LLM working view).
+                    if p.step_id:
+                        ev = _evidence(p.step_id, "", event.seq)
+                        ev.output = p.output
+                        ev.tool_name = p.tool_name or ev.tool_name
+                        if p.tool_call_id:
+                            ev.tool_call_id = p.tool_call_id
+                        if isinstance(p.output, dict) and p.output.get("ref") and p.output.get("sha256"):
+                            ev.output_ref = str(p.output["ref"])
+                elif isinstance(p, ToolFailedPayload):
+                    state.tool_results.append(
+                        ToolResult(
+                            tool_call_id=p.tool_call_id,
+                            tool_name=p.tool_name,
+                            status=ToolResultStatus.FAILED,
+                            error=p.error,
+                            event_seq=event.seq,
+                        )
                     )
-                )
-                state.last_error = p.error
-
-            case EventType.TOOL_TIMEOUT:
-                p = ToolTimeoutPayload(**event.payload)
-                state.tool_results.append(
-                    ToolResult(
-                        tool_call_id=p.tool_call_id,
-                        tool_name=p.tool_name,
-                        status=ToolResultStatus.TIMEOUT,
-                        error=f"Timeout after {p.timeout_ms}ms",
-                        event_seq=event.seq,
+                    state.last_error = p.error
+                elif isinstance(p, ToolTimeoutPayload):
+                    state.tool_results.append(
+                        ToolResult(
+                            tool_call_id=p.tool_call_id,
+                            tool_name=p.tool_name,
+                            status=ToolResultStatus.TIMEOUT,
+                            error=f"Timeout after {p.timeout_ms}ms",
+                            event_seq=event.seq,
+                        )
                     )
-                )
-                state.last_error = f"Tool '{p.tool_name}' timed out"
-
-            case EventType.GUARDRAIL_TRIGGERED:
-                p = GuardrailTriggeredPayload(**event.payload)
-                state.tool_results.append(
-                    ToolResult(
-                        tool_call_id=p.tool_call_id,
-                        tool_name=p.tool_name,
-                        status=ToolResultStatus.GUARDRAIL_BLOCKED,
-                        error=f"Guardrail '{p.guardrail_id}': {p.reason}",
-                        event_seq=event.seq,
+                    state.last_error = f"Tool '{p.tool_name}' timed out"
+                elif isinstance(p, GuardrailTriggeredPayload):
+                    state.tool_results.append(
+                        ToolResult(
+                            tool_call_id=p.tool_call_id,
+                            tool_name=p.tool_name,
+                            status=ToolResultStatus.GUARDRAIL_BLOCKED,
+                            error=f"Guardrail '{p.guardrail_id}': {p.reason}",
+                            event_seq=event.seq,
+                        )
                     )
-                )
+                # OutputBlobStoredPayload: 证据投影由 TOOL completed 的 output.ref
+                # 完成，本 phase 不另改折叠态。
 
-            case EventType.CONFIRMATION_REQUESTED:
-                p = ConfirmationRequestedPayload(**event.payload)
-                state.pending_confirmations.append(p)
+            case EventType.CONFIRMATION:
+                p = parse_event_payload(event.event_type, event.payload)
+                if isinstance(p, ConfirmationRequestedPayload):
+                    state.pending_confirmations.append(p)
+                elif isinstance(p, ConfirmationReceivedPayload):
+                    state.pending_confirmations = [
+                        c for c in state.pending_confirmations if c.confirmation_id != p.confirmation_id
+                    ]
 
-            case EventType.CONFIRMATION_RECEIVED:
-                p = ConfirmationReceivedPayload(**event.payload)
-                state.pending_confirmations = [
-                    c for c in state.pending_confirmations if c.confirmation_id != p.confirmation_id
-                ]
-
-            case EventType.CONTEXT_COMPRESSED:
-                # Legacy read-only: old runs used ContextCompressed with Episode/str summary.
-                p = ContextCompressedPayload(**event.payload)
-                state.summary = p.summary_ref
-                state.keep_recent_count = p.keep_recent_count
-                if isinstance(state.summary, Episode) and state.summary.original_event_refs:
-                    compressed_seqs = set(state.summary.original_event_refs)
+            case EventType.CONTEXT:
+                p = parse_event_payload(event.event_type, event.payload)
+                if isinstance(p, ContextCheckpointedPayload):
+                    state.last_checkpoint_seq = p.checkpoint_seq
+                elif isinstance(p, EpisodeArchivedPayload):
+                    state.summary = p.episode
+                    state.episodes.append(p.episode)
+                    state.keep_recent_count = p.keep_recent_count
+                    archived_set = set(p.archived_event_refs)
                     keep = max(p.keep_recent_count, 0)
                     recent_thought_seqs = {t.seq for t in state.thought_history[-keep:]} if keep > 0 else set()
                     recent_result_seqs = {tr.event_seq for tr in state.tool_results[-keep:]} if keep > 0 else set()
                     state.thought_history = [
-                        t for t in state.thought_history if t.seq not in compressed_seqs or t.seq in recent_thought_seqs
+                        t for t in state.thought_history if t.seq not in archived_set or t.seq in recent_thought_seqs
                     ]
                     state.tool_results = [
                         tr
                         for tr in state.tool_results
-                        if tr.event_seq not in compressed_seqs or tr.event_seq in recent_result_seqs
+                        if tr.event_seq not in archived_set or tr.event_seq in recent_result_seqs
                     ]
-                    # Known Issue: tool_calls and feedbacks are NOT trimmed here.
-                    # They accumulate unboundedly over long runs.
-                    # See TODO_v2.1.md §Known Technical Debt.
-
-            case EventType.CONTEXT_CHECKPOINTED:
-                p = ContextCheckpointedPayload(**event.payload)
-                state.last_checkpoint_seq = p.checkpoint_seq
-
-            case EventType.RUN_PAUSED:
-                p = RunPausedPayload(**event.payload)
-                state.status = RunStatus.PAUSED
-                state.pause_reason = p.reason
-
-            case EventType.RUN_RESUMED:
-                p = RunResumedPayload(**event.payload)
-                state.status = RunStatus.RUNNING
-                state.pause_reason = None
-
-            case EventType.RUN_COMPLETED:
-                p = RunCompletedPayload(**event.payload)
-                state.status = RunStatus.COMPLETED
-                state.summary = p.result_summary
-                state.completion_evidence = {
-                    "all_normal": p.all_normal,
-                    "unmet_step_ids": list(p.unmet_step_ids),
-                    # S06 (D-03/D-04): 交付契约维度折叠
-                    "deliverable_met": p.deliverable_met,
-                    "deliverable_status": p.deliverable_status,
-                    "deliverable_summary": list(p.deliverable_summary),
-                }
-
-            case EventType.RUN_FAILED:
-                p = RunFailedPayload(**event.payload)
-                state.status = RunStatus.FAILED
-                state.last_error = p.final_error
-                state.user_facing_message = p.user_facing_message
-                if p.result_summary:
-                    state.summary = p.result_summary
-
-            case EventType.RUN_COMMAND:
-                # Control-plane command events are consumed by Scheduler and do
-                # not themselves mutate folded run state.
-                pass
+                elif isinstance(p, ContextPrunedPayload):
+                    pruned_set = set(p.pruned_event_refs)
+                    state.thought_history = [t for t in state.thought_history if t.seq not in pruned_set]
+                    state.tool_results = [tr for tr in state.tool_results if tr.event_seq not in pruned_set]
 
             case EventType.FEEDBACK_INJECTED:
                 p = FeedbackInjectedPayload(**event.payload)
@@ -384,200 +358,158 @@ def fold_events(events: list[Event]) -> RunState:
                     p = p.model_copy(update={"injected_at_seq": event.seq})
                 state.feedbacks.append(p)
 
-            case EventType.PLAN_CREATED:
-                p = PlanCreatedPayload(**event.payload)
-                # v2.2 (C, D6): 计划结构落事件 — 重建 DAG 蓝图
-                blueprint = p.steps if p.steps else []
-                entry = {
-                    "plan_id": p.plan_id,
-                    "intent": p.intent,
-                    "steps_summary": p.steps_summary,
-                    "layer_count": p.layer_count,
-                    "steps": list(blueprint),
-                }
-                state.plan_history.append(entry)
-                state.latest_plan = entry
-                _apply_blueprint(list(blueprint), p.plan_id, event.seq)
-
-            case EventType.DAG_STEP_STARTED:
-                p = DagStepStartedPayload(**event.payload)
-                ev = _evidence(p.step_id, p.plan_id, event.seq)
-                if ev.exec_state in ("pending", ""):
-                    ev.exec_state = "running"
-                ev.tool_name = p.tool_name or ev.tool_name
-                ev.depends_on = list(p.depends_on) if p.depends_on else ev.depends_on
-                ev.updated_seq = event.seq
-                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
-                    existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
-                    if existing:
-                        existing["status"] = "started"
-                        existing["tool_name"] = p.tool_name
-                    else:
-                        state.latest_plan["steps"].append(
-                            {"step_id": p.step_id, "tool_name": p.tool_name, "status": "started"}
-                        )
-
-            case EventType.DAG_STEP_COMPLETED:
-                p = DagStepCompletedPayload(**event.payload)
-                step_status = p.status if p.status else "completed"
-                ev = _evidence(p.step_id, p.plan_id, event.seq)
-                ev.exec_state = step_status
-                ev.output_summary = p.output_summary or ev.output_summary
-                if p.error:
-                    ev.error = p.error
-                if p.tool_call_id:
-                    ev.tool_call_id = p.tool_call_id
-                ev.updated_seq = event.seq
-                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
-                    existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
-                    if existing:
-                        existing["status"] = step_status
-                        existing["output_summary"] = p.output_summary
-                        if p.error:
-                            existing["error"] = p.error
-                        if p.tool_call_id:
-                            existing["tool_call_id"] = p.tool_call_id
-                    else:
-                        step_data = {"step_id": p.step_id, "status": step_status, "output_summary": p.output_summary}
-                        if p.error:
-                            step_data["error"] = p.error
-                        if p.tool_call_id:
-                            step_data["tool_call_id"] = p.tool_call_id
-                        state.latest_plan["steps"].append(step_data)
-
-            case EventType.DAG_STEP_FAILED:
-                p = DagStepFailedPayload(**event.payload)
-                ev = _evidence(p.step_id, p.plan_id, event.seq)
-                ev.exec_state = "failed"
-                ev.error = p.error
-                if p.tool_name:
-                    ev.tool_name = p.tool_name
-                if p.tool_call_id:
-                    ev.tool_call_id = p.tool_call_id
-                ev.updated_seq = event.seq
-                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
-                    existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
-                    if existing:
-                        existing["status"] = "failed"
-                        existing["error"] = p.error
-                        if p.tool_call_id:
-                            existing["tool_call_id"] = p.tool_call_id
-                    else:
-                        entry = {"step_id": p.step_id, "status": "failed", "error": p.error}
-                        if p.tool_call_id:
-                            entry["tool_call_id"] = p.tool_call_id
-                        state.latest_plan["steps"].append(entry)
-
-            case EventType.DAG_STEP_SKIPPED:
-                p = DagStepSkippedPayload(**event.payload)
-                ev = _evidence(p.step_id, p.plan_id, event.seq)
-                # SKIPPED means the tool never ran; a later revision may re-open it,
-                # so it is not a terminal state for evidence purposes.
-                ev.exec_state = "skipped"
-                ev.skip_reason = p.reason
-                if p.tool_name:
-                    ev.tool_name = p.tool_name
-                ev.updated_seq = event.seq
-                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
-                    existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
-                    if existing:
-                        existing["status"] = "skipped"
-                        existing["reason"] = p.reason
-                    else:
-                        state.latest_plan["steps"].append(
-                            {
-                                "step_id": p.step_id,
-                                "status": "skipped",
-                                "reason": p.reason,
-                            }
-                        )
-
-            case EventType.PLAN_REVISED:
-                p = PlanRevisedPayload(**event.payload)
-                state.feedbacks = [
-                    fb.model_copy(update={"consumed_at_seq": event.seq}) if fb.consumed_at_seq is None else fb
-                    for fb in state.feedbacks
-                ]
-                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
-                    state.latest_plan["intent"] = p.intent
-                    state.latest_plan["revision_reason"] = p.revision_reason
-                    state.latest_plan["remaining_steps_summary"] = p.remaining_steps_summary
-                    state.latest_plan["step_tasks"] = dict(p.step_tasks)
-                    # v2.2 (P2): 修订蓝图落事件 → 折叠态 latest_plan 与实际修订计划对齐。
-                    # 修订后的步骤列表替换旧蓝图（各步骤以 step_id 为主键，后续
-                    # DAG_STEP_* 事件继续按 step_id 更新状态）。
+            case EventType.PLAN:
+                p = parse_event_payload(event.event_type, event.payload)
+                if isinstance(p, PlanCreatedPayload):
+                    # v2.2 (C, D6): 计划结构落事件 — 重建 DAG 蓝图
+                    blueprint = p.steps if p.steps else []
+                    entry = {
+                        "plan_id": p.plan_id,
+                        "intent": p.intent,
+                        "steps_summary": p.steps_summary,
+                        "layer_count": p.layer_count,
+                        "steps": list(blueprint),
+                    }
+                    state.plan_history.append(entry)
+                    state.latest_plan = entry
+                    _apply_blueprint(list(blueprint), p.plan_id, event.seq)
+                elif isinstance(p, PlanRevisedPayload):
+                    state.feedbacks = [
+                        fb.model_copy(update={"consumed_at_seq": event.seq}) if fb.consumed_at_seq is None else fb
+                        for fb in state.feedbacks
+                    ]
+                    if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                        state.latest_plan["intent"] = p.intent
+                        state.latest_plan["revision_reason"] = p.revision_reason
+                        state.latest_plan["remaining_steps_summary"] = p.remaining_steps_summary
+                        state.latest_plan["step_tasks"] = dict(p.step_tasks)
+                        # v2.2 (P2): 修订蓝图落事件 → 折叠态 latest_plan 与实际修订计划对齐。
+                        # 修订后的步骤列表替换旧蓝图（各步骤以 step_id 为主键，后续
+                        # DAG_STEP_* 事件继续按 step_id 更新状态）。
+                        if p.steps:
+                            state.latest_plan["steps"] = [dict(s) for s in p.steps]
+                    state.step_tasks.update(p.step_tasks)
+                    # v3.4 (F-1): revision patch feeds evidence (tool change re-opens step).
                     if p.steps:
-                        state.latest_plan["steps"] = [dict(s) for s in p.steps]
-                state.step_tasks.update(p.step_tasks)
-                # v3.4 (F-1): revision patch feeds evidence (tool change re-opens step).
-                if p.steps:
-                    _apply_blueprint(list(p.steps), p.plan_id, event.seq)
+                        _apply_blueprint(list(p.steps), p.plan_id, event.seq)
+                elif isinstance(p, PlanCompletedPayload):
+                    state.plan_boundary_seqs.append(event.seq)
+                    if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                        state.latest_plan["status"] = "completed"
+                        state.latest_plan["summary"] = p.summary
+                elif isinstance(p, PlanFailedPayload):
+                    state.plan_boundary_seqs.append(event.seq)
+                    if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                        state.latest_plan["status"] = "failed"
+                        state.latest_plan["final_error"] = p.final_error
 
-            case EventType.PLAN_COMPLETED:
-                p = PlanCompletedPayload(**event.payload)
-                state.plan_boundary_seqs.append(event.seq)
-                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
-                    state.latest_plan["status"] = "completed"
-                    state.latest_plan["summary"] = p.summary
+            case EventType.STEP:
+                p = parse_event_payload(event.event_type, event.payload)
+                if isinstance(p, DagStepStartedPayload):
+                    ev = _evidence(p.step_id, p.plan_id, event.seq)
+                    if ev.exec_state in ("pending", ""):
+                        ev.exec_state = "running"
+                    ev.tool_name = p.tool_name or ev.tool_name
+                    ev.depends_on = list(p.depends_on) if p.depends_on else ev.depends_on
+                    ev.updated_seq = event.seq
+                    if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                        existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
+                        if existing:
+                            existing["status"] = "started"
+                            existing["tool_name"] = p.tool_name
+                        else:
+                            state.latest_plan["steps"].append(
+                                {"step_id": p.step_id, "tool_name": p.tool_name, "status": "started"}
+                            )
+                elif isinstance(p, DagStepCompletedPayload):
+                    step_status = p.status if p.status else "completed"
+                    ev = _evidence(p.step_id, p.plan_id, event.seq)
+                    ev.exec_state = step_status
+                    ev.output_summary = p.output_summary or ev.output_summary
+                    if p.error:
+                        ev.error = p.error
+                    if p.tool_call_id:
+                        ev.tool_call_id = p.tool_call_id
+                    ev.updated_seq = event.seq
+                    if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                        existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
+                        if existing:
+                            existing["status"] = step_status
+                            existing["output_summary"] = p.output_summary
+                            if p.error:
+                                existing["error"] = p.error
+                            if p.tool_call_id:
+                                existing["tool_call_id"] = p.tool_call_id
+                        else:
+                            step_data = {
+                                "step_id": p.step_id,
+                                "status": step_status,
+                                "output_summary": p.output_summary,
+                            }
+                            if p.error:
+                                step_data["error"] = p.error
+                            if p.tool_call_id:
+                                step_data["tool_call_id"] = p.tool_call_id
+                            state.latest_plan["steps"].append(step_data)
+                elif isinstance(p, DagStepFailedPayload):
+                    ev = _evidence(p.step_id, p.plan_id, event.seq)
+                    ev.exec_state = "failed"
+                    ev.error = p.error
+                    if p.tool_name:
+                        ev.tool_name = p.tool_name
+                    if p.tool_call_id:
+                        ev.tool_call_id = p.tool_call_id
+                    ev.updated_seq = event.seq
+                    if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                        existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
+                        if existing:
+                            existing["status"] = "failed"
+                            existing["error"] = p.error
+                            if p.tool_call_id:
+                                existing["tool_call_id"] = p.tool_call_id
+                        else:
+                            entry = {"step_id": p.step_id, "status": "failed", "error": p.error}
+                            if p.tool_call_id:
+                                entry["tool_call_id"] = p.tool_call_id
+                            state.latest_plan["steps"].append(entry)
+                elif isinstance(p, DagStepSkippedPayload):
+                    ev = _evidence(p.step_id, p.plan_id, event.seq)
+                    # SKIPPED means the tool never ran; a later revision may re-open it,
+                    # so it is not a terminal state for evidence purposes.
+                    ev.exec_state = "skipped"
+                    ev.skip_reason = p.reason
+                    if p.tool_name:
+                        ev.tool_name = p.tool_name
+                    ev.updated_seq = event.seq
+                    if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
+                        existing = next((s for s in state.latest_plan["steps"] if s["step_id"] == p.step_id), None)
+                        if existing:
+                            existing["status"] = "skipped"
+                            existing["reason"] = p.reason
+                        else:
+                            state.latest_plan["steps"].append(
+                                {
+                                    "step_id": p.step_id,
+                                    "status": "skipped",
+                                    "reason": p.reason,
+                                }
+                            )
 
-            case EventType.PLAN_FAILED:
-                p = PlanFailedPayload(**event.payload)
-                state.plan_boundary_seqs.append(event.seq)
-                if state.latest_plan and state.latest_plan["plan_id"] == p.plan_id:
-                    state.latest_plan["status"] = "failed"
-                    state.latest_plan["final_error"] = p.final_error
-
-            case EventType.CONVERSATION_STARTED | EventType.CONVERSATION_MESSAGE | EventType.CONVERSATION_ENDED:
-                pass
-
-            case EventType.RUN_ORPHANED:
-                RunOrphanedPayload(**event.payload)
-                state.orphaned = True
-
-            case EventType.EPISODE_ARCHIVED:
-                p = EpisodeArchivedPayload(**event.payload)
-                state.summary = p.episode
-                state.episodes.append(p.episode)
-                state.keep_recent_count = p.keep_recent_count
-                archived_set = set(p.archived_event_refs)
-                keep = max(p.keep_recent_count, 0)
-                recent_thought_seqs = {t.seq for t in state.thought_history[-keep:]} if keep > 0 else set()
-                recent_result_seqs = {tr.event_seq for tr in state.tool_results[-keep:]} if keep > 0 else set()
-                state.thought_history = [
-                    t for t in state.thought_history if t.seq not in archived_set or t.seq in recent_thought_seqs
-                ]
-                state.tool_results = [
-                    tr
-                    for tr in state.tool_results
-                    if tr.event_seq not in archived_set or tr.event_seq in recent_result_seqs
-                ]
-
-            case EventType.CONTEXT_PRUNED:
-                p = ContextPrunedPayload(**event.payload)
-                pruned_set = set(p.pruned_event_refs)
-                state.thought_history = [t for t in state.thought_history if t.seq not in pruned_set]
-                state.tool_results = [tr for tr in state.tool_results if tr.event_seq not in pruned_set]
-
-            case EventType.STEP_LOCAL_REPAIR_STARTED | EventType.STEP_LOCAL_REPAIR_COMPLETED:
+            case EventType.STEP_REPAIR:
                 # v3.4 (F-6, ADR-011): 局部修复边界事件 — 纯可观测/审计。
                 # 证据投影不变：修复对步骤终态的影响由修复后重跑的
-                # DAG_STEP_STARTED/COMPLETED/FAILED + TOOL_* 事件折叠，不在本事件折叠。
+                # STEP started/completed/failed + TOOL_* 事件折叠，不在本事件折叠。
                 pass
 
-            case EventType.LATE_EVENT_REJECTED | EventType.PHASE_TIMED_OUT | EventType.TASK_CLEANUP_TIMEOUT:
+            case EventType.DIAGNOSTIC:
                 # 受信守卫事件（L-03 / S10）：仅审计可观测，不改变 run 折叠态。
                 pass
 
-            case EventType.OUTPUT_BLOB_STORED:
-                # v3.4 (F-2): 大输出落 blob 引用；证据投影由 TOOL_COMPLETED 的
-                # output.ref/output_sha256 完成，本事件不另改折叠态。
+            case EventType.CONVERSATION:
+                # conversation 作用域事件，不属于单个 run 的折叠投影。
                 pass
 
-            case (
-                EventType.WORKSPACE_CREATED
-                | EventType.WORKSPACE_UPDATED
-                | EventType.WORKSPACE_DELETED
-            ):
+            case EventType.WORKSPACE:
                 # workspace 作用域事件，不属于单个 run 的折叠投影。
                 pass
 

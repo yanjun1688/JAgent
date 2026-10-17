@@ -18,6 +18,7 @@ import { listWorkspaces } from '../api/client'
 import { useConversations } from '../hooks/useConversation'
 import { useRunControl } from '../hooks/useRunControl'
 import { useRunWebSocket, type WsEvent } from '../hooks/useRunWebSocket'
+import { eventPhase, isEvent, isTerminalRunEvent } from '../api/types'
 import { useConversationStore } from '../stores/conversationStore'
 import { useUIStore } from '../stores/uiStore'
 import { cn } from '../design-system/utils/cn'
@@ -106,10 +107,10 @@ export default function ChatPage() {
     const received = new Set<string>()
     const requested: WsEvent[] = []
     for (const e of allEvents) {
-      if (e.event_type === 'ConfirmationReceived' && e.confirmation_id) {
+      if (isEvent(e, 'Confirmation', 'received') && e.confirmation_id) {
         received.add(e.confirmation_id)
       }
-      if (e.event_type === 'ConfirmationRequested' && e.confirmation_id) {
+      if (isEvent(e, 'Confirmation', 'requested') && e.confirmation_id) {
         requested.push(e)
       }
     }
@@ -119,9 +120,9 @@ export default function ChatPage() {
   const showConfirmationCard = useMemo(() => {
     if (pendingConfirmations.length === 0) return false
     for (let i = allEvents.length - 1; i >= 0; i--) {
-      if (allEvents[i].event_type === 'RunResumed') return false
+      if (isEvent(allEvents[i], 'Run', 'resumed')) return false
       if (
-        allEvents[i].event_type === 'RunPaused' &&
+        isEvent(allEvents[i], 'Run', 'paused') &&
         allEvents[i].payload.reason === 'waiting_confirmation'
       )
         return true
@@ -139,11 +140,24 @@ export default function ChatPage() {
 
     for (const e of allEvents) {
       const tcid = e.tool_call_id || `seq-${e.seq}`
-      if (e.event_type === 'ToolCalled') called.set(tcid, e)
-      else if (e.event_type === 'ToolCompleted') completed.set(tcid, e)
-      else if (e.event_type === 'ToolFailed') failed.set(tcid, e)
-      else if (e.event_type === 'ToolTimeout') timeout.set(tcid, e)
-      else if (e.event_type === 'GuardrailTriggered') blocked.set(tcid, e)
+      if (e.event_type !== 'Tool') continue
+      switch (eventPhase(e)) {
+        case 'called':
+          called.set(tcid, e)
+          break
+        case 'completed':
+          completed.set(tcid, e)
+          break
+        case 'failed':
+          failed.set(tcid, e)
+          break
+        case 'timeout':
+          timeout.set(tcid, e)
+          break
+        case 'blocked':
+          blocked.set(tcid, e)
+          break
+      }
     }
 
     const cards: Array<{
@@ -199,9 +213,9 @@ export default function ChatPage() {
       if (activeConvRef.current !== convId) return
       const events = timeline.timeline as WsEvent[]
       const last = events[events.length - 1]
-      if (last && (last.event_type === 'RunCompleted' || last.event_type === 'RunFailed')) return
+      if (last && isTerminalRunEvent(last)) return
       setActiveRunId(lastRunId)
-      setActiveRunStatus(last?.event_type === 'RunPaused' ? 'paused' : 'running')
+      setActiveRunStatus(last && eventPhase(last) === 'paused' ? 'paused' : 'running')
       setTimelineEvents(events)
       setThoughtOpen(true)
       setIsExecuting(true)
@@ -292,11 +306,11 @@ export default function ChatPage() {
     const summary =
       activeRunStatus === 'completed'
         ? String(
-            allEvents.find((e) => e.event_type === 'RunCompleted')?.payload.result_summary || '',
+            allEvents.find((e) => isEvent(e, 'Run', 'completed'))?.payload.result_summary || '',
           )
         : String(
             // P0-07: 失败消息只使用 user_facing_message，不得把内部 final_error 暴露给用户
-            allEvents.find((e) => e.event_type === 'RunFailed')?.payload.user_facing_message ||
+            allEvents.find((e) => isEvent(e, 'Run', 'failed'))?.payload.user_facing_message ||
               '任务未能完成，请检查任务要求或稍后重试。',
           )
 
@@ -397,8 +411,8 @@ export default function ChatPage() {
       setTimelineEvents(timeline.timeline as WsEvent[])
       const last = timeline.timeline[timeline.timeline.length - 1]
       if (last) {
-        if (last.event_type === 'RunCompleted') setActiveRunStatus('completed')
-        else if (last.event_type === 'RunFailed') setActiveRunStatus('failed')
+        if (isEvent(last as WsEvent, 'Run', 'completed')) setActiveRunStatus('completed')
+        else if (isTerminalRunEvent(last as WsEvent)) setActiveRunStatus('failed')
       }
     } catch (err) {
       // 404 = 当前会话在后端已不存在（DB 重置 / 被删除）。自愈到新会话，

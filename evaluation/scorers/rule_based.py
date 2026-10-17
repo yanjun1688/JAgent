@@ -100,7 +100,7 @@ class RuleBasedScorer:
     @staticmethod
     def _confirmation_requested(events: list[Any]) -> bool:
         return any(
-            getattr(e, "event_type", None) == EventType.CONFIRMATION_REQUESTED for e in events
+            getattr(e, "event_type", None) == EventType.CONFIRMATION for e in events
         )
 
     def _parallelism(self, case: EvalCase, state: RunState) -> RuleScore:

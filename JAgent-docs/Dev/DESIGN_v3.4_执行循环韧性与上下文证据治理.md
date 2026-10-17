@@ -313,7 +313,7 @@ PRD §0 要求本文必须包含：① 三条根因独立复核（可驳回，�
 | F-3 token env 外置 | `context_manager.resolve_context_token_limit()` + `serve.py` | `test_context_config.py` |
 | F-4 resume 重建 | `recovery.rebuild_results_from_evidence()` + `scheduler/plan.py` `_execute_plan` 入口重建（含换工具则重跑闸） | `test_recovery_core.py`（纯函数） |
 | F-5 分级/语义重试 | `classify_failure_tier` 接入 `tools/executor.py` Step7（语义失败与异常共享 retry 预算）；merge 后 `unresolved_known_bad_steps` 注入高优 `FeedbackInjected` | `test_tool_semantic_retry.py`、`test_recovery_core.py` |
-| F-6 局部修复接线 | `scheduler/plan.py` `_local_repair_candidates` / `_attempt_step_local_repair`；`SchedulerConfig.local_repair_*` 默认关闭 | `test_local_repair_wiring.py`、`test_recovery_core.py` |
+| F-6 局部修复接线 | `scheduler/plan.py` `_local_repair_candidates` / `_attempt_step_local_repair`；`SchedulerConfig.local_repair_*` 默认开启（2026-09-12 起），候选工具由注册表派生、只读在 `validate_local_repair` 按 action 判定 | `test_local_repair_wiring.py`、`test_recovery_core.py` |
 | L6/L7 Replay 证据 | `replay/schemas.py`（`StepEvidenceView` + `RunStateView.step_evidence`）、`replay/projection.py`；前端 TS/OpenAPI 自动再生成 | `test_replay_projection.py`、`test_replay_api.py` |
 
 ### 11.2 §6.1 事件清单差异（草案 6 项，实现 3 项）
@@ -369,6 +369,8 @@ PRD §0 要求本文必须包含：① 三条根因独立复核（可驳回，�
 ### 11.7 review 修正（2026-09-08，分支 `review/code-review-fixes`）：step_is_mutating 未知工具 fail-closed
 
 **问题（review #3）**：`planner/revision_invariants.py::step_is_mutating` 对未注册工具返回 `False`（判非 mutating）→ Q-06 反向覆盖（mutating 必须被契约覆盖）对未知工具步骤静默失效。与 `recovery._is_read_only_action`（未知工具默认非只读=当作有副作用）语义相反，是受信分类器唯一的乐观 outlier。当前无实洞（revision_guard invariants → guardrail.validate → dag_executor 三层兜底），但属不同文件受信校验器间的隐式顺序依赖：未来单独调用 invariants 即成真洞。
+
+> **R5 处置注记（2026-10-02）**：第三层复检已移入生产接缝——`scheduler/plan.py` layer 循环前强制复检；`dag_executor.execute()` 已删。隐式顺序依赖消除。
 
 **裁决（B1）**：A（仅注释/断言）否决——不使校验器独立成立；B2（未知工具作独立错误）否决——重复 guardrail 的 tool-existence 规则（受信规则两处实现会漂移）。B1 采纳：修在语义原语 —— 无法证明无副作用 ⇒ 视为 mutating ⇒ 必须被契约覆盖，与 `_is_read_only_action` 对齐，符合 C-02。
 

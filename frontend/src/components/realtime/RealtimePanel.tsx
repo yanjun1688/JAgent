@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { Activity, WifiOff, Trash2 } from 'lucide-react'
 import { cn } from '../../design-system/utils/cn'
-import type { WsEvent } from '../../api/types'
+import { eventPhase, type WsEvent } from '../../api/types'
 import { EventItem } from './EventItem'
 
 export interface RealtimePanelProps {
@@ -16,9 +16,9 @@ export interface RealtimePanelProps {
 
 function buildStats(events: WsEvent[]) {
   return {
-    tool: events.filter((e) => e.event_type.startsWith('Tool')).length,
-    confirm: events.filter((e) => e.event_type.startsWith('Confirm')).length,
-    guardrail: events.filter((e) => e.event_type.startsWith('Guardrail')).length,
+    tool: events.filter((e) => e.event_type === 'Tool').length,
+    confirm: events.filter((e) => e.event_type === 'Confirmation').length,
+    guardrail: events.filter((e) => e.event_type === 'Tool' && eventPhase(e) === 'blocked').length,
   }
 }
 

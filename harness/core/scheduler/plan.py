@@ -22,14 +22,14 @@ from uuid import uuid4
 from harness.core.dag_executor import DagExecutor, PlanSuspended, plan_steps_to_payload
 from harness.core.dag_types import ExecState, StepResult, TaskState
 from harness.core.fold import RunState, RunStatus, ToolResultStatus
-from harness.core.logger import agent_logger, fmtkv, guard_logger
+from harness.core.logger import agent_logger, fmtkv, guard_logger, trace_event
 from harness.core.planner import Planner
+from harness.core.planner.rejections import record_plan_rejection
 from harness.core.recovery import rebuild_results_from_evidence, unresolved_known_bad_steps
 from harness.core.scheduler.base import BaseScheduler, SchedulerConfig
 from harness.core.scheduler.classify import ClassifyMixin
 from harness.core.scheduler.completion import CompletionGateMixin, CompletionVerdict
 from harness.core.scheduler.local_repair import LocalRepairMixin
-from harness.core.scheduler.loop import AgentLoopScheduler
 from harness.core.scheduler.revision_guard import RevisionGuardMixin
 from harness.models.events import (
     AgentThoughtPayload,
@@ -48,7 +48,7 @@ from harness.models.events import (
 )
 from harness.models.plan import DagPlan, DagStep
 from harness.models.tools import ToolDefinition
-from harness.storage.event_store import EventStore
+from harness.storage import EventStoreLike
 from harness.tools.executor import ToolExecutor
 
 _sched_iter = agent_logger("scheduler.iter")
@@ -75,7 +75,7 @@ class PlanningExecutorScheduler(
 
     def __init__(
         self,
-        store: EventStore,
+        store: EventStoreLike,
         executor: ToolExecutor,
         planner: Planner,
         dag_executor: DagExecutor,
@@ -130,7 +130,6 @@ class PlanningExecutorScheduler(
                 AgentThoughtPayload(
                     thought="ANSWER: " + answer,
                     tool_choice=None,
-                    token_count=0,
                     tool_calls=None,
                 ).model_dump(),
             )
@@ -184,7 +183,7 @@ class PlanningExecutorScheduler(
                 )
                 await self._append_run_event(
                     run_id,
-                    EventType.RUN_PAUSED,
+                    EventType.RUN,
                     RunPausedPayload(reason="waiting_confirmation").model_dump(),
                 )
                 await self._wait_for_resume(run_id)
@@ -200,7 +199,7 @@ class PlanningExecutorScheduler(
                     _sched_act.info("[%s] Step %s completed after confirmation", tag, confirm_sid)
                     await self._append_run_event(
                         run_id,
-                        EventType.DAG_STEP_COMPLETED,
+                        EventType.STEP,
                         DagStepCompletedPayload(
                             plan_id=plan_id,
                             step_id=confirm_sid,
@@ -231,7 +230,7 @@ class PlanningExecutorScheduler(
                     results[confirm_sid] = retry_raw
                     await self._append_run_event(
                         run_id,
-                        EventType.DAG_STEP_SKIPPED,
+                        EventType.STEP,
                         DagStepSkippedPayload(
                             plan_id=plan_id,
                             step_id=confirm_sid,
@@ -246,7 +245,7 @@ class PlanningExecutorScheduler(
                 results[confirm_sid] = retry_raw
                 await self._append_run_event(
                     run_id,
-                    EventType.DAG_STEP_FAILED,
+                    EventType.STEP,
                     DagStepFailedPayload(
                         plan_id=plan_id,
                         step_id=confirm_sid,
@@ -268,9 +267,9 @@ class PlanningExecutorScheduler(
             if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
                 return state
             loop_iteration += 1
-            if loop_iteration > self.config.max_iterations:
-                _sched_breaker.error("[breaker] Exceeded max iterations (%d)", self.config.max_iterations)
-                await self._fail(run_id, f"Exceeded max iterations ({self.config.max_iterations})")
+            if loop_iteration > self.config.run_attempt_budget:
+                _sched_breaker.error("[breaker] Exceeded max iterations (%d)", self.config.run_attempt_budget)
+                await self._fail(run_id, f"Exceeded max iterations ({self.config.run_attempt_budget})")
                 return await self._refresh_state(run_id)
             if self._is_cancelled(run_id):
                 await self._fail(run_id, "Run cancelled by user")
@@ -308,14 +307,6 @@ class PlanningExecutorScheduler(
         Returns a terminal RunState when the run should stop, otherwise the
         updated consecutive_failures counter.
         """
-        command_state = await self._handle_pending_commands(run_id)
-        if command_state is not None:
-            if command_state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
-                return command_state
-            if command_state.status == RunStatus.PAUSED:
-                await self._handle_pause(run_id)
-            return consecutive_failures
-
         if state.status == RunStatus.PAUSED:
             _sched_ctrl.info(
                 "[ctrl] Plan loop detected PAUSED for run=%s, pause_reason=%s, pending_confirmations=%d",
@@ -330,14 +321,20 @@ class PlanningExecutorScheduler(
         _sched_think.debug(
             "[plan] Planning for intent: %s %s", intent[:120], fmtkv(has_feedback=feedback_text is not None)
         )
-        plan = await self._get_or_fallback(
+        plan = await self._phase_call(
             run_id,
-            intent,
-            state,
-            feedback_text,
-            conversation_context,
+            "plan",
+            self.planner.plan(
+                intent,
+                state,
+                feedback=feedback_text,
+                conversation_context=conversation_context,
+                run_id=run_id,
+            ),
         )
         if plan is None:
+            _sched_ctrl.error("[plan] Planner failed to produce a valid plan — failing run honestly")
+            await self._fail(run_id, "Planner failed to produce a valid plan")
             return await self._refresh_state(run_id)
 
         await self._append_run_event(
@@ -346,7 +343,6 @@ class PlanningExecutorScheduler(
             AgentThoughtPayload(
                 thought=self.planner.last_raw_response[:500] or f"Plan: {plan.intent[:200]}",
                 tool_choice="plan",
-                token_count=0,
                 tool_calls=[s.tool for s in plan.steps[:5]],
             ).model_dump(),
         )
@@ -379,7 +375,6 @@ class PlanningExecutorScheduler(
                 AgentThoughtPayload(
                     thought="ANSWER: " + answer,
                     tool_choice=None,
-                    token_count=0,
                     tool_calls=None,
                 ).model_dump(),
             )
@@ -403,7 +398,7 @@ class PlanningExecutorScheduler(
         if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
             return state
 
-        if consecutive_failures >= self.config.max_consecutive_failures:
+        if consecutive_failures >= self.config.run_attempt_budget:
             _sched_breaker.error("[breaker] TRIP — consecutive_failures=%d", consecutive_failures)
             await self._fail(run_id, f"Circuit breaker: {consecutive_failures} consecutive failures")
             return await self._refresh_state(run_id)
@@ -464,7 +459,7 @@ class PlanningExecutorScheduler(
         # round 2 收敛而非 round 5 熔断。下方 breaker 仅为通用兜底。
 
         while True:
-            if self_heal_count >= self.config.max_consecutive_failures:
+            if self_heal_count >= self.config.run_attempt_budget:
                 _sched_breaker.error("[breaker] Self-heal loop exceeded max (%d) attempts", self_heal_count)
                 consecutive_failures = self_heal_count
                 await self._fail(run_id, f"Self-heal exceeded {self_heal_count} attempts — unable to complete plan")
@@ -476,6 +471,29 @@ class PlanningExecutorScheduler(
                 len(plan.steps),
                 len([r for r in results.values() if isinstance(r, StepResult) and r.is_completed]),
             )
+            # R5: whole-plan revalidation at the REAL execution entry (trusted).
+            # Runs on every entry into the layer loop — fresh plan, revise, and
+            # local-repair re-entry — so plan-level rules (unknown tool, probe,
+            # $ref, dangerous_with, DAG structure) are enforced even when the
+            # plan was rebuilt/repatched, not only when first generated.
+            entry_errors = self.planner.guardrail.validate(plan)
+            if entry_errors:
+                final_error = "; ".join(entry_errors)
+                _sched_act.error(
+                    "[execute] Plan rejected at execution entry — failing run: %s", final_error
+                )
+                await self._append_run_event(
+                    run_id,
+                    EventType.PLAN,
+                    PlanFailedPayload(
+                        plan_id=f"plan_{run_id}_{uuid4().hex[:8]}",
+                        completed_steps=0,
+                        total_layers=0,
+                        final_error=final_error,
+                    ).model_dump(),
+                )
+                await self._fail(run_id, final_error)
+                return await self._refresh_state(run_id), consecutive_failures
             completed_ids = {sid for sid, r in results.items() if isinstance(r, StepResult) and r.should_not_rerun}
             # v2.2 (D8): external deps for $var.field references use output_available
             # (data availability). Completion/gating uses step_normal elsewhere.
@@ -489,7 +507,7 @@ class PlanningExecutorScheduler(
             _sched_iter.info("[plan] PlanCreated %s: %d steps in %d layers", plan_id, len(plan.steps), len(layers))
             await self._append_run_event(
                 run_id,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 PlanCreatedPayload(
                     plan_id=plan_id,
                     intent=plan.intent,
@@ -578,6 +596,16 @@ class PlanningExecutorScheduler(
                             all_layers_ok = False
                             break
                     _sched_act.error("[execute] Layer %d had failures — revising", layer_idx)
+                    trace_event(
+                        run_id,
+                        "HEAL-REVISE-TRIGGER",
+                        layer=layer_idx,
+                        failed="; ".join(
+                            f"{sid}:{results[sid].error or '?'}"
+                            for sid in layer
+                            if sid in results and not results[sid].step_normal
+                        ),
+                    )
                     sys_state = self.dag_executor.build_dag_status_text(plan, results, current_layer=layer_idx)
                     s = await self._refresh_state(run_id)
                     fb = self._get_feedback_text(s, for_revise=True, since_seq=state_seq)
@@ -612,7 +640,7 @@ class PlanningExecutorScheduler(
                         _sched_think.error(
                             "[revise] Revise failed after layer failure, failures=%d/%d",
                             consecutive_failures,
-                            self.config.max_consecutive_failures,
+                            self.config.run_attempt_budget,
                         )
                         failed = [
                             (sid, r.error or "unknown")
@@ -638,6 +666,14 @@ class PlanningExecutorScheduler(
                             available_step_ids={sid for sid, result in results.items() if result.output_available},
                         )
                         if merged_errors:
+                            await record_plan_rejection(
+                                self.store,
+                                run_id,
+                                stage="merge",
+                                attempt=1,
+                                reasons=merged_errors,
+                                recovered=False,
+                            )
                             await self._fail(run_id, "Merged revision rejected: " + "; ".join(merged_errors))
                             return await self._refresh_state(run_id), consecutive_failures
 
@@ -711,6 +747,13 @@ class PlanningExecutorScheduler(
                         "[self-heal] Layer %d failed — revise returned %d steps → self-healing",
                         layer_idx,
                         len(revised.steps),
+                    )
+                    trace_event(
+                        run_id,
+                        "HEAL-REVISE-ACCEPT",
+                        layer=layer_idx,
+                        remaining=len(revised.steps),
+                        reason="step_failure_revised",
                     )
                     # v3.4 review #2: 事件经共享构造器，避免多处内联 PlanRevisedPayload。
                     await self._emit_plan_revised(
@@ -787,6 +830,12 @@ class PlanningExecutorScheduler(
                     sys_state = self.dag_executor.build_dag_status_text(plan, results, current_layer=len(layers) - 1)
                     s = await self._refresh_state(run_id)
                     fb = self._get_feedback_text(s, for_revise=True, since_seq=state_seq)
+                    trace_event(
+                        run_id,
+                        "HEAL-REVISE-TRIGGER",
+                        reason="not normal after plan completion",
+                        not_normal="; ".join(not_normal),
+                    )
                     revised, degen_err = await self._revise_with_degenerate_guard(
                         run_id,
                         plan,
@@ -837,6 +886,14 @@ class PlanningExecutorScheduler(
                                 available_step_ids={sid for sid, result in results.items() if result.output_available},
                             )
                             if merged_errors:
+                                await record_plan_rejection(
+                                    self.store,
+                                    run_id,
+                                    stage="merge",
+                                    attempt=1,
+                                    reasons=merged_errors,
+                                    recovered=False,
+                                )
                                 await self._fail(run_id, "Merged revision rejected: " + "; ".join(merged_errors))
                                 return await self._refresh_state(run_id), consecutive_failures
                             _sched_ctrl.info(
@@ -920,7 +977,6 @@ class PlanningExecutorScheduler(
                 AgentThoughtPayload(
                     thought="ANSWER: " + answer,
                     tool_choice=None,
-                    token_count=0,
                     tool_calls=None,
                 ).model_dump(),
             )
@@ -957,7 +1013,7 @@ class PlanningExecutorScheduler(
         }
         await self._append_run_event(
             run_id,
-            EventType.PLAN_REVISED,
+            EventType.PLAN,
             PlanRevisedPayload(
                 plan_id=plan_id,
                 revision_reason=revision_reason,
@@ -1006,7 +1062,7 @@ class PlanningExecutorScheduler(
             )
             await self._append_run_event(
                 run_id,
-                EventType.PLAN_FAILED,
+                EventType.PLAN,
                 PlanFailedPayload(
                     plan_id=plan_id,
                     completed_steps=root_total - len(verdict.unmet_step_ids),
@@ -1027,7 +1083,7 @@ class PlanningExecutorScheduler(
             )
             await self._append_run_event(
                 run_id,
-                EventType.PLAN_FAILED,
+                EventType.PLAN,
                 PlanFailedPayload(
                     plan_id=plan_id,
                     completed_steps=root_total - len(verdict.unmet_step_ids),
@@ -1041,7 +1097,7 @@ class PlanningExecutorScheduler(
         _sched_iter.info("[plan] PlanCompleted %s: %d/%d root steps", plan_id, root_completed, root_total)
         await self._append_run_event(
             run_id,
-            EventType.PLAN_COMPLETED,
+            EventType.PLAN,
             PlanCompletedPayload(
                 plan_id=plan_id,
                 completed_steps=root_completed,
@@ -1127,45 +1183,3 @@ class PlanningExecutorScheduler(
             fallback_summary="Task completed after revision",
         )
 
-    async def _get_or_fallback(
-        self,
-        run_id: str,
-        intent: str,
-        state: RunState,
-        feedback_text: str | None,
-        conversation_context: str = "",
-    ) -> DagPlan | None:
-        plan = await self._phase_call(
-            run_id,
-            "plan",
-            self.planner.plan(
-                intent,
-                state,
-                feedback=feedback_text,
-                conversation_context=conversation_context,
-                run_id=run_id,
-            ),
-        )
-        if plan is not None:
-            return plan
-
-        _sched_ctrl.warning("[fallback] Planner failed — falling back to serial AgentLoopScheduler")
-        from harness.core.agent_kernel import LLMAgentKernel
-
-        fallback_kernel = LLMAgentKernel(self.planner.llm)
-        serial = AgentLoopScheduler(
-            self.store,
-            self.executor,
-            fallback_kernel,
-            self.tool_defs,
-            self.tool_fns,
-            self.config,
-            self.context_manager,
-            self.monitor,
-            self.tracer,
-            workspace=self.workspace,
-            backend=self.backend,
-        )
-        run_state = await serial.run(run_id, intent)
-        _sched_ctrl.info("[fallback] Serial scheduler completed with status=%s", run_state.status.value)
-        return None

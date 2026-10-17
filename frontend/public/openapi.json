@@ -394,7 +394,7 @@
           "runs"
         ],
         "summary": "Create Run",
-        "description": "Create a new run and write the RunStarted event.\n\n写入 RunStarted 后立即通过 start_run() 拉起 PlanningExecutorScheduler 的后台循环。\nScheduler 自动执行 plan→execute→revise，事件写入后通过 WebSocket 广播。\nAPI 响应不等待 Scheduler 完成——循环运行在 asyncio.Task 中。\n注：当 Planner 生成 Plan 失败时，会降级到 AgentLoopScheduler（串行 think→act→observe）。",
+        "description": "Create a new run and write the RunStarted event.\n\n写入 RunStarted 后立即通过 start_run() 拉起 PlanningExecutorScheduler 的后台循环。\nScheduler 自动执行 plan→execute→revise，事件写入后通过 WebSocket 广播。\nAPI 响应不等待 Scheduler 完成——循环运行在 asyncio.Task 中。\n注：当 Planner 生成 Plan 失败时，Run 直接诚实判失败（不再降级到串行轨道）。",
         "operationId": "create_run_api_v1_runs_post",
         "requestBody": {
           "required": true,
@@ -1479,133 +1479,6 @@
         }
       }
     },
-    "/api/v1/query": {
-      "get": {
-        "tags": [
-          "query"
-        ],
-        "summary": "Query",
-        "operationId": "query_api_v1_query_get",
-        "parameters": [
-          {
-            "name": "type",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Type"
-            }
-          },
-          {
-            "name": "run_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Run Id"
-            }
-          },
-          {
-            "name": "include",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Include"
-            }
-          },
-          {
-            "name": "page",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "default": 1,
-              "title": "Page"
-            }
-          },
-          {
-            "name": "page_size",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 100,
-              "minimum": 1,
-              "default": 20,
-              "title": "Page Size"
-            }
-          },
-          {
-            "name": "since",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Since"
-            }
-          },
-          {
-            "name": "until",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Until"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/replay/runs/{run_id}/meta": {
       "get": {
         "tags": [
@@ -2205,11 +2078,6 @@
             "title": "Total Guardrail Triggers",
             "default": 0
           },
-          "total_tokens_consumed": {
-            "type": "integer",
-            "title": "Total Tokens Consumed",
-            "default": 0
-          },
           "avg_tool_success_rate": {
             "type": "number",
             "title": "Avg Tool Success Rate",
@@ -2640,7 +2508,11 @@
           },
           "priority": {
             "type": "string",
-            "pattern": "^(high|medium|low)$",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
             "title": "Priority",
             "default": "medium"
           },
@@ -3187,7 +3059,7 @@
           "tool"
         ],
         "title": "RequiredOperationInput",
-        "description": "S07 (D-02): 调用方显式声明的硬性交付操作（方案 A，source=caller）。\n\ntool + input 与后端 DeliveryContract 对齐（同源契约）。未提供时由系统\n抽取兜底（source=extracted）。"
+        "description": "S07 (D-02): 调用方显式声明的硬性交付操作（方案 A，source=caller）。\n\ntool + input 由父类 ``DeliveryOperationInput`` 提供（同源契约），本文仅为\n语义命名别名。提供时由系统抽取兜底（source=extracted）。"
       },
       "RetryableInfo": {
         "properties": {
@@ -3248,11 +3120,6 @@
           "event_count": {
             "type": "integer",
             "title": "Event Count",
-            "default": 0
-          },
-          "total_tokens": {
-            "type": "integer",
-            "title": "Total Tokens",
             "default": 0
           },
           "total_duration_ms": {

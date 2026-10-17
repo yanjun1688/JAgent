@@ -11,7 +11,7 @@ from __future__ import annotations
 from harness.core.logger import agent_logger
 from harness.core.planner.output_refs import parse_output_refs
 from harness.models.plan import DagPlan, RequiredOperation, validate_dag_structure
-from harness.storage.event_store import EventStore
+from harness.storage import EventStoreLike
 from harness.tools.registry import ToolRegistry
 
 _log = agent_logger("planner")
@@ -20,7 +20,7 @@ _log = agent_logger("planner")
 class PlanGuardrail:
     """Validates a DagPlan before execution — tool existence, schema, cycle, safety."""
 
-    def __init__(self, registry: ToolRegistry, store: EventStore | None = None):
+    def __init__(self, registry: ToolRegistry, store: EventStoreLike | None = None):
         self.registry = registry
         self.store = store
 

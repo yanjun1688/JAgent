@@ -48,10 +48,10 @@ const timeline = {
   next_cursor: 0,
   has_more: false,
   timeline: [
-    { seq: 1, event_type: 'RunStarted', created_at: 0, payload: {}, is_terminal: false },
-    { seq: 6, event_type: 'DagStepCompleted', created_at: 0, payload: {}, is_terminal: false, step_id: 's1' },
-    { seq: 8, event_type: 'GuardrailTriggered', created_at: 0, payload: {}, is_terminal: false, tool_name: 'write' },
-    { seq: 11, event_type: 'RunFailed', created_at: 0, payload: {}, is_terminal: true },
+    { seq: 1, event_type: 'Run', created_at: 0, payload: { phase: 'started' }, is_terminal: false },
+    { seq: 6, event_type: 'Step', created_at: 0, payload: { phase: 'completed' }, is_terminal: false, step_id: 's1' },
+    { seq: 8, event_type: 'Tool', created_at: 0, payload: { phase: 'blocked' }, is_terminal: false, tool_name: 'write' },
+    { seq: 11, event_type: 'Run', created_at: 0, payload: { phase: 'failed' }, is_terminal: true },
   ],
 }
 

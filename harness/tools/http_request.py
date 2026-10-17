@@ -59,20 +59,23 @@ HTTP_REQUEST_DEF = ToolDefinition(
     input_schema={
         "type": "object",
         "properties": {
-            "url": {"type": "string", "description": "Target URL"},
+            "url": {"type": "string", "description": "Target URL", "x-role": "authority"},
             "method": {
                 "type": "string",
                 "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"],
                 "default": "GET",
+                "x-role": "authority",
             },
             "headers": {
                 "type": "object",
                 "description": "Optional HTTP headers (key-value pairs)",
                 "additionalProperties": {"type": "string"},
+                "x-role": "data",
             },
             "body": {
                 "type": "object",
                 "description": "JSON body for POST/PUT/PATCH requests",
+                "x-role": "data",
             },
             "timeout_ms": {
                 "type": "integer",
@@ -128,7 +131,6 @@ HTTP_REQUEST_DEF = ToolDefinition(
             },
             side_effects=[],
             probe_allowed=True,
-            ref_allowed_fields={"url": False, "body": True, "headers": True},
         ),
         OperationContract(
             operation="HEAD",
@@ -144,7 +146,6 @@ HTTP_REQUEST_DEF = ToolDefinition(
             },
             side_effects=[],
             probe_allowed=True,
-            ref_allowed_fields={"url": False},
         ),
         OperationContract(
             operation="POST",
@@ -161,25 +162,21 @@ HTTP_REQUEST_DEF = ToolDefinition(
             },
             side_effects=[SideEffect.EXTERNAL],
             probe_allowed=False,
-            ref_allowed_fields={"url": False, "body": True, "headers": True},
         ),
         OperationContract(
             operation="PUT",
             side_effects=[SideEffect.EXTERNAL],
             probe_allowed=False,
-            ref_allowed_fields={"url": False, "body": True, "headers": True},
         ),
         OperationContract(
             operation="PATCH",
             side_effects=[SideEffect.EXTERNAL],
             probe_allowed=False,
-            ref_allowed_fields={"url": False, "body": True, "headers": True},
         ),
         OperationContract(
             operation="DELETE",
             side_effects=[SideEffect.EXTERNAL],
             probe_allowed=False,
-            ref_allowed_fields={"url": False, "body": True, "headers": True},
         ),
     ],
 )
@@ -234,14 +231,15 @@ class HttpRequestTool(BaseTool):
     input_schema = {
         "type": "object",
         "properties": {
-            "url": {"type": "string", "description": "Target URL"},
+            "url": {"type": "string", "description": "Target URL", "x-role": "authority"},
             "method": {
                 "type": "string",
                 "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"],
                 "default": "GET",
+                "x-role": "authority",
             },
-            "headers": {"type": "object", "description": "Optional HTTP headers"},
-            "body": {"type": "object", "description": "JSON body for POST/PUT/PATCH"},
+            "headers": {"type": "object", "description": "Optional HTTP headers", "x-role": "data"},
+            "body": {"type": "object", "description": "JSON body for POST/PUT/PATCH", "x-role": "data"},
             "timeout_ms": {"type": "integer", "default": 30000},
             "max_response_bytes": {"type": "integer", "default": 65536},
         },
@@ -270,18 +268,17 @@ class HttpRequestTool(BaseTool):
     async def _do_request(self, input: dict) -> dict:
         return await http_request_fn(input)
 
-    @operation("GET", probe_allowed=True, ref_allowed_fields={"url": False, "body": True, "headers": True})
+    @operation("GET", probe_allowed=True)
     async def get(self, input):
         return await self._do_request(input)
 
-    @operation("HEAD", probe_allowed=True, ref_allowed_fields={"url": False})
+    @operation("HEAD", probe_allowed=True)
     async def head(self, input):
         return await self._do_request(input)
 
     @operation(
         "POST",
         side_effects=[SideEffect.EXTERNAL],
-        ref_allowed_fields={"url": False, "body": True, "headers": True},
     )
     async def post(self, input):
         return await self._do_request(input)
@@ -289,7 +286,6 @@ class HttpRequestTool(BaseTool):
     @operation(
         "PUT",
         side_effects=[SideEffect.EXTERNAL],
-        ref_allowed_fields={"url": False, "body": True, "headers": True},
     )
     async def put(self, input):
         return await self._do_request(input)
@@ -297,7 +293,6 @@ class HttpRequestTool(BaseTool):
     @operation(
         "PATCH",
         side_effects=[SideEffect.EXTERNAL],
-        ref_allowed_fields={"url": False, "body": True, "headers": True},
     )
     async def patch(self, input):
         return await self._do_request(input)
@@ -305,7 +300,6 @@ class HttpRequestTool(BaseTool):
     @operation(
         "DELETE",
         side_effects=[SideEffect.EXTERNAL],
-        ref_allowed_fields={"url": False, "body": True, "headers": True},
     )
     async def delete(self, input):
         return await self._do_request(input)

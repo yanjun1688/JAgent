@@ -14,39 +14,39 @@ class TestAppendEvent:
     async def test_append_first_event(self, store: EventStore):
         event = await store.append_event(
             "run-1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "search github for opencode", "context_snapshot": {}},
         )
         assert event.run_id == "run-1"
         assert event.seq == 1
-        assert event.event_type == EventType.RUN_STARTED
+        assert (event.event_type == EventType.RUN and event.phase == "started")
         assert event.payload["intent"] == "search github for opencode"
 
     async def test_seq_increments_per_run(self, store: EventStore):
-        e1 = await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "task A", "context_snapshot": {}})
+        e1 = await store.append_event("run-1", EventType.RUN, {"intent": "task A", "context_snapshot": {}})
         e2 = await store.append_event(
             "run-1",
             EventType.AGENT_THOUGHT,
-            {"thought": "thinking...", "token_count": 42},
+            {"thought": "thinking..."},
         )
         assert e1.seq == 1
         assert e2.seq == 2
 
     async def test_seq_independent_per_run(self, store: EventStore):
-        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "A", "context_snapshot": {}})
+        await store.append_event("run-1", EventType.RUN, {"intent": "A", "context_snapshot": {}})
         await store.append_event(
             "run-1",
             EventType.AGENT_THOUGHT,
-            {"thought": "x", "token_count": 1},
+            {"thought": "x"},
         )
-        e = await store.append_event("run-2", EventType.RUN_STARTED, {"intent": "B", "context_snapshot": {}})
+        e = await store.append_event("run-2", EventType.RUN, {"intent": "B", "context_snapshot": {}})
         assert e.seq == 1
 
     async def test_payload_validation_rejects_invalid(self, store: EventStore):
         with pytest.raises(Exception):
             await store.append_event(
                 "run-1",
-                EventType.RUN_STARTED,
+                EventType.RUN,
                 {"wrong_field": 123},
             )
 
@@ -59,13 +59,13 @@ class TestAppendEvent:
         }
         e1 = await store.append_event(
             "run-1",
-            EventType.TOOL_CALLED,
+            EventType.TOOL,
             payload,
             idempotency_key="ik-abc",
         )
         e2 = await store.append_event(
             "run-1",
-            EventType.TOOL_CALLED,
+            EventType.TOOL,
             payload,
             idempotency_key="ik-abc",
         )
@@ -75,7 +75,7 @@ class TestAppendEvent:
     async def test_idempotency_same_key_different_event_type_allowed(self, store: EventStore):
         e1 = await store.append_event(
             "run-1",
-            EventType.TOOL_CALLED,
+            EventType.TOOL,
             {
                 "tool_call_id": "tc-x",
                 "tool_name": "http",
@@ -86,12 +86,11 @@ class TestAppendEvent:
         )
         e2 = await store.append_event(
             "run-1",
-            EventType.TOOL_COMPLETED,
+            EventType.STEP,
             {
-                "tool_call_id": "tc-x",
+                "plan_id": "p-1",
+                "step_id": "s1",
                 "tool_name": "http",
-                "output": "ok",
-                "duration_ms": 100,
             },
             idempotency_key="ik-xyz",
         )
@@ -101,37 +100,37 @@ class TestAppendEvent:
         e1 = await store.append_event(
             "run-1",
             EventType.AGENT_THOUGHT,
-            {"thought": "a", "token_count": 1},
+            {"thought": "a"},
         )
         e2 = await store.append_event(
             "run-1",
             EventType.AGENT_THOUGHT,
-            {"thought": "b", "token_count": 1},
+            {"thought": "b"},
         )
         assert e1.seq == 1
         assert e2.seq == 2
 
     async def test_run_completed(self, store: EventStore):
-        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "do", "context_snapshot": {}})
+        await store.append_event("run-1", EventType.RUN, {"intent": "do", "context_snapshot": {}})
         await store.append_event(
             "run-1",
-            EventType.RUN_COMPLETED,
+            EventType.RUN,
             {"result_summary": "done"},
         )
         events = await store.get_events("run-1")
         assert len(events) == 2
-        assert events[1].event_type == EventType.RUN_COMPLETED
+        assert events[1].event_type == EventType.RUN
 
     async def test_run_failed(self, store: EventStore):
-        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "do", "context_snapshot": {}})
+        await store.append_event("run-1", EventType.RUN, {"intent": "do", "context_snapshot": {}})
         await store.append_event(
             "run-1",
-            EventType.RUN_FAILED,
+            EventType.RUN,
             {"final_error": "crash", "event_count": 2},
         )
         events = await store.get_events("run-1")
         assert len(events) == 2
-        assert events[1].event_type == EventType.RUN_FAILED
+        assert events[1].event_type == EventType.RUN
 
 
 class TestGetEvents:
@@ -140,16 +139,16 @@ class TestGetEvents:
         assert events == []
 
     async def test_returns_in_seq_order(self, store: EventStore):
-        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "do", "context_snapshot": {}})
+        await store.append_event("run-1", EventType.RUN, {"intent": "do", "context_snapshot": {}})
         await store.append_event(
             "run-1",
             EventType.AGENT_THOUGHT,
-            {"thought": "first", "token_count": 1},
+            {"thought": "first"},
         )
         await store.append_event(
             "run-1",
             EventType.AGENT_THOUGHT,
-            {"thought": "second", "token_count": 1},
+            {"thought": "second"},
         )
 
         events = await store.get_events("run-1")
@@ -159,7 +158,7 @@ class TestGetEvents:
     async def test_payload_is_dict_with_correct_types(self, store: EventStore):
         await store.append_event(
             "run-1",
-            EventType.TOOL_COMPLETED,
+            EventType.TOOL,
             {
                 "tool_call_id": "tc-1",
                 "tool_name": "http",
@@ -181,7 +180,7 @@ class TestGetEventRange:
             await store.append_event(
                 "run-1",
                 EventType.AGENT_THOUGHT,
-                {"thought": f"t{i}", "token_count": i},
+                {"thought": f"t{i}"},
             )
 
         events = await store.get_event_range("run-1", from_seq=2, to_seq=4)
@@ -193,7 +192,7 @@ class TestGetEventRange:
             await store.append_event(
                 "run-1",
                 EventType.AGENT_THOUGHT,
-                {"thought": f"t{i}", "token_count": i},
+                {"thought": f"t{i}"},
             )
 
         events = await store.get_event_range("run-1", from_seq=2)
@@ -204,7 +203,7 @@ class TestGetEventRange:
         await store.append_event(
             "run-1",
             EventType.AGENT_THOUGHT,
-            {"thought": "t", "token_count": 1},
+            {"thought": "t"},
         )
         events = await store.get_event_range("run-1", from_seq=5, to_seq=10)
         assert events == []
@@ -213,7 +212,7 @@ class TestGetEventRange:
         await store.append_event(
             "run-1",
             EventType.AGENT_THOUGHT,
-            {"thought": "t", "token_count": 1},
+            {"thought": "t"},
         )
         events = await store.get_event_range("run-1", from_seq=3, to_seq=1)
         assert events == []
@@ -225,15 +224,15 @@ class TestGetLatestSeq:
         assert seq == 0
 
     async def test_returns_max_seq(self, store: EventStore):
-        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "do", "context_snapshot": {}})
+        await store.append_event("run-1", EventType.RUN, {"intent": "do", "context_snapshot": {}})
         await store.append_event(
             "run-1",
             EventType.AGENT_THOUGHT,
-            {"thought": "t", "token_count": 1},
+            {"thought": "t"},
         )
         await store.append_event(
             "run-1",
-            EventType.RUN_COMPLETED,
+            EventType.RUN,
             {"result_summary": "ok"},
         )
         seq = await store.get_latest_seq("run-1")
@@ -243,11 +242,11 @@ class TestGetLatestSeq:
 class TestEventCount:
     async def test_counts_events(self, store: EventStore):
         assert await store.event_count("run-1") == 0
-        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "do", "context_snapshot": {}})
+        await store.append_event("run-1", EventType.RUN, {"intent": "do", "context_snapshot": {}})
         await store.append_event(
             "run-1",
             EventType.AGENT_THOUGHT,
-            {"thought": "t", "token_count": 1},
+            {"thought": "t"},
         )
         assert await store.event_count("run-1") == 2
 
@@ -257,14 +256,14 @@ class TestContextManager:
         async with EventStore(":memory:") as store:
             event = await store.append_event(
                 "run-1",
-                EventType.RUN_STARTED,
+                EventType.RUN,
                 {"intent": "test", "context_snapshot": {}},
             )
             assert event.seq == 1
         assert store._conn is None
 
     async def test_initialize_is_idempotent(self, store: EventStore):
-        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "a", "context_snapshot": {}})
+        await store.append_event("run-1", EventType.RUN, {"intent": "a", "context_snapshot": {}})
         await store.initialize()
         events = await store.get_events("run-1")
         assert len(events) == 1
@@ -275,7 +274,7 @@ class TestContextManager:
             async with EventStore(db_path) as store:
                 event = await store.append_event(
                     "run-1",
-                    EventType.RUN_STARTED,
+                    EventType.RUN,
                     {"intent": "test", "context_snapshot": {}},
                 )
                 assert event.seq == 1
@@ -284,10 +283,10 @@ class TestContextManager:
 class TestAll15EventTypes:
     async def test_all_payload_types_write_and_read(self, store: EventStore):
         test_cases = [
-            (EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {"key": "val"}}),
-            (EventType.AGENT_THOUGHT, {"thought": "hmm", "tool_choice": "http", "token_count": 100}),
+            (EventType.RUN, {"intent": "test", "context_snapshot": {"key": "val"}}),
+            (EventType.AGENT_THOUGHT, {"thought": "hmm", "tool_choice": "http"}),
             (
-                EventType.TOOL_CALLED,
+                EventType.TOOL,
                 {
                     "tool_call_id": "tc-1",
                     "tool_name": "http",
@@ -296,20 +295,20 @@ class TestAll15EventTypes:
                 },
             ),
             (
-                EventType.TOOL_COMPLETED,
+                EventType.TOOL,
                 {"tool_call_id": "tc-1", "tool_name": "http", "output": {"status": 200}, "duration_ms": 50},
             ),
             (
-                EventType.TOOL_FAILED,
+                EventType.TOOL,
                 {"tool_call_id": "tc-2", "tool_name": "http", "error": "timeout", "retryable": True},
             ),
-            (EventType.TOOL_TIMEOUT, {"tool_call_id": "tc-3", "tool_name": "http", "timeout_ms": 5000}),
+            (EventType.TOOL, {"tool_call_id": "tc-3", "tool_name": "http", "timeout_ms": 5000}),
             (
-                EventType.GUARDRAIL_TRIGGERED,
+                EventType.TOOL,
                 {"tool_call_id": "tc-4", "tool_name": "file_op", "guardrail_id": "scope", "reason": "out of bounds"},
             ),
             (
-                EventType.CONFIRMATION_REQUESTED,
+                EventType.CONFIRMATION,
                 {
                     "confirmation_id": "cf-1",
                     "tool_call_id": "tc-4b",
@@ -319,37 +318,33 @@ class TestAll15EventTypes:
                     "risk_level": "high",
                 },
             ),
-            (EventType.CONFIRMATION_RECEIVED, {"confirmation_id": "cf-1", "confirmed": True, "operator_id": "op-1"}),
+            (EventType.CONFIRMATION, {"confirmation_id": "cf-1", "confirmed": True, "operator_id": "op-1"}),
             (
-                EventType.CONTEXT_COMPRESSED,
-                {"original_tokens": 10000, "compressed_tokens": 2000, "summary_ref": "sum-1"},
+                EventType.CONTEXT,
+                {"checkpoint_seq": 5, "snapshot_ref": "snap-1"},
             ),
+            (EventType.RUN, {"reason": "waiting for confirmation"}),
+            (EventType.RUN, {"resume_from_seq": 5}),
+            (EventType.RUN, {"result_summary": "all done"}),
+            (EventType.RUN, {"final_error": "max retries exceeded", "event_count": 10}),
             (
-                EventType.CONTEXT_CHECKPOINTED,
-                {"checkpoint_seq": 5, "snapshot_ref": "snap-1", "token_count": 1500},
-            ),
-            (EventType.RUN_PAUSED, {"reason": "waiting for confirmation"}),
-            (EventType.RUN_RESUMED, {"resume_from_seq": 5}),
-            (EventType.RUN_COMPLETED, {"result_summary": "all done"}),
-            (EventType.RUN_FAILED, {"final_error": "max retries exceeded", "event_count": 10}),
-            (
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {"plan_id": "p-1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1},
             ),
             (
-                EventType.DAG_STEP_COMPLETED,
+                EventType.STEP,
                 {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"},
             ),
             (
-                EventType.DAG_STEP_FAILED,
+                EventType.STEP,
                 {"plan_id": "p-1", "step_id": "s2", "error": "boom"},
             ),
             (
-                EventType.PLAN_COMPLETED,
+                EventType.PLAN,
                 {"plan_id": "p-1", "completed_steps": 1, "total_layers": 1, "summary": "partial success"},
             ),
             (
-                EventType.PLAN_FAILED,
+                EventType.PLAN,
                 {"plan_id": "p-1", "completed_steps": 1, "total_layers": 1, "final_error": "step 1 failed"},
             ),
         ]
@@ -360,7 +355,7 @@ class TestAll15EventTypes:
             assert event.event_type == etype
 
         events = await store.get_events("run-1")
-        assert len(events) == 20
+        assert len(events) == 19
 
 
 class TestConcurrentSeqAllocation:
@@ -372,7 +367,7 @@ class TestConcurrentSeqAllocation:
         async def writer(idx: int) -> int:
             event = await store.append_event(
                 "run-con",
-                EventType.RUN_STARTED,
+                EventType.RUN,
                 {"intent": f"task-{idx}", "context_snapshot": {}},
             )
             return event.seq
@@ -391,7 +386,7 @@ class TestConcurrentSeqAllocation:
         async def writer(run_id: str, idx: int) -> tuple[str, int]:
             event = await store.append_event(
                 run_id,
-                EventType.RUN_STARTED,
+                EventType.RUN,
                 {"intent": f"task-{idx}", "context_snapshot": {}},
             )
             return (run_id, event.seq)

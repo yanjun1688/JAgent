@@ -92,11 +92,13 @@ async def test_scheduler_completes_simple_task(store: EventStore):
     assert state.intent == "Call the API"
     events = await store.get_events("run-1")
     event_types = [e.event_type for e in events]
-    assert EventType.RUN_STARTED in event_types
+    run_phases = [e.phase for e in events if e.event_type == EventType.RUN]
+    tool_phases = [e.phase for e in events if e.event_type == EventType.TOOL]
+    assert "started" in run_phases
     assert EventType.AGENT_THOUGHT in event_types
-    assert EventType.TOOL_CALLED in event_types
-    assert EventType.TOOL_COMPLETED in event_types
-    assert EventType.RUN_COMPLETED in event_types
+    assert "called" in tool_phases
+    assert "completed" in tool_phases
+    assert "completed" in run_phases
 
 
 @pytest.mark.asyncio
@@ -227,11 +229,11 @@ async def test_circuit_breaker_on_consecutive_failures(store: EventStore):
     )
     tool_fns = {"fail_tool": failing_tool}
 
-    # 6 failures — exceeds max_consecutive_failures=5
+    # 6 failures — exceeds run_attempt_budget=5
     think_results = [ThinkResult(thought=f"Try {i}", tool_name="fail_tool", tool_input={}) for i in range(6)]
     kernel = MockAgentKernel(think_results)
     executor = ToolExecutor(store)
-    config = SchedulerConfig(max_consecutive_failures=3)
+    config = SchedulerConfig(run_attempt_budget=3)
 
     scheduler = AgentLoopScheduler(store, executor, kernel, [tool_def], tool_fns, config=config)
     state = await scheduler.run("run-1", "Test circuit breaker")
@@ -241,7 +243,7 @@ async def test_circuit_breaker_on_consecutive_failures(store: EventStore):
 
 
 @pytest.mark.asyncio
-async def test_max_iterations_fails(store: EventStore):
+async def test_run_attempt_budget_fails(store: EventStore):
     # Keep calling a tool forever
     results = [ThinkResult(thought="Keep going", tool_name="noop", tool_input={}) for _ in range(10)]
     kernel = MockAgentKernel(results)
@@ -256,7 +258,7 @@ async def test_max_iterations_fails(store: EventStore):
     )
     tool_fns = {"noop": lambda i: None}
 
-    config = SchedulerConfig(max_iterations=3)
+    config = SchedulerConfig(run_attempt_budget=3)
     scheduler = AgentLoopScheduler(store, executor, kernel, [tool_def], tool_fns, config=config)
     state = await scheduler.run("run-1", "Infinite loop")
 
@@ -299,8 +301,8 @@ async def test_pause_on_confirmation_needed(store: EventStore):
 
     events = await store.get_events("run-1")
     event_types = [e.event_type for e in events]
-    assert EventType.RUN_PAUSED in event_types
-    assert EventType.CONFIRMATION_REQUESTED in event_types
+    assert EventType.RUN in event_types
+    assert EventType.CONFIRMATION in event_types
 
     # Verify state is paused
     from harness.core.fold import RunStatus, fold_events
@@ -353,7 +355,7 @@ class TestPlanStateChain:
         dag = DagExecutor(executor, store, registry)
         planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
         cm = ContextManager(
-            store, token_limit=10000, compression_threshold_ratio=0.5, checkpoint_interval=1, compression_cooldown_iterations=1
+            store, token_limit=10000, compression_threshold_ratio=0.5, lazy_clear_ratio=0.5, checkpoint_interval=1, compression_cooldown_iterations=1
         )
         sched = PlanningExecutorScheduler(
             store,
@@ -388,7 +390,7 @@ class TestPlanStateChain:
         state = await sched.run("run-chain-1", "test chain")
         assert state.status == RunStatus.COMPLETED
         events = await store.get_events("run-chain-1")
-        assert any(e.event_type == EventType.CONTEXT_CHECKPOINTED for e in events), (
+        assert any((e.event_type == EventType.CONTEXT and e.phase == "checkpointed") for e in events), (
             "Context manager should have checkpointed during plan execution"
         )
 
@@ -406,7 +408,7 @@ class TestPlanStateChain:
             async def chat(self, messages, **kwargs):
                 return ChatResponse(content="Mock answer")
 
-        monitor = RunMonitor(store, max_tokens=10, token_warning_ratio=0.5)
+        monitor = RunMonitor(store)
         monitor.attach()
 
         executor = ToolExecutor(store)
@@ -452,23 +454,26 @@ class TestPlanStateChain:
         planner.generate_answer = AsyncMock(return_value="Done")
         planner.last_raw_response = "mock"
 
-        # Pre-inject a feedback by triggering token warning via a long thought
+        # Pre-inject a feedback via 3 consecutive failed tool events
         await store.append_event(
             "run-chain-2",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {
                 "intent": "test",
                 "context_snapshot": {},
             },
         )
-        await store.append_event(
-            "run-chain-2",
-            EventType.AGENT_THOUGHT,
-            {
-                "thought": "word " * 200,
-                "token_count": 1,
-            },
-        )
+        for i in range(3):
+            await store.append_event(
+                "run-chain-2",
+                EventType.TOOL,
+                {
+                    "tool_call_id": f"t{i}",
+                    "tool_name": "test_tool",
+                    "error": "fail",
+                    "retryable": False,
+                },
+            )
 
         # Verify feedback is in store before scheduler runs
         pre_events = await store.get_events("run-chain-2")
@@ -476,7 +481,7 @@ class TestPlanStateChain:
 
         pre_state = fold_events(pre_events)
         initial_fb_count = len(pre_state.feedbacks)
-        assert initial_fb_count >= 1, "Should have token warning feedback before scheduler runs"
+        assert initial_fb_count >= 1, "Should have failure feedback before scheduler runs"
 
         # Now run scheduler — it will use the existing events and produce PlanRevised
         # which should mark the feedback as consumed
@@ -488,7 +493,7 @@ class TestPlanStateChain:
         final_state = fold_events(final_events)
 
         # Check that PlanRevised was written
-        assert any(e.event_type == EventType.PLAN_REVISED for e in final_events), (
+        assert any((e.event_type == EventType.PLAN and e.phase == "revised") for e in final_events), (
             f"Expected PLAN_REVISED in events: {[e.event_type.value for e in final_events]}"
         )
 
@@ -595,8 +600,8 @@ class TestStaticPlanUnboundLocalError:
         # The point: no UnboundLocalError was raised.
         # If the bug were still present, the task would have crashed.
         events = await store.get_events(run_id)
-        assert any(e.event_type == EventType.PLAN_REVISED for e in events) or any(
-            e.event_type == EventType.RUN_FAILED for e in events
+        assert any((e.event_type == EventType.PLAN and e.phase == "revised") for e in events) or any(
+            (e.event_type == EventType.RUN and e.phase == "failed") for e in events
         ), "Expected PLAN_REVISED or RUN_FAILED (confirm → layer failure → revise/fallback)"
 
         task.cancel()
@@ -607,11 +612,11 @@ class TestStaticPlanUnboundLocalError:
 
 
 class TestMaxIterationsPlanningExecutor:
-    """Verify max_iterations is enforced for PlanningExecutorScheduler."""
+    """Verify run_attempt_budget is enforced for PlanningExecutorScheduler."""
 
     @pytest.mark.asyncio
-    async def test_max_iterations_enforced(self, store: EventStore):
-        """With max_iterations=2 and infinite revisit, should fail with exceeded."""
+    async def test_run_attempt_budget_enforced(self, store: EventStore):
+        """With run_attempt_budget=2 and infinite revisit, should fail with exceeded."""
         from harness.core.dag_executor import DagExecutor
         from harness.core.llm_client import ChatResponse
         from harness.core.planner import Planner
@@ -636,7 +641,7 @@ class TestMaxIterationsPlanningExecutor:
         )
         dag = DagExecutor(executor, store, registry)
         planner = Planner(llm_client=_MockLLM(), registry=registry, store=store)
-        config = SchedulerConfig(max_iterations=2)
+        config = SchedulerConfig(run_attempt_budget=2)
         sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=config)
 
         # plan always returns steps → not empty → loop continues
@@ -654,8 +659,8 @@ class TestMaxIterationsPlanningExecutor:
         dag.build_dag_status_text = Mock(return_value="")
 
         # 每次 revise 返回不同输入的失败步骤（非退化，但永不收敛）→ 只能靠
-        # max_iterations 兜底。若返回同一动作会被 E 阶段签名比对守卫提前熔断，
-        # 那测的是退化守卫而非 max_iterations。
+        # run_attempt_budget 兜底。若返回同一动作会被 E 阶段签名比对守卫提前熔断，
+        # 那测的是退化守卫而非 run_attempt_budget。
         _iter = {"n": 0}
 
         async def _revise(*args, **kwargs):
@@ -725,7 +730,7 @@ class TestCancelDuringDagConfirmation:
         await asyncio.sleep(0.3)
 
         events = await store.get_events(run_id)
-        assert any(e.event_type == EventType.RUN_FAILED for e in events), (
+        assert any(e.event_type == EventType.RUN for e in events), (
             f"Expected RUN_FAILED after cancel, got: {[e.event_type.value for e in events]}"
         )
 
@@ -882,11 +887,11 @@ class TestPlanningExecutorSchedulerExecution:
         events = await store.get_events("run-all-ok")
 
         assert state.status == RunStatus.COMPLETED
-        assert any(e.event_type == EventType.PLAN_CREATED for e in events)
-        assert any(e.event_type == EventType.PLAN_COMPLETED for e in events)
-        assert any(e.event_type == EventType.RUN_COMPLETED for e in events)
+        assert any((e.event_type == EventType.PLAN and e.phase == "created") for e in events)
+        assert any((e.event_type == EventType.PLAN and e.phase == "completed") for e in events)
+        assert any((e.event_type == EventType.RUN and e.phase == "completed") for e in events)
         # No PLAN_REVISED — all-ok revise was removed
-        assert not any(e.event_type == EventType.PLAN_REVISED for e in events)
+        assert not any((e.event_type == EventType.PLAN and e.phase == "revised") for e in events)
         # planner.revise should never be called
         planner.revise.assert_not_called()
 
@@ -938,13 +943,13 @@ class TestPlanningExecutorSchedulerExecution:
 
         assert state.status == RunStatus.COMPLETED
         # Two PLAN_CREATED events: one for initial, one for revised plan
-        created = [e for e in events if e.event_type == EventType.PLAN_CREATED]
+        created = [e for e in events if (e.event_type == EventType.PLAN and e.phase == "created")]
         assert len(created) == 2
         # One PLAN_REVISED before the self-heal restart
-        assert len([e for e in events if e.event_type == EventType.PLAN_REVISED]) >= 1
+        assert len([e for e in events if (e.event_type == EventType.PLAN and e.phase == "revised")]) >= 1
         # One PLAN_COMPLETED
-        assert any(e.event_type == EventType.PLAN_COMPLETED for e in events)
-        assert any(e.event_type == EventType.RUN_COMPLETED for e in events)
+        assert any((e.event_type == EventType.PLAN and e.phase == "completed") for e in events)
+        assert any((e.event_type == EventType.RUN and e.phase == "completed") for e in events)
         planner.revise.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1011,14 +1016,14 @@ class TestPlanningExecutorSchedulerExecution:
         events = await store.get_events("run-d12")
 
         assert state.status == RunStatus.COMPLETED
-        completed = next(e for e in events if e.event_type == EventType.RUN_COMPLETED)
+        completed = next(e for e in events if (e.event_type == EventType.RUN and e.phase == "completed"))
         assert completed.payload["all_normal"] is True
         assert completed.payload["unmet_step_ids"] == []
         assert executed.count(["s1"]) == 1
         assert "s2_fix" in [sid for layer in executed for sid in layer]
         assert "s3" in [sid for layer in executed for sid in layer]
         assert "s4" in [sid for layer in executed for sid in layer]
-        assert not any(e.event_type == EventType.RUN_FAILED for e in events)
+        assert not any((e.event_type == EventType.RUN and e.phase == "failed") for e in events)
 
     @pytest.mark.asyncio
     async def test_empty_plan_answer_receives_conversation_context(self, store: EventStore):
@@ -1044,7 +1049,7 @@ class TestPlanningExecutorSchedulerExecution:
         sched, planner, _ = self._make_env(store)
         await store.append_event(
             "run-empty-contract",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(
                 intent="write x.txt",
                 contracts=[
@@ -1064,7 +1069,7 @@ class TestPlanningExecutorSchedulerExecution:
         events = await store.get_events("run-empty-contract")
 
         assert state.status == RunStatus.FAILED
-        assert any(event.event_type == EventType.RUN_FAILED for event in events)
+        assert any((event.event_type == EventType.RUN and event.phase == "failed") for event in events)
         sched._generate_answer.assert_not_awaited()
 
     # ── 3. Layer fails → revise returns empty → NOT complete (D5) ──────
@@ -1090,10 +1095,10 @@ class TestPlanningExecutorSchedulerExecution:
         events = await store.get_events("run-empty-revise")
 
         assert state.status == RunStatus.FAILED
-        assert any(e.event_type == EventType.PLAN_CREATED for e in events)
-        assert any(e.event_type == EventType.PLAN_REVISED for e in events)
-        assert any(e.event_type == EventType.RUN_FAILED for e in events)
-        assert not any(e.event_type == EventType.RUN_COMPLETED for e in events)
+        assert any((e.event_type == EventType.PLAN and e.phase == "created") for e in events)
+        assert any((e.event_type == EventType.PLAN and e.phase == "revised") for e in events)
+        assert any((e.event_type == EventType.RUN and e.phase == "failed") for e in events)
+        assert not any((e.event_type == EventType.RUN and e.phase == "completed") for e in events)
 
     # ── 4. Layer fails → revise returns None → _fail ─────────────────
 
@@ -1114,7 +1119,7 @@ class TestPlanningExecutorSchedulerExecution:
 
         assert state.status == RunStatus.FAILED
         # Should write RUN_FAILED
-        assert any(e.event_type == EventType.RUN_FAILED for e in events)
+        assert any(e.event_type == EventType.RUN for e in events)
 
     # ── 5. Cancel during DAG execution ───────────────────────────────
 
@@ -1164,7 +1169,7 @@ class TestPlanningExecutorSchedulerExecution:
             pass
 
         events = await store.get_events(run_id)
-        assert any(e.event_type == EventType.RUN_FAILED for e in events)
+        assert any(e.event_type == EventType.RUN for e in events)
 
     # ── 6. Confirmation retries exceeded in DAG path ─────────────────
 
@@ -1208,7 +1213,7 @@ class TestPlanningExecutorSchedulerExecution:
         await asyncio.sleep(0.5)
 
         events = await store.get_events(run_id)
-        assert any(e.event_type == EventType.RUN_FAILED for e in events), (
+        assert any(e.event_type == EventType.RUN for e in events), (
             f"Expected RUN_FAILED, got: {[e.event_type.value for e in events]}"
         )
 
@@ -1255,10 +1260,10 @@ class TestPlanningExecutorSchedulerExecution:
         assert state.status == RunStatus.FAILED, f"expected FAILED (s2 unmet), got {state.status.value}"
         assert "Steps not achieved" in (state.last_error or "")
         planner.revise.assert_awaited_once()
-        assert any(e.event_type == EventType.PLAN_REVISED for e in events), (
+        assert any(e.event_type == EventType.PLAN for e in events), (
             "Bug 4: UNSUCCESSFUL should trigger a revise, writing PLAN_REVISED"
         )
-        revised = [e for e in events if e.event_type == EventType.PLAN_REVISED]
+        revised = [e for e in events if (e.event_type == EventType.PLAN and e.phase == "revised")]
         assert any("unsuccessful" in (e.payload.get("revision_reason", "") or "") for e in revised), (
             "Bug 4: PLAN_REVISED reason should indicate it was triggered by unsuccessful"
         )
@@ -1453,7 +1458,7 @@ async def test_classify_no_cannot_bypass_tool_layer_for_file_write(store: EventS
         dag,
         [file_op_def],
         {"file_op": lambda i: {"success": False, "path": i.get("path"), "error": "blocked"}},
-        config=SchedulerConfig(max_iterations=5),
+        config=SchedulerConfig(run_attempt_budget=5),
     )
     sched.dag = dag
     planner.generate_answer = AsyncMock(return_value="done")
@@ -1462,10 +1467,10 @@ async def test_classify_no_cannot_bypass_tool_layer_for_file_write(store: EventS
 
     events = await store.get_events("run-gate-write")
     # 必须有 PlanCreated → 说明受信门成功把请求送进了 Tool Layer
-    assert any(e.event_type == EventType.PLAN_CREATED for e in events), "受信门必须让文件写入进入 Tool Layer"
+    assert any((e.event_type == EventType.PLAN and e.phase == "created") for e in events), "受信门必须让文件写入进入 Tool Layer"
     # 必须有 ToolCalled(file_op)
     assert any(
-        e.event_type == EventType.TOOL_CALLED and e.payload.get("tool_name") == "file_op" for e in events
+        (e.event_type == EventType.TOOL and e.phase == "called") and e.payload.get("tool_name") == "file_op" for e in events
     ), "file_op 必须被调用（即使被拦截），不允许被 classify=no 绕过"
 
 
@@ -1483,14 +1488,14 @@ async def test_classify_analysis_only_still_skips_tools_for_pure_conversation(st
     llm = MockLLMClient(responses=["no", "answer"])
     planner = Planner(llm, registry, store, max_plan_retries=1)
     dag = DagExecutor(executor, store, registry)
-    sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=SchedulerConfig(max_iterations=5))
+    sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=SchedulerConfig(run_attempt_budget=5))
     sched.dag = dag
     planner.generate_answer = AsyncMock(return_value="answer")
 
     await sched.run("run-gate-conversation", "请解释什么是事件溯源架构")
 
     events = await store.get_events("run-gate-conversation")
-    assert not any(e.event_type == EventType.PLAN_CREATED for e in events), "纯对话不应进入 Tool Layer"
+    assert not any((e.event_type == EventType.PLAN and e.phase == "created") for e in events), "纯对话不应进入 Tool Layer"
 
 
 @pytest.mark.asyncio
@@ -1537,7 +1542,7 @@ async def test_cee7d7f6_write_read_weakened_to_list_fails(store: EventStore):
     planner = Planner(llm, registry, store, max_plan_retries=1)
     dag = DagExecutor(executor, store, registry)
     sched = PlanningExecutorScheduler(
-        store, executor, planner, dag,         [FileOpTool().to_definition()], {"file_op": file_fn}, config=SchedulerConfig(max_iterations=6)
+        store, executor, planner, dag,         [FileOpTool().to_definition()], {"file_op": file_fn}, config=SchedulerConfig(run_attempt_budget=6)
     )
     sched.dag = dag
     planner.generate_answer = AsyncMock(return_value="answer")
@@ -1545,8 +1550,8 @@ async def test_cee7d7f6_write_read_weakened_to_list_fails(store: EventStore):
     await sched.run("run-cee7d7f6", "请在 workspace 创建 blackbox.txt 写入 hello 然后读取")
 
     events = await store.get_events("run-cee7d7f6")
-    assert any(e.event_type == EventType.RUN_FAILED for e in events), "read 未达成必须 RunFailed，禁止假绿"
-    assert not any(e.event_type == EventType.RUN_COMPLETED for e in events)
+    assert any((e.event_type == EventType.RUN and e.phase == "failed") for e in events), "read 未达成必须 RunFailed，禁止假绿"
+    assert not any((e.event_type == EventType.RUN and e.phase == "completed") for e in events)
 
 
 @pytest.mark.asyncio
@@ -1585,7 +1590,7 @@ async def test_cee7d7f6_write_read_satisfied_completes(store: EventStore):
     planner = Planner(llm, registry, store, max_plan_retries=1)
     dag = DagExecutor(executor, store, registry)
     sched = PlanningExecutorScheduler(
-        store, executor, planner, dag,         [FileOpTool().to_definition()], {"file_op": file_fn}, config=SchedulerConfig(max_iterations=6)
+        store, executor, planner, dag,         [FileOpTool().to_definition()], {"file_op": file_fn}, config=SchedulerConfig(run_attempt_budget=6)
     )
     sched.dag = dag
     planner.generate_answer = AsyncMock(return_value="answer")
@@ -1593,8 +1598,8 @@ async def test_cee7d7f6_write_read_satisfied_completes(store: EventStore):
     await sched.run("run-cee7d7f6-ok", "请在 workspace 创建 blackbox.txt 写入 hello 然后读取")
 
     events = await store.get_events("run-cee7d7f6-ok")
-    assert any(e.event_type == EventType.RUN_COMPLETED for e in events), "write+read 均达成应 RunCompleted"
-    assert not any(e.event_type == EventType.RUN_FAILED for e in events)
+    assert any((e.event_type == EventType.RUN and e.phase == "completed") for e in events), "write+read 均达成应 RunCompleted"
+    assert not any((e.event_type == EventType.RUN and e.phase == "failed") for e in events)
 
 
 @pytest.mark.asyncio
@@ -1621,7 +1626,7 @@ async def test_timeout_race_resume_rejected_after_timeout(store: EventStore):
         [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
     )
     executor = ToolExecutor(store)
-    config = SchedulerConfig(max_iterations=5, pause_timeout_ms=100)
+    config = SchedulerConfig(run_attempt_budget=5, pause_timeout_ms=100)
 
     scheduler = AgentLoopScheduler(store, executor, kernel, [dangerous_def], {"delete_file": delete_fn}, config=config)
 
@@ -1645,11 +1650,11 @@ async def test_timeout_race_resume_rejected_after_timeout(store: EventStore):
     assert "Confirmation timed out" in (state.last_error or "")
 
     events = await store.get_events("run-ct1")
-    run_failed_seqs = [e.seq for e in events if e.event_type == EventType.RUN_FAILED]
+    run_failed_seqs = [e.seq for e in events if (e.event_type == EventType.RUN and e.phase == "failed")]
     run_resumed_after = [
         e
         for e in events
-        if e.event_type == EventType.RUN_RESUMED and (not run_failed_seqs or e.seq > max(run_failed_seqs))
+        if (e.event_type == EventType.RUN and e.phase == "resumed") and (not run_failed_seqs or e.seq > max(run_failed_seqs))
     ]
     assert len(run_resumed_after) == 0, (
         f"CT-1: RUN_RESUMED event after RUN_FAILED should not exist. "
@@ -1683,7 +1688,7 @@ async def test_timeout_race_concurrent_resume_and_fail(store: EventStore):
         [ThinkResult(thought="Deleting...", tool_name="delete_file", tool_input={"path": "/tmp/x"})]
     )
     executor = ToolExecutor(store)
-    config = SchedulerConfig(max_iterations=5, pause_timeout_ms=5000)
+    config = SchedulerConfig(run_attempt_budget=5, pause_timeout_ms=5000)
 
     scheduler = AgentLoopScheduler(store, executor, kernel, [dangerous_def], {"delete_file": delete_fn}, config=config)
 
@@ -1708,11 +1713,11 @@ async def test_timeout_race_concurrent_resume_and_fail(store: EventStore):
         pass
 
     events = await store.get_events(run_id)
-    run_failed_seqs = [e.seq for e in events if e.event_type == EventType.RUN_FAILED]
+    run_failed_seqs = [e.seq for e in events if (e.event_type == EventType.RUN and e.phase == "failed")]
     run_resumed_after = [
         e
         for e in events
-        if e.event_type == EventType.RUN_RESUMED and (not run_failed_seqs or e.seq > max(run_failed_seqs))
+        if (e.event_type == EventType.RUN and e.phase == "resumed") and (not run_failed_seqs or e.seq > max(run_failed_seqs))
     ]
     assert len(run_resumed_after) == 0, (
         f"CT-1 concurrent: RUN_RESUMED after RUN_FAILED should not exist. "
@@ -1755,13 +1760,13 @@ async def test_resume_writes_run_resumed_and_completes_execution(store: EventSto
     await asyncio.sleep(0.5)
 
     events = await store.get_events("run-1")
-    assert EventType.RUN_PAUSED in [e.event_type for e in events]
-    assert EventType.CONFIRMATION_REQUESTED in [e.event_type for e in events]
+    assert EventType.RUN in [e.event_type for e in events]
+    assert EventType.CONFIRMATION in [e.event_type for e in events]
 
     # Extract confirmation_id and write ConfirmationReceived(confirmed=true)
     cf_payload = None
     for e in events:
-        if e.event_type == EventType.CONFIRMATION_REQUESTED:
+        if (e.event_type == EventType.CONFIRMATION and e.phase == "requested"):
             cf_payload = e.payload
             break
     assert cf_payload is not None
@@ -1770,7 +1775,7 @@ async def test_resume_writes_run_resumed_and_completes_execution(store: EventSto
 
     await store.append_event(
         "run-1",
-        EventType.CONFIRMATION_RECEIVED,
+        EventType.CONFIRMATION,
         ConfirmationReceivedPayload(
             confirmation_id=cf_payload["confirmation_id"],
             confirmed=True,
@@ -1787,16 +1792,19 @@ async def test_resume_writes_run_resumed_and_completes_execution(store: EventSto
     # Verify full event chain
     all_events = await store.get_events("run-1")
     event_types = [e.event_type for e in all_events]
+    run_phases = [e.phase for e in all_events if e.event_type == EventType.RUN]
+    tool_phases = [e.phase for e in all_events if e.event_type == EventType.TOOL]
+    conf_phases = [e.phase for e in all_events if e.event_type == EventType.CONFIRMATION]
 
-    assert EventType.RUN_STARTED in event_types
+    assert "started" in run_phases
     assert EventType.AGENT_THOUGHT in event_types
-    assert EventType.CONFIRMATION_REQUESTED in event_types
-    assert EventType.RUN_PAUSED in event_types
-    assert EventType.CONFIRMATION_RECEIVED in event_types
-    assert EventType.RUN_RESUMED in event_types  # ← P1 fix verification
-    assert EventType.TOOL_CALLED in event_types
-    assert EventType.TOOL_COMPLETED in event_types
-    assert EventType.RUN_COMPLETED in event_types
+    assert "requested" in conf_phases
+    assert "paused" in run_phases
+    assert "received" in conf_phases
+    assert "resumed" in run_phases  # ← P1 fix verification
+    assert "called" in tool_phases
+    assert "completed" in tool_phases
+    assert "completed" in run_phases
 
     from harness.core.fold import RunStatus, fold_events
 
@@ -1851,20 +1859,20 @@ async def test_user_pause_stops_loop(store: EventStore):
 
     events_paused = await store.get_events("run-pause")
     n_paused = len(events_paused)
-    event_types_paused = [e.event_type for e in events_paused]
+    run_phases_paused = [e.phase for e in events_paused if e.event_type == EventType.RUN]
 
     # RunPaused should be in the stream
-    assert EventType.RUN_PAUSED in event_types_paused
+    assert "paused" in run_phases_paused
 
     await scheduler.resume("run-pause")
     await asyncio.wait_for(task, timeout=10.0)
 
     events_final = await store.get_events("run-pause")
-    event_types_final = [e.event_type for e in events_final]
+    run_phases_final = [e.phase for e in events_final if e.event_type == EventType.RUN]
 
-    assert EventType.RUN_PAUSED in event_types_final
-    assert EventType.RUN_RESUMED in event_types_final
-    assert EventType.RUN_COMPLETED in event_types_final
+    assert "paused" in run_phases_final
+    assert "resumed" in run_phases_final
+    assert "completed" in run_phases_final
     assert len(events_final) > n_paused, "No events added after resume"
 
 
@@ -1904,7 +1912,7 @@ async def test_confirmation_denied_writes_tool_failed(store: EventStore):
     events = await store.get_events("run-deny")
     cf_payload = None
     for e in events:
-        if e.event_type == EventType.CONFIRMATION_REQUESTED:
+        if (e.event_type == EventType.CONFIRMATION and e.phase == "requested"):
             cf_payload = e.payload
             break
     assert cf_payload is not None
@@ -1913,7 +1921,7 @@ async def test_confirmation_denied_writes_tool_failed(store: EventStore):
 
     await store.append_event(
         "run-deny",
-        EventType.CONFIRMATION_RECEIVED,
+        EventType.CONFIRMATION,
         ConfirmationReceivedPayload(
             confirmation_id=cf_payload["confirmation_id"],
             confirmed=False,
@@ -1925,13 +1933,15 @@ async def test_confirmation_denied_writes_tool_failed(store: EventStore):
     await asyncio.wait_for(task, timeout=5.0)
 
     all_events = await store.get_events("run-deny")
-    event_types = [e.event_type for e in all_events]
+    run_phases = [e.phase for e in all_events if e.event_type == EventType.RUN]
+    tool_phases = [e.phase for e in all_events if e.event_type == EventType.TOOL]
+    conf_phases = [e.phase for e in all_events if e.event_type == EventType.CONFIRMATION]
 
-    assert EventType.CONFIRMATION_RECEIVED in event_types
-    assert EventType.CONFIRMATION_REQUESTED in event_types
-    assert EventType.RUN_RESUMED in event_types
-    assert EventType.TOOL_FAILED in event_types
-    assert EventType.RUN_COMPLETED in event_types
+    assert "received" in conf_phases
+    assert "requested" in conf_phases
+    assert "resumed" in run_phases
+    assert "failed" in tool_phases
+    assert "completed" in run_phases
     # When denied, executor writes ToolFailed directly (no ToolCalled)
 
 
@@ -1998,7 +2008,7 @@ async def test_guardrail_blocked_counts_toward_circuit_breaker(store: EventStore
     results = [ThinkResult(thought="Try", tool_name="guarded", tool_input={"y": 1}) for _ in range(4)]
     kernel = MockAgentKernel(results)
     executor = ToolExecutor(store)
-    config = SchedulerConfig(max_consecutive_failures=3)
+    config = SchedulerConfig(run_attempt_budget=3)
 
     scheduler = AgentLoopScheduler(store, executor, kernel, [tool_def], {"guarded": guarded_fn}, config=config)
     state = await scheduler.run("run-1", "Guardrail test")
@@ -2015,9 +2025,9 @@ class TestSchedulerWithFullWiring:
     @pytest.mark.asyncio
     async def test_scheduler_with_monitor_and_context_manager(self, store: EventStore):
         cm = ContextManager(
-            store, token_limit=1000, compression_threshold_ratio=0.5, checkpoint_interval=2, compression_cooldown_iterations=2
+            store, token_limit=1000, compression_threshold_ratio=0.5, lazy_clear_ratio=0.5, checkpoint_interval=2, compression_cooldown_iterations=2
         )
-        monitor = RunMonitor(store, max_tokens=100, token_warning_ratio=0.5)
+        monitor = RunMonitor(store)
         monitor.attach()
 
         def dummy_fn(input):
@@ -2033,8 +2043,8 @@ class TestSchedulerWithFullWiring:
         )
         kernel = MockAgentKernel(
             [
-                ThinkResult(thought="call tool", tool_name="dummy", tool_input={}, token_count=5),
-                ThinkResult(thought="call tool again", tool_name="dummy", tool_input={}, token_count=5),
+                ThinkResult(thought="call tool", tool_name="dummy", tool_input={}),
+                ThinkResult(thought="call tool again", tool_name="dummy", tool_input={}),
                 ThinkResult(thought="done"),
             ]
         )
@@ -2045,7 +2055,7 @@ class TestSchedulerWithFullWiring:
             kernel=kernel,
             tool_defs=[tool_def],
             tool_fns={"dummy": dummy_fn},
-            config=SchedulerConfig(max_iterations=5),
+            config=SchedulerConfig(run_attempt_budget=5),
             context_manager=cm,
             monitor=monitor,
         )
@@ -2054,7 +2064,7 @@ class TestSchedulerWithFullWiring:
         assert state.status == RunStatus.COMPLETED
 
         events = await store.get_events("run-wired")
-        assert any(e.event_type == EventType.CONTEXT_CHECKPOINTED for e in events)
+        assert any(e.event_type == EventType.CONTEXT for e in events)
 
 
 # ── 3.x Inheritance & lifecycle ───────────────────────────────
@@ -2196,7 +2206,7 @@ class TestConfirmRetryLimit:
 
         events = await store.get_events(run_id)
         # Should have RUN_FAILED due to max_confirm_retries exceeded
-        assert EventType.RUN_FAILED in [e.event_type for e in events]
+        assert EventType.RUN in [e.event_type for e in events]
 
         task.cancel()
         try:
@@ -2284,7 +2294,7 @@ class TestSeparateTimeoutConfigs:
 
         events = await store.get_events(run_id)
         # Should have RUN_FAILED due to confirmation timeout (100ms)
-        assert EventType.RUN_FAILED in [e.event_type for e in events]
+        assert EventType.RUN in [e.event_type for e in events]
 
         task.cancel()
         try:
@@ -2326,7 +2336,7 @@ class TestSeparateTimeoutConfigs:
         failed_seen = False
         for _ in range(40):
             events = await store.get_events("run-budget-confirm")
-            if any(e.event_type == EventType.RUN_FAILED for e in events):
+            if any((e.event_type == EventType.RUN and e.phase == "failed") for e in events):
                 failed_seen = True
                 break
             await asyncio.sleep(0.05)
@@ -2355,7 +2365,7 @@ async def test_run_watchdog_times_out_and_writes_run_failed(store: EventStore):
 
     executor = ToolExecutor(store)
     kernel = _HangingKernel()
-    config = SchedulerConfig(max_iterations=5, run_timeout_ms=200)
+    config = SchedulerConfig(run_attempt_budget=5, run_timeout_ms=200)
     scheduler = AgentLoopScheduler(store, executor, kernel, [], {}, config=config)
 
     state = await scheduler.run("run-watchdog", "hang forever")
@@ -2363,12 +2373,12 @@ async def test_run_watchdog_times_out_and_writes_run_failed(store: EventStore):
     assert "timed out" in (state.last_error or "")
 
     events = await store.get_events("run-watchdog")
-    failed = [e for e in events if e.event_type == EventType.RUN_FAILED]
+    failed = [e for e in events if (e.event_type == EventType.RUN and e.phase == "failed")]
     assert failed, "watchdog 必须写 RUN_FAILED"
     assert "timed out" in (failed[-1].payload.get("final_error") or "")
-    phase_timeouts = [e for e in events if e.event_type == EventType.PHASE_TIMED_OUT]
+    phase_timeouts = [e for e in events if (e.event_type == EventType.DIAGNOSTIC and e.phase == "phase_timeout")]
     assert phase_timeouts, "serial think 必须纳入 run deadline，耗尽时写 PHASE_TIMED_OUT"
-    assert phase_timeouts[-1].payload.get("phase") == "serial_think"
+    assert phase_timeouts[-1].payload.get("timed_out_phase") == "serial_think"
 
 
 @pytest.mark.asyncio
@@ -2390,7 +2400,7 @@ async def test_run_budget_caps_context_compression(store: EventStore):
             return [ThinkResult(thought="never reached", tool_name=None)]
 
     executor = ToolExecutor(store)
-    config = SchedulerConfig(max_iterations=5, run_timeout_ms=200)
+    config = SchedulerConfig(run_attempt_budget=5, run_timeout_ms=200)
     scheduler = AgentLoopScheduler(
         store,
         executor,
@@ -2404,6 +2414,6 @@ async def test_run_budget_caps_context_compression(store: EventStore):
     state = await scheduler.run("run-compress-budget", "compress hang")
     assert state.status == RunStatus.FAILED
     events = await store.get_events("run-compress-budget")
-    phase_timeouts = [e for e in events if e.event_type == EventType.PHASE_TIMED_OUT]
+    phase_timeouts = [e for e in events if (e.event_type == EventType.DIAGNOSTIC and e.phase == "phase_timeout")]
     assert phase_timeouts, "压缩挂起必须在 run 预算内被 PHASE_TIMED_OUT 收敛"
-    assert phase_timeouts[-1].payload.get("phase") == "context_compress"
+    assert phase_timeouts[-1].payload.get("timed_out_phase") == "context_compress"

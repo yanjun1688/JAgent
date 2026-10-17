@@ -93,7 +93,8 @@ class TestReplayTimeline:
         await seed_failed_plan_run(store, "run-1")
         resp = await client.get("/api/v1/replay/runs/run-1/timeline?cursor=10&limit=5")
         last = resp.json()["timeline"][0]
-        assert last["event_type"] == "RunFailed"
+        assert last["event_type"] == "Run"
+        assert last["payload"]["phase"] == "failed"
         assert last["is_terminal"] is True
 
     async def test_timeline_unknown_run_is_404(self, client):
@@ -214,7 +215,7 @@ class TestReplayTenantIsolation:
         from harness.models.events import AgentThoughtPayload, RunStartedPayload
 
         for seq in range(1, 21):
-            etype = EventType.RUN_STARTED if seq == 1 else EventType.AGENT_THOUGHT
+            etype = EventType.RUN if seq == 1 else EventType.AGENT_THOUGHT
             payload = (
                 RunStartedPayload(intent="tenant-a run").model_dump()
                 if seq == 1
@@ -223,7 +224,7 @@ class TestReplayTenantIsolation:
             await store.append_event("split-run", etype, payload, tenant_id="tenant-a")
         # One event owned by the *default* tenant -> seq 21, the only visible one.
         await store.append_event(
-            "split-run", EventType.RUN_STARTED, RunStartedPayload(intent="default slice").model_dump()
+            "split-run", EventType.RUN, RunStartedPayload(intent="default slice").model_dump()
         )
 
         # Latest visible state folds fine.
@@ -299,7 +300,7 @@ async def test_empty_run_with_only_run_started_is_still_inspectable(client, api)
     # Given a run that has a RunStarted event but nothing else
     _, store = api
     await store.append_event(
-        "empty-run", EventType.RUN_STARTED, RunStartedPayload(intent="just started").model_dump()
+        "empty-run", EventType.RUN, RunStartedPayload(intent="just started").model_dump()
     )
     # When fetching its state
     resp = await client.get("/api/v1/replay/runs/empty-run/state")

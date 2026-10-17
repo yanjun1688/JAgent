@@ -43,19 +43,19 @@ async def test_scoped_store_prevents_cross_tenant_reads_and_writes():
         await tenant_b.ensure_tenant()
         await tenant_a.create_workspace(make_workspace("tenant-a"))
         await tenant_a.append_event(
-            "run-a", EventType.RUN_STARTED, RunStartedPayload(intent="a").model_dump(), workspace_id="tenant-a-work"
+            "run-a", EventType.RUN, RunStartedPayload(intent="a").model_dump(), workspace_id="tenant-a-work"
         )
-        await tenant_b.append_event("run-b", EventType.RUN_STARTED, RunStartedPayload(intent="b").model_dump())
+        await tenant_b.append_event("run-b", EventType.RUN, RunStartedPayload(intent="b").model_dump())
         rows = await tenant_a.execute_query(
             "SELECT event_type, COUNT(*) AS cnt FROM events WHERE created_at >= ? AND created_at <= ? GROUP BY event_type",
             (0, 9999999999),
         )
-        assert rows == [{"event_type": "RunStarted", "cnt": 1}]
+        assert rows == [{"event_type": "Run", "cnt": 1}]
         aggregate = await tenant_a.execute_query_one(
-            "SELECT COUNT(DISTINCT run_id) as run_count, COALESCE(SUM(CASE WHEN event_type = ? THEN json_extract(payload, '$.token_count') ELSE 0 END), 0) as token_sum FROM events WHERE created_at >= ? AND created_at <= ?",
-            (EventType.AGENT_THOUGHT.value, 0, 9999999999),
+            "SELECT COUNT(DISTINCT run_id) as run_count FROM events WHERE created_at >= ? AND created_at <= ?",
+            (0, 9999999999),
         )
-        assert aggregate == {"run_count": 1, "token_sum": 0}
+        assert aggregate == {"run_count": 1}
         from harness.analysis.service import AnalysisService
 
         dashboard = await AnalysisService(tenant_a).get_dashboard(since=0, until=9999999999)
@@ -117,7 +117,7 @@ async def test_workspace_audit_events_are_excluded_from_run_listings():
         workspace = await scoped.create_workspace(make_workspace("tenant", name="audit-ws"))
         await scoped.append_event(
             workspace.workspace_id,
-            EventType.WORKSPACE_CREATED,
+            EventType.WORKSPACE,
             WorkspaceCreatedPayload(
                 workspace_id=workspace.workspace_id,
                 tenant_id="tenant",
@@ -130,7 +130,7 @@ async def test_workspace_audit_events_are_excluded_from_run_listings():
         )
         await scoped.append_event(
             "run-audit-1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="real run").model_dump(),
             workspace_id=workspace.workspace_id,
         )
@@ -143,7 +143,7 @@ async def test_workspace_audit_events_are_excluded_from_run_listings():
 
         # Audit trail is still queryable via the audit API.
         audit = await scoped.get_workspace_events(workspace.workspace_id)
-        assert [e.event_type for e in audit] == [EventType.WORKSPACE_CREATED]
+        assert [e.event_type for e in audit] == [EventType.WORKSPACE]
     finally:
         await store.close()
 
@@ -256,7 +256,7 @@ async def test_concurrent_workspace_creation_is_serialized():
 
             await scoped.append_event(
                 ws.workspace_id,
-                EventType.WORKSPACE_CREATED,
+                EventType.WORKSPACE,
                 WorkspaceCreatedPayload(
                     workspace_id=ws.workspace_id,
                     tenant_id=ws.tenant_id,

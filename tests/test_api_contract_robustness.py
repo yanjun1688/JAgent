@@ -76,7 +76,6 @@ class TestOpenAPIContract:
         with open("frontend/public/openapi.json", encoding="utf-8") as file:
             checked_in = json.load(file)
         assert checked_in["openapi"].startswith("3.")
-        assert "/api/v1/query" in checked_in["paths"]
         assert "/api/v1/workspaces" in checked_in["paths"]
         assert "/api/v1/conversations/{conversation_id}/messages" in checked_in["paths"]
 
@@ -161,12 +160,6 @@ class TestRequestBoundaries:
         response = await client.post("/api/v1/workspaces", json=inside)
         assert response.status_code == 201
 
-    @pytest.mark.parametrize("query", ["page=0", "page_size=0", "page_size=101"])
-    async def test_query_pagination_rejects_out_of_range_values(self, api_and_client, query):
-        _, _, client = api_and_client
-        response = await client.get(f"/api/v1/query?type=runs&{query}")
-        assert response.status_code == 422
-
     @pytest.mark.parametrize("query", ["limit=0", "offset=-1", "from_seq=-1"])
     async def test_public_pagination_does_not_accept_negative_or_zero_ranges(self, api_and_client, query):
         _, _, client = api_and_client
@@ -185,12 +178,6 @@ class TestRequestBoundaries:
 
 
 class TestResourceRobustness:
-    async def test_unknown_query_type_returns_structured_400(self, api_and_client):
-        _, _, client = api_and_client
-        response = await client.get("/api/v1/query?type=not-a-query")
-        assert response.status_code == 400
-        assert "detail" in response.json()
-
     @pytest.mark.parametrize(
         "url",
         [
@@ -205,16 +192,6 @@ class TestResourceRobustness:
         _, _, client = api_and_client
         response = await client.get(url)
         assert response.status_code == 404
-
-    @pytest.mark.parametrize(
-        "query",
-        ["type=run", "type=events", "type=run-analysis", "type=timeline", "type=tool-traces", "type=plans"],
-    )
-    async def test_run_scoped_query_requires_run_id(self, api_and_client, query):
-        _, _, client = api_and_client
-        response = await client.get("/api/v1/query?" + query)
-        assert response.status_code == 400
-        assert "detail" in response.json()
 
     async def test_confirmation_and_feedback_are_not_accepted_for_unknown_run(self, api_and_client):
         _, _, client = api_and_client
@@ -257,21 +234,11 @@ class TestResponseContracts:
 
         workspace_id = body["workspace_id"]
         events = await store.get_workspace_events(workspace_id)
-        assert events[-1].event_type == EventType.WORKSPACE_CREATED
-
-    async def test_query_response_has_stable_envelope_and_pagination_meta(self, api_and_client):
-        api, store, client = api_and_client
-        await store.append_event("r-contract", EventType.RUN_STARTED, RunStartedPayload(intent="contract").model_dump())
-        response = await client.get("/api/v1/query?type=runs&page=1&page_size=20")
-        assert response.status_code == 200
-        body = response.json()
-        assert set(body) >= {"type", "data", "meta"}
-        assert body["type"] == "runs"
-        assert body["meta"] == {"page": 1, "page_size": 20, "total": 1, "has_more": False}
+        assert events[-1].event_type == EventType.WORKSPACE
 
     async def test_event_response_keeps_sequence_order_and_required_fields(self, api_and_client):
         _, store, client = api_and_client
-        await store.append_event("r-events", EventType.RUN_STARTED, RunStartedPayload(intent="x").model_dump())
+        await store.append_event("r-events", EventType.RUN, RunStartedPayload(intent="x").model_dump())
         response = await client.get("/api/v1/runs/r-events/events")
         assert response.status_code == 200
         event = response.json()["events"][0]

@@ -32,11 +32,16 @@ from harness.storage.scoped import ScopedEventStore
 _log = guard_logger("api.deps")
 
 if TYPE_CHECKING:
+    from harness.core.context_manager import ContextManager
     from harness.core.llm_client import LLMClient
     from harness.models.events import Event
     from harness.models.tools import ToolDefinition
+    from harness.monitoring.langfuse_tracer import LangfuseTracer
+    from harness.monitoring.run_monitor import RunMonitor
     from harness.storage.event_store import EventStore
+    from harness.tools.browser_pool import BrowserPool
     from harness.tools.executor import ToolExecutor
+    from harness.tools.mcp_manager import MCPServerManager
     from harness.tools.registry import ToolRegistry
 
 
@@ -63,10 +68,11 @@ class HarnessAPI:
         self.tool_fns: dict[str, Callable] = {}
         self.llm_client: LLMClient | None = None
         self.registry: ToolRegistry | None = None
-        self.context_manager = None
-        self.mcp_manager = None
-        self.monitor = None
-        self.tracer = None
+        self.context_manager: ContextManager | None = None
+        self.mcp_manager: MCPServerManager | None = None
+        self.browser_pool: BrowserPool | None = None
+        self.monitor: RunMonitor | None = None
+        self.tracer: LangfuseTracer | None = None
         self.scheduler_config: SchedulerConfig | None = None
 
     @property
@@ -181,7 +187,7 @@ class HarnessAPI:
 
                 await scoped_store.append_event(
                     run_id,
-                    EventType.RUN_FAILED,
+                    EventType.RUN,
                     RunFailedPayload(
                         final_error=f"Run failed to start: {exc!r}",
                         event_count=1,
@@ -248,7 +254,7 @@ class HarnessAPI:
 
             await self.store.append_event(
                 state.conversation_id,
-                EventType.CONVERSATION_MESSAGE,
+                EventType.CONVERSATION,
                 ConversationMessagePayload(
                     conversation_id=state.conversation_id,
                     run_id=run_id,

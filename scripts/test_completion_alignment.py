@@ -107,7 +107,7 @@ async def run_scenario(
     backend = LocalDirectoryBackend(tempfile.mkdtemp(prefix="jagent_s12_"))
     dag = DagExecutor(executor, scoped, registry, backend=backend)
     config = SchedulerConfig(
-        max_iterations=15,
+        run_attempt_budget=15,
         run_timeout_ms=run_timeout_ms,
         max_revise_retries=3,
     )
@@ -128,15 +128,15 @@ async def run_scenario(
         "intent_raw": intent,
         "contracts": [c.model_dump() for c in contracts] if contracts else [],
     }
-    await store.append_event(run_id, EventType.RUN_STARTED, payload)
+    await store.append_event(run_id, EventType.RUN, payload)
     _t0 = time.monotonic()
     state = await sched.run(run_id, intent)
     elapsed = time.monotonic() - _t0
     events = await store.get_events(run_id)
     print(
         f"[s12] run={run_id} duration_s={elapsed:.2f} "
-        f"plan_created={sum(1 for e in events if e.event_type == EventType.PLAN_CREATED)} "
-        f"terminal_count={sum(1 for e in events if e.event_type in (EventType.RUN_COMPLETED, EventType.RUN_FAILED))}"
+        f"plan_created={sum(1 for e in events if e.event_type == EventType.PLAN)} "
+        f"terminal_count={sum(1 for e in events if e.event_type in (EventType.RUN, EventType.RUN))}"
     )
     return run_id, state.status, state.completion_evidence, events
 
@@ -144,8 +144,7 @@ async def run_scenario(
 def summarize(status: RunStatus, evidence: dict, events: list) -> str:
     ce = evidence
     return (
-        f"status={status.value} deliverable_met={ce.get('deliverable_met')} "
-        f"deliverable_status={ce.get('deliverable_status')} events={len(events)}"
+        f"status={status.value} deliverable_status={ce.get('deliverable_status')} events={len(events)}"
     )
 
 
@@ -182,10 +181,10 @@ async def main() -> None:
         contracts=contracts,
     )
     if status == RunStatus.COMPLETED:
-        assert ev.get("deliverable_met") is True, "caller 契约全部达成才可宣称交付达成"
+        assert ev.get("deliverable_status") == "met", "caller 契约全部达成才可宣称交付达成"
     else:
-        assert ev.get("deliverable_met") is not True, "失败 Run 不得宣称交付达成"
-    assert sum(1 for e in events if e.event_type in (EventType.RUN_COMPLETED, EventType.RUN_FAILED)) == 1, "终态唯一"
+        assert ev.get("deliverable_status") != "met", "失败 Run 不得宣称交付达成"
+    assert sum(1 for e in events if e.event_type in (EventType.RUN, EventType.RUN)) == 1, "终态唯一"
     results.append(f"[1] write+read caller 契约 → {summarize(status, ev, events)}")
 
     # 场景 2: 无 caller 契约 → 旧请求语义：要么未验证标记，要么契约达成
@@ -197,7 +196,7 @@ async def main() -> None:
         run_timeout_ms=60000,
     )
     assert ev.get("deliverable_status") in ("unverified", "met", "failed")
-    assert sum(1 for e in events if e.event_type in (EventType.RUN_COMPLETED, EventType.RUN_FAILED)) == 1
+    assert sum(1 for e in events if e.event_type in (EventType.RUN, EventType.RUN)) == 1
     results.append(f"[2] 无契约 → {summarize(status, ev, events)}")
 
     # 场景 3: watchdog 取消（短 run_timeout 下真实 LLM 必然超时 → 结构化失败）
@@ -205,7 +204,7 @@ async def main() -> None:
         store, llm, registry, intent="请解释一下量子计算的原理（分析型，可能绕过工具）。", run_timeout_ms=5000
     )
     assert status in (RunStatus.COMPLETED, RunStatus.FAILED)
-    assert sum(1 for e in events if e.event_type in (EventType.RUN_COMPLETED, EventType.RUN_FAILED)) == 1
+    assert sum(1 for e in events if e.event_type in (EventType.RUN, EventType.RUN)) == 1
     results.append(f"[3] 短 watchdog → {summarize(status, ev, events)}")
 
     # 场景 4: 并发 1..N 无永久卡住 / 无幽灵 Run
@@ -224,7 +223,7 @@ async def main() -> None:
     )
     for idx, (rid, status, ev, events) in enumerate(runs):
         assert status in (RunStatus.COMPLETED, RunStatus.FAILED), f"run {idx} 无终态（幽灵 Run）"
-        assert sum(1 for e in events if e.event_type in (EventType.RUN_COMPLETED, EventType.RUN_FAILED)) == 1
+        assert sum(1 for e in events if e.event_type in (EventType.RUN, EventType.RUN)) == 1
         results.append(f"[4.{idx}] 并发 run {rid} → {summarize(status, ev, events)}")
 
     print("\n=== S12 REAL-LLM REGRESSION SUMMARY ===")

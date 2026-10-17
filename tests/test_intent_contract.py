@@ -124,7 +124,7 @@ def _event(run_id: str, seq: int, payload: dict) -> Event:
     return Event(
         run_id=run_id,
         seq=seq,
-        event_type=EventType.RUN_STARTED,
+        event_type=EventType.RUN,
         payload=payload,
         created_at=0.0,
     )
@@ -153,7 +153,7 @@ async def test_event_store_roundtrip_contracts():
     store = await _make_store()
     contract = DeliveryContract(tool="file_op", input={"operation": "read", "path": "a.txt"})
     payload = RunStartedPayload(intent="read a.txt", intent_raw="read a.txt", contracts=[contract])
-    await store.append_event("r1", EventType.RUN_STARTED, payload.model_dump())
+    await store.append_event("r1", EventType.RUN, payload.model_dump())
     events = await store.get_events("r1")
     state = fold_events(events)
     assert state.intent_raw == "read a.txt"

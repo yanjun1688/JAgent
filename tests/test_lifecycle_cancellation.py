@@ -59,7 +59,7 @@ async def _make_sched(store, llm, config=None):
         dag,
         [],
         {},
-        config=config or SchedulerConfig(max_iterations=5),
+        config=config or SchedulerConfig(run_attempt_budget=5),
     )
     return sched
 
@@ -79,12 +79,12 @@ async def test_phase_timeout_plan_records_event_and_fails(store):
     sched = await _make_sched(
         store,
         HangingLLM(),
-        config=SchedulerConfig(max_iterations=5, run_timeout_ms=250, cancel_grace_ms=100),
+        config=SchedulerConfig(run_attempt_budget=5, run_timeout_ms=250, cancel_grace_ms=100),
     )
     state = await sched.run("r1", "write a file please")
     events = await store.get_events("r1")
     assert state.status == RunStatus.FAILED
-    assert any(e.event_type == EventType.RUN_FAILED for e in events)
+    assert any((e.event_type == EventType.RUN and e.phase == "failed") for e in events)
     # 子任务已回收：_phase_tasks 为空，无卡死
     assert sched._phase_tasks.get("r1") is None or sched._phase_tasks["r1"] == set()
 
@@ -93,19 +93,19 @@ async def test_run_watchdog_converges_hanging_llm(store):
     sched = await _make_sched(
         store,
         HangingLLM(),
-        config=SchedulerConfig(max_iterations=5, run_timeout_ms=300),
+        config=SchedulerConfig(run_attempt_budget=5, run_timeout_ms=300),
     )
     state = await sched.run("r1", "fetch a url")
     assert state.status == RunStatus.FAILED
     events = await store.get_events("r1")
-    assert any(e.event_type == EventType.RUN_FAILED for e in events)
+    assert any((e.event_type == EventType.RUN and e.phase == "failed") for e in events)
 
 
 async def test_external_run_cancellation_reaps_registered_tasks(store):
     sched = await _make_sched(
         store,
         HangingLLM(),
-        config=SchedulerConfig(max_iterations=5, run_timeout_ms=60000, cancel_grace_ms=100),
+        config=SchedulerConfig(run_attempt_budget=5, run_timeout_ms=60000, cancel_grace_ms=100),
     )
     task = asyncio.create_task(sched.run("r-external-cancel", "fetch a url"))
     await asyncio.sleep(0.02)
@@ -138,7 +138,7 @@ async def test_cancel_and_reap_grace_timeout_records_event(store):
     sched._phase_tasks.setdefault("r1", set()).add(task)
     await sched._cancel_and_reap("r1")
     events = await store.get_events("r1")
-    cleanup_timeouts = [e for e in events if e.event_type == EventType.TASK_CLEANUP_TIMEOUT]
+    cleanup_timeouts = [e for e in events if (e.event_type == EventType.DIAGNOSTIC and e.phase == "cleanup_timeout")]
     assert cleanup_timeouts, "expected TASK_CLEANUP_TIMEOUT structured event (C-03)"
     assert cleanup_timeouts[0].payload["pending_count"] >= 1
     assert cleanup_timeouts[0].payload["grace_ms"] == 100
@@ -156,7 +156,7 @@ async def test_cancel_and_reap_clean_tasks_no_event(store):
     sched._phase_tasks.setdefault("r1", set()).add(task)
     await sched._cancel_and_reap("r1")
     events = await store.get_events("r1")
-    assert not any(e.event_type == EventType.TASK_CLEANUP_TIMEOUT for e in events)
+    assert not any((e.event_type == EventType.DIAGNOSTIC and e.phase == "cleanup_timeout") for e in events)
 
 
 async def test_cancel_and_reap_closes_backend(store):
@@ -207,7 +207,7 @@ async def test_provider_error_structured_tool_failed(store):
     assert result.status == ExecutionStatus.FAILED
     assert result.retryable is True
     events = await store.get_events("r1")
-    failed = [e for e in events if e.event_type == EventType.TOOL_FAILED]
+    failed = [e for e in events if (e.event_type == EventType.TOOL and e.phase == "failed")]
     assert failed
     assert failed[0].payload["retryable"] is True
     assert "429" in failed[0].payload["error"]

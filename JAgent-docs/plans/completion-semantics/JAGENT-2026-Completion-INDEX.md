@@ -28,7 +28,7 @@
 
 | 编号 | 主题 | 冻结结论 |
 |------|------|----------|
-| D-01 | 步骤输出引用 `$step.output` | **支持，但受信化**：语法层保留 `$s1.result`（LLM 友好）；规范层由受信 PlanGuardrail 静态解析为 `OutputRef` 并校验；执行层由受信 Executor 只认结构化绑定解析。目标 step 必须存在于当前 plan、字段必须符合上游输出 schema、`file_op.path` 与 `file_op.content` 禁止引用。 |
+| D-01 | 步骤输出引用 `$step.output` | **支持，但受信化**：语法层保留 `$s1.result`（LLM 友好）；规范层由受信 PlanGuardrail 静态解析为 `OutputRef` 并校验；执行层由受信 Executor 只认结构化绑定解析。目标 step 必须存在于当前 plan、字段必须符合上游输出 schema。引用合法性按 per-input-field 的字段角色派生：`input_schema.properties.<field>` 的 `x-role`（`data`=允许 `$ref` / `authority`=禁止，缺省 `authority` fail-closed）；`file_op.path`=authority 禁止，`file_op.content`=data 允许。 |
 | D-02 | 交付契约来源 | **方案 A + B 并存**：`POST /api/v1/runs` 增加可选 `required_operations`（来源 `caller`）；未提供时由独立抽取步骤从 intent 抽取（来源 `extracted`）。两种来源统一进入 `DeliveryContract`，双向覆盖检查对两者都生效。 |
 | D-03 | deliverable_met 判定粒度 | **先做操作 + 路径级**（工具 + operation + 目标 path 匹配且对应 step_normal）；内容匹配（read 回读 == 写入内容）留待后续增强。`content` 字段必须存底但不参与匹配。 |
 | D-04 | 旧请求无 required_operations | **回退机械完成语义**，但 `RunCompleted` 显式标记 `deliverable_met=false + deliverable_unverified`，前端如实展示，禁止宣称交付达成。 |
@@ -42,7 +42,9 @@
 | C-01 | 契约模型收敛 | 消除 `RequiredOperation` 与 `DeliveryContract` 概念撞车。收敛为**单一 `DeliveryContract`** 携带 `provenance`（`caller` / `extracted`）。权威性唯一；来源只用于审计与降级，不参与受信判定。 |
 | C-02 | 双向覆盖定位 | 双向覆盖只保证"系统知道的全做了"，不保证"用户要的全被知道"。**定位为缓解手段**，不写进验收标准的达成依据。真正闭合漏洞靠 D-02（caller 显式契约）+ D-04（如实标记 unverified）。 |
 | C-03 | Watchdog 回收语义 | 禁止无限等待。采用"取消 + 宽限期 `await`（建议 5s）+ 终态后迟到事件断言"。宽限期后仍 pending 则记录结构化 WARNING 并强制 cleanup，防止 watchdog 从"卡在长尾"变成"卡在清理"。 |
-| C-04 | 引用校验粒度 | 引用合法性按 **per-input-field** 判定，由 OperationContract 的 `ref_allowed: bool` 声明；不能只按 per-operation output_schema 判定。 |
+| C-04 | 引用校验粒度 | 引用合法性按 **per-input-field** 判定，由 `input_schema.properties.<field>` 的字段角色 `x-role` 声明（`data`=允许、`authority`=禁止，缺省 `authority` fail-closed）；不能只按 per-operation output_schema 判定。 |
+
+> **修订（2026-09-12）**：D-01/C-04 的 per-field 引用政策由 `OperationContract.ref_allowed_fields: dict[str,bool]` 收敛为 `input_schema` 字段角色 `x-role`（DATA/AUTHORITY，缺省 AUTHORITY fail-closed）；`file_op.content` 由禁止引用改为允许，`path` 仍禁止。详见 [review_20260912_field_role_contract_diff](../../reviews/review_20260912_field_role_contract_diff.md)。
 | C-05 | 终态幂等是前置 | `_fail`/`_complete`（`harness/core/scheduler/base.py`）必须先加**终态守卫**（fold 出 terminal 即拒绝再写），否则 watchdog/取消/熔断并发会写重复 `RunFailed`、终态后还可能跑 `RunCompleted`。S09 为 S10 前置。 |
 | C-06 | 验证器边界 | `DeliverableVerification` 只**对照已存在的契约验证达成度**，绝不自行推断"用户要什么"。契约来源只有 `caller` / `extracted` 两个入口。 |
 
@@ -63,7 +65,7 @@
 | 步骤 | 名称 | 依赖 | 核心交付物 | 关键验收 |
 |------|------|------|-----------|----------|
 | S01 | 架构决策固化 | 无 | ADR-007 扩展文档（决策编号可引用） | 文档一致、决策编号齐 |
-| S02 | OperationContract 契约细化 | S01 | `tools.py` 新增 per-operation 契约 + 4 工具声明 + 单测 | per-op 副作用/确认/幂等/schema/`ref_allowed` |
+| S02 | OperationContract 契约细化 | S01 | `tools.py` 新增 per-operation 契约 + 4 工具声明 + 单测 | per-op 副作用/确认/幂等/schema/字段角色(`x-role`) |
 | S03 | PlanGuardrail DAG 结构校验 | S01 | 结构校验纯函数 + 单测 | 唯一/依赖存在/自依赖/循环/层级 |
 | S04 | 步骤输出引用契约 | S02 | `OutputRef` 模型 + 静态校验 + 单测 | 引用存在性/字段 schema/禁引字段 |
 | S05 | DeliveryContract 收敛 | S01 | `intent.py` 模型 + 事件类型 + fold | 单一模型 + provenance + after + content 存底 |
@@ -75,7 +77,7 @@
 | S11 | 可观测性 | S09 | 结构化日志/UTF-8/失败计数折叠/reload 目录 | run_id+phase+耗时、计数一致 |
 | S12 | 回归与真实 LLM | 全部 | 确定性回归全量 + opt-in 真实 LLM 脚本 | 全量绿 + 13 项验收 |
 
-**关键路径**：S01 → S02 → S04（引用校验依赖 S02 的 schema 与 `ref_allowed`）；S01 → S05 → S06 → S07/S08；S05 → S09 → S10 → S11 → S12。
+**关键路径**：S01 → S02 → S04（引用校验依赖 S02 的 schema 与字段角色）；S01 → S05 → S06 → S07/S08；S05 → S09 → S10 → S11 → S12。
 
 ---
 
@@ -98,7 +100,7 @@
 | S01 | 已完成 | opencode（S01 独立会话） | 2026-08-13 | 新建 ADR-008，D/C/L 与 §1 逐字一致 |
 | S02 | 已完成 | opencode（S02 会话） | 2026-08-13 | OperationContract + 4 工具 operations 声明 + resolve 函数 |
 | S03 | 已完成 | opencode（S03 会话） | 2026-08-13 | validate_dag_structure 纯函数 + 环路径 + 外部依赖不误报 |
-| S04 | 已完成 | opencode（S04 会话） | 2026-08-13 | OutputRef 静态校验 + ref_allowed（file_op.path/content 禁引用） |
+| S04 | 已完成 | opencode（S04 会话） | 2026-08-13 | OutputRef 静态校验 + ref_allowed（file_op.path/content 禁引用）；2026-09-12 起改由字段角色 `x-role` 派生（path 禁、content 允许） |
 | S05 | 已完成 | opencode（S05 会话） | 2026-08-13 | intent.py + RunStarted 扩展 intent_raw/contracts + fold |
 | S06 | 已完成 | opencode（S06 会话） | 2026-08-13 | CompletionVerdict 双维 + DeliverableVerification + 完成门升级 |
 | S07 | 已完成 | opencode（S07 会话） | 2026-08-13 | CreateRunRequest.required_operations + ContractExtractor 抽取兜底 + OpenAPI 同步 |
@@ -115,9 +117,9 @@
 | 步骤 | 读入（上游交付物） | 产出（写给下游） |
 |------|--------------------|------------------|
 | S01 | — | `ADR-007` 扩展文档 + 决策编号 |
-| S02 | S01 决策编号 | `OperationContract`（含 `ref_allowed`）+ 工具声明 + 单测 |
+| S02 | S01 决策编号 | `OperationContract`（含字段角色 `x-role`）+ 工具声明 + 单测 |
 | S03 | S01 | `validate_dag_structure()` 纯函数 + 单测 |
-| S04 | S02 的 output_schema/ref_allowed | `OutputRef` + 静态校验 + 单测 |
+| S04 | S02 的 output_schema/字段角色 | `OutputRef` + 静态校验 + 单测 |
 | S05 | S01 | `DeliveryContract`/`UserIntent` 模型 + 事件 + fold 分支 |
 | S06 | S05 契约模型 | 双向覆盖 + 完成门升级 + `DeliverableVerification` + 单测 |
 | S07 | S05 | API 可选字段透传 + 抽取兜底 + 契约测试 |

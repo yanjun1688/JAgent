@@ -16,28 +16,35 @@ from harness.models.plan import DagPlan, DagStep, RequiredOperation
 _log = agent_logger("planner")
 
 
-def parse_local_repair_proposal(response: str) -> LocalRepairProposal | None:
+def parse_local_repair_proposal(response: str) -> tuple[LocalRepairProposal | None, str]:
     """Parse the LLM's single-action repair JSON into a typed proposal.
 
-    Empty tool_name (``{"tool_name": ""}``) or a missing tool means "no
-    repair possible" → None (escalate). Extra keys are ignored.
+    Returns ``(proposal, "")`` on success and ``(None, error)`` when the response
+    is malformed and should be retried with ``error`` fed back to the model
+    (mirrors parse_plan_response / contract extractor). A structurally valid but
+    empty answer ``{"tool_name": ""}`` means "no repair possible" → ``(None, "")``:
+    the caller escalates WITHOUT retrying (that is a model decision, not a format
+    failure).
     """
     try:
         data = parse_lenient_json(response)
-    except LenientJsonError:
-        return None
+    except LenientJsonError as e:
+        if e.kind == "no_object":
+            return None, "No JSON object found in local-repair response"
+        return None, "Local-repair response is not valid JSON"
     if not isinstance(data, dict):
-        return None
+        return None, "Local-repair response root must be a JSON object"
     tool_name = str(data.get("tool_name") or "").strip()
     if not tool_name:
-        return None
+        # Legitimate "cannot repair" answer — not a format error (no retry).
+        return None, ""
     raw_input = data.get("input")
     if raw_input is None:
         raw_input = data.get("parameters")
     if not isinstance(raw_input, dict):
-        return None
+        return None, f"Local-repair proposal for tool '{tool_name}' must include an 'input' object"
     step_id = str(data.get("step_id") or "")
-    return LocalRepairProposal(step_id=step_id, tool_name=tool_name, input=raw_input)
+    return LocalRepairProposal(step_id=step_id, tool_name=tool_name, input=raw_input), ""
 
 
 def parse_plan_response(

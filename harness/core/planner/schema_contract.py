@@ -94,3 +94,13 @@ def retry_prompt(last_error: str) -> str:
         f"Please fix this and output ONLY valid JSON.\n"
         f"Remember the required format:\n{_STEP_SCHEMA_RAW}"
     )
+
+
+def local_repair_retry_prompt(last_error: str) -> str:
+    """T-R8b-3: local-repair 解析失败时的重试反馈（喂回具体错误，消除同 prompt 空转）。"""
+    return (
+        f"Your previous local-repair response had a format error:\n{last_error}\n\n"
+        "Re-respond with ONLY valid JSON of this exact shape: "
+        '{"tool_name": "<allowed_tool>", "input": {<key>: <value>}}.\n'
+        'If NO allowed tool can repair the step, return {"tool_name": ""}.'
+    )

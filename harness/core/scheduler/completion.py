@@ -33,8 +33,12 @@ class CompletionVerdict:
     mechanical_complete: bool
     unmet_step_ids: list[str]
     deliverables: list[DeliverableVerdict] = field(default_factory=list)
-    deliverable_met: bool = False
     deliverable_status: str = "unverified"  # "met" | "unverified" | "failed"
+
+    @property
+    def deliverable_met(self) -> bool:
+        """派生自 ``deliverable_status``（唯一真源），不独立存储。"""
+        return self.deliverable_status == "met"
 
     @classmethod
     def compute(
@@ -69,16 +73,14 @@ class CompletionVerdict:
         contracts = list(contracts or ())
         deliverables = verify_deliverables(contracts, plan, results, aliases)
         if not contracts:
-            deliverable_met = False
             deliverable_status = "unverified"  # D-04
         else:
-            deliverable_met = bool(deliverables) and all(v.status == "met" for v in deliverables)
-            deliverable_status = "met" if deliverable_met else "failed"
+            met = bool(deliverables) and all(v.status == "met" for v in deliverables)
+            deliverable_status = "met" if met else "failed"
         return cls(
             mechanical_complete=mechanical_complete,
             unmet_step_ids=unmet,
             deliverables=deliverables,
-            deliverable_met=deliverable_met,
             deliverable_status=deliverable_status,
         )
 

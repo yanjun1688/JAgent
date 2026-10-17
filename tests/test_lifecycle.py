@@ -35,15 +35,15 @@ async def store():
 class TestFoldOrphaned:
     def test_orphaned_default_false(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
         ]
         state = fold_events(events)
         assert state.orphaned is False
 
     def test_run_orphaned_sets_flag(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
-            _event("r1", 2, EventType.RUN_ORPHANED, {"reason": "server_restart", "detected_at": 1.0}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 2, EventType.RUN, {"reason": "server_restart", "detected_at": 1.0}),
         ]
         state = fold_events(events)
         assert state.orphaned is True
@@ -51,8 +51,8 @@ class TestFoldOrphaned:
 
     def test_orphaned_preserves_status_running(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
-            _event("r1", 2, EventType.RUN_ORPHANED, {"reason": "server_restart", "detected_at": 1.0}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 2, EventType.RUN, {"reason": "server_restart", "detected_at": 1.0}),
         ]
         state = fold_events(events)
         assert state.status == RunStatus.RUNNING
@@ -60,9 +60,9 @@ class TestFoldOrphaned:
 
     def test_orphaned_preserves_status_paused(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
-            _event("r1", 2, EventType.RUN_PAUSED, {"reason": "user_requested"}),
-            _event("r1", 3, EventType.RUN_ORPHANED, {"reason": "server_restart", "detected_at": 1.0}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 2, EventType.RUN, {"reason": "user_requested"}),
+            _event("r1", 3, EventType.RUN, {"reason": "server_restart", "detected_at": 1.0}),
         ]
         state = fold_events(events)
         assert state.status == RunStatus.PAUSED
@@ -70,9 +70,9 @@ class TestFoldOrphaned:
 
     def test_multiple_orphaned_events_idempotent(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
-            _event("r1", 2, EventType.RUN_ORPHANED, {"reason": "server_restart", "detected_at": 1.0}),
-            _event("r1", 3, EventType.RUN_ORPHANED, {"reason": "server_restart", "detected_at": 2.0}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 2, EventType.RUN, {"reason": "server_restart", "detected_at": 1.0}),
+            _event("r1", 3, EventType.RUN, {"reason": "server_restart", "detected_at": 2.0}),
         ]
         state = fold_events(events)
         assert state.orphaned is True
@@ -82,25 +82,25 @@ class TestMarkOrphans:
     async def test_marks_running_run(self, store: EventStore):
         await store.append_event(
             "r1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "test", "context_snapshot": {}},
         )
         marked = await mark_orphans(store)
         assert marked == 1
 
         events = await store.get_events("r1")
-        orphaned_events = [e for e in events if e.event_type == EventType.RUN_ORPHANED]
+        orphaned_events = [e for e in events if (e.event_type == EventType.RUN and e.phase == "orphaned")]
         assert len(orphaned_events) == 1
 
     async def test_marks_paused_run(self, store: EventStore):
         await store.append_event(
             "r1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "test", "context_snapshot": {}},
         )
         await store.append_event(
             "r1",
-            EventType.RUN_PAUSED,
+            EventType.RUN,
             {"reason": "user_requested"},
         )
         marked = await mark_orphans(store)
@@ -109,30 +109,30 @@ class TestMarkOrphans:
     async def test_does_not_mark_completed(self, store: EventStore):
         await store.append_event(
             "r1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "test", "context_snapshot": {}},
         )
         await store.append_event(
             "r1",
-            EventType.RUN_COMPLETED,
+            EventType.RUN,
             {"result_summary": "done"},
         )
         marked = await mark_orphans(store)
         assert marked == 0
 
         events = await store.get_events("r1")
-        orphaned_events = [e for e in events if e.event_type == EventType.RUN_ORPHANED]
+        orphaned_events = [e for e in events if (e.event_type == EventType.RUN and e.phase == "orphaned")]
         assert len(orphaned_events) == 0
 
     async def test_does_not_mark_failed(self, store: EventStore):
         await store.append_event(
             "r1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "test", "context_snapshot": {}},
         )
         await store.append_event(
             "r1",
-            EventType.RUN_FAILED,
+            EventType.RUN,
             {"final_error": "boom", "event_count": 2},
         )
         marked = await mark_orphans(store)
@@ -141,7 +141,7 @@ class TestMarkOrphans:
     async def test_idempotent_no_double_mark(self, store: EventStore):
         await store.append_event(
             "r1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "test", "context_snapshot": {}},
         )
         marked1 = await mark_orphans(store)
@@ -151,33 +151,33 @@ class TestMarkOrphans:
         assert marked2 == 0
 
         events = await store.get_events("r1")
-        orphaned_events = [e for e in events if e.event_type == EventType.RUN_ORPHANED]
+        orphaned_events = [e for e in events if (e.event_type == EventType.RUN and e.phase == "orphaned")]
         assert len(orphaned_events) == 1
 
     async def test_multiple_runs_mixed(self, store: EventStore):
         await store.append_event(
             "r1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "running task", "context_snapshot": {}},
         )
         await store.append_event(
             "r2",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "completed task", "context_snapshot": {}},
         )
         await store.append_event(
             "r2",
-            EventType.RUN_COMPLETED,
+            EventType.RUN,
             {"result_summary": "done"},
         )
         await store.append_event(
             "r3",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "paused task", "context_snapshot": {}},
         )
         await store.append_event(
             "r3",
-            EventType.RUN_PAUSED,
+            EventType.RUN,
             {"reason": "user_requested"},
         )
 
@@ -185,15 +185,15 @@ class TestMarkOrphans:
         assert marked == 2
 
         r1_events = await store.get_events("r1")
-        r1_orphaned = [e for e in r1_events if e.event_type == EventType.RUN_ORPHANED]
+        r1_orphaned = [e for e in r1_events if (e.event_type == EventType.RUN and e.phase == "orphaned")]
         assert len(r1_orphaned) == 1
 
         r2_events = await store.get_events("r2")
-        r2_orphaned = [e for e in r2_events if e.event_type == EventType.RUN_ORPHANED]
+        r2_orphaned = [e for e in r2_events if (e.event_type == EventType.RUN and e.phase == "orphaned")]
         assert len(r2_orphaned) == 0
 
         r3_events = await store.get_events("r3")
-        r3_orphaned = [e for e in r3_events if e.event_type == EventType.RUN_ORPHANED]
+        r3_orphaned = [e for e in r3_events if (e.event_type == EventType.RUN and e.phase == "orphaned")]
         assert len(r3_orphaned) == 1
 
     async def test_empty_store(self, store: EventStore):
@@ -203,7 +203,7 @@ class TestMarkOrphans:
     async def test_fold_after_mark_shows_orphaned_and_failed(self, store: EventStore):
         await store.append_event(
             "r1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "test", "context_snapshot": {}},
         )
         await mark_orphans(store)
@@ -227,17 +227,17 @@ class TestOrphanTermination:
     async def test_running_orphan_is_terminated_as_failed(self, store: EventStore):
         await store.append_event(
             "r1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "test", "context_snapshot": {}},
         )
         await mark_orphans(store)
 
         events = await store.get_events("r1")
-        types = [e.event_type for e in events]
-        assert EventType.RUN_ORPHANED in types
-        assert EventType.RUN_FAILED in types
+        run_phases = [e.phase for e in events if e.event_type == EventType.RUN]
+        assert "started" in run_phases
+        assert "orphaned" in run_phases
         # ORPHANED (diagnostic flag) precedes FAILED (terminal state).
-        assert types.index(EventType.RUN_ORPHANED) < types.index(EventType.RUN_FAILED)
+        assert run_phases.index("orphaned") < run_phases.index("failed")
 
         state = fold_events(events)
         assert state.status == RunStatus.FAILED
@@ -246,10 +246,10 @@ class TestOrphanTermination:
     async def test_paused_orphan_is_terminated_as_failed(self, store: EventStore):
         await store.append_event(
             "r1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "test", "context_snapshot": {}},
         )
-        await store.append_event("r1", EventType.RUN_PAUSED, {"reason": "waiting for confirmation"})
+        await store.append_event("r1", EventType.RUN, {"reason": "waiting for confirmation"})
         await mark_orphans(store)
 
         state = fold_events(await store.get_events("r1"))
@@ -259,7 +259,7 @@ class TestOrphanTermination:
     async def test_termination_is_idempotent(self, store: EventStore):
         await store.append_event(
             "r1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "test", "context_snapshot": {}},
         )
         first = await mark_orphans(store)
@@ -269,19 +269,19 @@ class TestOrphanTermination:
         assert second == 0
 
         events = await store.get_events("r1")
-        failed = [e for e in events if e.event_type == EventType.RUN_FAILED]
+        failed = [e for e in events if (e.event_type == EventType.RUN and e.phase == "failed")]
         assert len(failed) == 1
 
     async def test_failed_payload_tells_operator_to_resubmit(self, store: EventStore):
         await store.append_event(
             "r1",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "test", "context_snapshot": {}},
         )
         await mark_orphans(store)
 
         events = await store.get_events("r1")
-        failed = next(e for e in events if e.event_type == EventType.RUN_FAILED)
+        failed = next(e for e in events if (e.event_type == EventType.RUN and e.phase == "failed"))
         # The failure must be attributable to a restart and tell the user what to do.
         assert "restart" in failed.payload["final_error"].lower() or "orphan" in failed.payload["final_error"].lower()
 
@@ -298,7 +298,7 @@ class TestOrphanMultiTenantAttribution:
     async def test_terminal_events_are_attributed_to_owning_tenant(self, store: EventStore):
         await store.append_event(
             "r-nondefault",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "test", "context_snapshot": {}},
             tenant_id="acme",
             workspace_id="ws-acme",
@@ -308,15 +308,15 @@ class TestOrphanMultiTenantAttribution:
 
         # The owning tenant's scoped view must see the terminal events.
         acme_events = await ScopedEventStore(store, "acme").get_events("r-nondefault")
-        types = [e.event_type for e in acme_events]
-        assert EventType.RUN_ORPHANED in types
-        assert EventType.RUN_FAILED in types
+        run_phases = [e.phase for e in acme_events if e.event_type == EventType.RUN]
+        assert "orphaned" in run_phases
+        assert "failed" in run_phases
 
         # Every appended event carries the owning tenant + workspace columns.
         for ev in acme_events:
             assert ev.tenant_id == "acme", f"{ev.event_type} misattributed to {ev.tenant_id}"
         for ev in acme_events:
-            if ev.event_type in (EventType.RUN_ORPHANED, EventType.RUN_FAILED):
+            if ev.event_type in (EventType.RUN, EventType.RUN):
                 assert ev.workspace_id == "ws-acme"
 
         # The default tenant must NOT see another tenant's terminal events.
@@ -326,10 +326,10 @@ class TestOrphanMultiTenantAttribution:
     async def test_default_tenant_unchanged(self, store: EventStore):
         await store.append_event(
             "r-default",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "test", "context_snapshot": {}},
         )
         await mark_orphans(store)
         events = await ScopedEventStore(store, "default").get_events("r-default")
-        assert EventType.RUN_FAILED in [e.event_type for e in events]
+        assert EventType.RUN in [e.event_type for e in events]
         assert all(e.tenant_id == "default" for e in events)

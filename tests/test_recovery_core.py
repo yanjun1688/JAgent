@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from harness.core.dag_types import ExecState
+from harness.core.dag_types import ExecState, action_signature
 from harness.core.fold import StepEvidence
 from harness.core.recovery import (
     LocalRepairProposal,
@@ -169,6 +169,8 @@ class _Tool:
 
 
 class TestLocalRepairBudget:
+    _OTHER_SIGNATURE = ("other_tool", "{}")
+
     def _budget(self, max_rounds=2):
         return RecoveryBudget(
             max_repair_rounds=max_rounds,
@@ -178,20 +180,29 @@ class TestLocalRepairBudget:
     def test_proposal_within_budget_accepted(self):
         budget = self._budget()
         prop = LocalRepairProposal(step_id="s1", tool_name="http_request", input={"url": "https://x"})
-        decision = validate_local_repair(prop, round_used=1, budget=budget, step_tools_read_only={})
+        decision = validate_local_repair(
+            prop, round_used=1, budget=budget, step_tools_read_only={},
+            original_signature=self._OTHER_SIGNATURE,
+        )
         assert decision.allowed is True
 
     def test_round_over_budget_rejected(self):
         budget = self._budget(max_rounds=1)
         prop = LocalRepairProposal(step_id="s1", tool_name="http_request", input={"url": "https://x"})
-        decision = validate_local_repair(prop, round_used=2, budget=budget, step_tools_read_only={})
+        decision = validate_local_repair(
+            prop, round_used=2, budget=budget, step_tools_read_only={},
+            original_signature=self._OTHER_SIGNATURE,
+        )
         assert decision.allowed is False
         assert "budget" in decision.reason
 
     def test_non_whitelisted_tool_rejected(self):
         budget = self._budget()
         prop = LocalRepairProposal(step_id="s1", tool_name="browser", input={"action": "navigate"})
-        decision = validate_local_repair(prop, round_used=1, budget=budget, step_tools_read_only={})
+        decision = validate_local_repair(
+            prop, round_used=1, budget=budget, step_tools_read_only={},
+            original_signature=self._OTHER_SIGNATURE,
+        )
         assert decision.allowed is False
         assert "tool" in decision.reason
 
@@ -200,12 +211,47 @@ class TestLocalRepairBudget:
         # file_op write is mutating → local repair must not introduce side effects.
         prop = LocalRepairProposal(step_id="s1", tool_name="file_op", input={"operation": "write", "path": "f", "content": "x"})
         read_only = {"file_op": False}
-        decision = validate_local_repair(prop, round_used=1, budget=budget, step_tools_read_only=read_only)
+        decision = validate_local_repair(
+            prop, round_used=1, budget=budget, step_tools_read_only=read_only,
+            original_signature=self._OTHER_SIGNATURE,
+        )
         assert decision.allowed is False
         assert "side" in decision.reason or "mutat" in decision.reason
 
     def test_empty_proposal_rejected(self):
         budget = self._budget()
         prop = LocalRepairProposal(step_id="s1", tool_name="", input={})
-        decision = validate_local_repair(prop, round_used=1, budget=budget, step_tools_read_only={})
+        decision = validate_local_repair(
+            prop, round_used=1, budget=budget, step_tools_read_only={},
+            original_signature=self._OTHER_SIGNATURE,
+        )
         assert decision.allowed is False
+
+    def test_proposal_repeating_identical_action_rejected(self):
+        # The repair proposes exactly the failed step's action (same tool+input).
+        budget = RecoveryBudget(max_repair_rounds=2, allowed_tools={"file_op", "http_request"})
+        prop = LocalRepairProposal(
+            step_id="s1", tool_name="file_op",
+            input={"operation": "read", "path": "missing_data.csv"},
+        )
+        original = action_signature("file_op", {"operation": "read", "path": "missing_data.csv"})
+        decision = validate_local_repair(
+            prop, round_used=1, budget=budget,
+            step_tools_read_only={"file_op": True},
+            original_signature=original,
+        )
+        assert decision.allowed is False
+        assert "identical" in decision.reason
+
+    def test_same_tool_changed_input_accepted(self):
+        # Same tool but a genuinely different input (new upstream data) is allowed.
+        budget = self._budget()
+        prop = LocalRepairProposal(
+            step_id="s1", tool_name="http_request", input={"url": "https://y"}
+        )
+        original = action_signature("http_request", {"url": "https://x"})
+        decision = validate_local_repair(
+            prop, round_used=1, budget=budget, step_tools_read_only={},
+            original_signature=original,
+        )
+        assert decision.allowed is True

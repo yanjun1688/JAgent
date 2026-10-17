@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
-from harness.core.dag_types import ExecState, StepResult, action_input_signature
+from harness.core.dag_types import ExecState, StepResult, action_input_signature, action_signature
 from harness.core.fold import StepEvidence
 
 # ── F-4: rebuild in-memory results from the trusted evidence projection ──
@@ -92,7 +92,7 @@ def unresolved_known_bad_steps(
     prev_evidence: dict[str, StepEvidence],
     patch_steps: list[dict],
     *,
-    original_inputs: dict[str, dict[str, Any] | None] | None = None,
+    original_inputs: Mapping[str, dict[str, Any] | None] | None = None,
 ) -> list[str]:
     """Return failed (non-transient) step ids that a revision patch fails to address.
 
@@ -224,11 +224,15 @@ def validate_local_repair(
     round_used: int,
     budget: RecoveryBudget,
     step_tools_read_only: dict[str, bool],
+    original_signature: tuple[str, str],
 ) -> RepairDecision:
     """Decide mechanically whether a step-local repair proposal may execute.
 
     Trusted rules (no LLM): within round budget; tool in whitelist; action
-    read-only (local repair must not introduce new side effects); non-empty.
+    read-only (local repair must not introduce new side effects); non-empty;
+    and the proposal must not simply repeat the failed step's identical
+    (tool, normalized input) action — such a rerun cannot succeed and must
+    escalate (mirrors the degenerate-revision guard; same signature source).
     """
     if round_used > budget.max_repair_rounds:
         return RepairDecision(False, f"local repair budget exhausted (round {round_used} > {budget.max_repair_rounds})")
@@ -238,4 +242,8 @@ def validate_local_repair(
         return RepairDecision(False, f"tool '{proposal.tool_name}' not in local-repair whitelist")
     if not _is_read_only_action(proposal.tool_name, proposal.input or {}, step_tools_read_only):
         return RepairDecision(False, f"local repair action '{proposal.tool_name}' is mutating/side-effecting")
+    if action_signature(proposal.tool_name, proposal.input or {}) == original_signature:
+        return RepairDecision(
+            False, "repair repeats the failed step's identical action — escalate"
+        )
     return RepairDecision(True, "")

@@ -102,7 +102,7 @@ async def scenario_normal(api_key: str, model: str, base_url: str):
         kernel=kernel,
         tool_defs=[echo_def],
         tool_fns={"echo": echo_fn},
-        config=SchedulerConfig(max_iterations=5),
+        config=SchedulerConfig(run_attempt_budget=5),
         context_manager=cm,
         monitor=monitor,
     )
@@ -167,7 +167,7 @@ async def scenario_error(api_key: str, model: str, base_url: str):
         kernel=kernel,
         tool_defs=[fail_def],
         tool_fns={"fail_on_demand": fail_fn},
-        config=SchedulerConfig(max_iterations=5, max_consecutive_failures=3),
+        config=SchedulerConfig(run_attempt_budget=3),
         context_manager=cm,
         monitor=monitor,
     )
@@ -234,7 +234,7 @@ async def scenario_monitor():
         kernel=kernel,
         tool_defs=[fail_def],
         tool_fns={"always_fail": always_fail_fn},
-        config=SchedulerConfig(max_iterations=10, max_consecutive_failures=5),
+        config=SchedulerConfig(run_attempt_budget=5),
         context_manager=cm,
         monitor=monitor,
     )

@@ -12,6 +12,7 @@ from __future__ import annotations
 from harness.core.lenient_json import LenientJsonError, parse_lenient_json
 from harness.core.llm_client import LLMClient
 from harness.core.logger import agent_logger, guard_logger
+from harness.core.system_prompt import AgentPhase, get_prompt
 from harness.models.intent import DeliveryContract, DeliverySource, validate_delivery_contract_input
 from harness.models.tools import unknown_tool_message
 from harness.tools.registry import ToolRegistry
@@ -24,43 +25,6 @@ _guard = guard_logger("contract_extractor")
 # + unverified（D-04 兜底，不阻断 Run）。
 CONTRACT_EXTRACT_TIMEOUT = 15.0
 
-_EXTRACT_PROMPT = """\
-Extract the REQUIRED hard-delivery operations from the user's request as JSON.
-
-A required operation is something the user EXPLICITLY asked to be performed —
-creating/writing/deleting/reading files, fetching URLs, navigating browsers,
-querying external services. Do NOT extract soft suggestions or hypothetical
-operations ("if it fails", "maybe", "optional").
-
-Return ONLY valid JSON with this exact shape:
-{{"required_operations": [{{"tool": "<tool_name>", "input": {{<key>: <value>}}}}]}}
-
-Rules:
-- tool must be one of: {tool_names}
-- input must include the discriminating key for that tool:
-    file_op      → "operation" (one of read/write/append/delete/list) + "path"
-    http_request → "method" (GET/POST/PUT/PATCH/DELETE/HEAD) + "url"
-    browser      → "action" (navigate/click/type/extract/screenshot)
-    mcp_call     → "tool_name"
-- include "content" for file_op write/append if the user specified it
-- include "path" exactly as the user wrote it — never rewrite it
-- if there are no hard delivery requirements, return {{"required_operations": []}}
-
-User request:
-{intent}
-"""
-
-# 解析/校验失败时的重试反馈（对齐 Planner.plan/revise 的 retry_prompt 语义）：
-# 错误塞回模型 → 下一轮只修正格式/工具名，不重复正确内容。
-_RETRY_HINT = (
-    "Your previous extraction response had a format or validation error:\n{error}\n\n"
-    "Re-respond with ONLY valid JSON of this exact shape: "
-    '{{"required_operations": [{{"tool": "<tool_name>", "input": {{<key>: <value>}}}}]}}\n'
-    "Available tools: {tool_names}\n"
-    "If the request truly has no hard delivery requirement, "
-    'return {{"required_operations": []}}.'
-)
-
 
 class ContractExtractor:
     """Non-trusted extractor with trusted structural validation gate."""
@@ -72,7 +36,7 @@ class ContractExtractor:
 
     def _build_prompt(self, intent: str) -> str:
         tool_names = ", ".join(sorted(self.registry.tool_names))
-        return _EXTRACT_PROMPT.format(intent=intent[:4000], tool_names=tool_names)
+        return get_prompt(AgentPhase.EXTRACT, intent=intent[:4000], tool_names=tool_names)
 
     def _validate(self, item: dict) -> tuple[DeliveryContract | None, str]:
         """受信结构校验：tool 存在 + input 为 dict + 含操作判别键。
@@ -83,15 +47,18 @@ class ContractExtractor:
         op_input = item.get("input")
         if not isinstance(tool, str) or not tool:
             return None, "operation missing a 'tool' name"
-        if self.registry.get_tool_def(tool) is None:
-            reason = unknown_tool_message(tool)
+        # R7: single existence lookup via the shared primitive (was a raw
+        # get_tool_def + hand-written fragment, then a second get_tool_def).
+        tool_def, unknown = self.registry.tool_def_or_error(tool)
+        if tool_def is None:
+            reason = unknown or unknown_tool_message(tool)
             _guard.warning("[extract] Dropping contract for %s", reason)
             return None, reason
         if not isinstance(op_input, dict):
             reason = f"tool '{tool}': input not an object"
             _guard.warning("[extract] Dropping contract for %s", reason)
             return None, reason
-        errors = validate_delivery_contract_input(tool, op_input, self.registry.get_tool_def(tool))
+        errors = validate_delivery_contract_input(tool, op_input, tool_def)
         if errors:
             reason = f"tool '{tool}': {'; '.join(errors)}"
             _guard.warning("[extract] Dropping contract for %s", reason)
@@ -154,9 +121,8 @@ class ContractExtractor:
         for attempt in range(1, total + 1):
             messages = [{"role": "system", "content": prompt}]
             if last_err:
-                messages.append(
-                    {"role": "user", "content": _RETRY_HINT.format(error=last_err, tool_names=tool_names)}
-                )
+                retry_hint = get_prompt(AgentPhase.EXTRACT_RETRY, error=last_err, tool_names=tool_names)
+                messages.append({"role": "user", "content": retry_hint})
             try:
                 chat_resp = await self.llm.chat(messages, temperature=0.0, run_id=run_id)
             except Exception as exc:

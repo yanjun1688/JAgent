@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from harness.core.fold import RunStatus, fold_events
-from harness.models.events import Event, EventType, Episode
+from harness.models.events import Event, EventType
 
 
 def _event(
@@ -30,15 +30,15 @@ class TestFoldBasic:
 
     def test_mixed_run_ids_raises(self):
         events = [
-            _event("run-1", 1, EventType.RUN_STARTED, {"intent": "a", "context_snapshot": {}}),
-            _event("run-2", 2, EventType.AGENT_THOUGHT, {"thought": "x", "token_count": 1}),
+            _event("run-1", 1, EventType.RUN, {"intent": "a", "context_snapshot": {}}),
+            _event("run-2", 2, EventType.AGENT_THOUGHT, {"thought": "x"}),
         ]
         with pytest.raises(ValueError, match="Mixed run_ids"):
             fold_events(events)
 
     def test_run_started_sets_intent(self):
         events = [
-            _event("run-1", 1, EventType.RUN_STARTED, {"intent": "test intent", "context_snapshot": {"k": "v"}}),
+            _event("run-1", 1, EventType.RUN, {"intent": "test intent", "context_snapshot": {"k": "v"}}),
         ]
         state = fold_events(events)
         assert state.run_id == "run-1"
@@ -51,9 +51,9 @@ class TestFoldBasic:
 class TestFoldThoughtHistory:
     def test_agent_thought_adds_to_history(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
-            _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "think 1", "token_count": 10}),
-            _event("r1", 3, EventType.AGENT_THOUGHT, {"thought": "think 2", "token_count": 20}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "think 1"}),
+            _event("r1", 3, EventType.AGENT_THOUGHT, {"thought": "think 2"}),
         ]
         state = fold_events(events)
         assert len(state.thought_history) == 2
@@ -63,7 +63,7 @@ class TestFoldThoughtHistory:
 
     def test_latest_thought_is_none_initially(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
         ]
         state = fold_events(events)
         assert state.latest_thought is None
@@ -72,11 +72,11 @@ class TestFoldThoughtHistory:
 class TestFoldToolCalls:
     def test_tool_called_is_tracked(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.TOOL_CALLED,
+                EventType.TOOL,
                 {
                     "tool_call_id": "tc-1",
                     "tool_name": "http",
@@ -95,11 +95,11 @@ class TestFoldToolCalls:
 class TestFoldToolResults:
     def test_tool_completed_adds_result(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.TOOL_COMPLETED,
+                EventType.TOOL,
                 {
                     "tool_call_id": "tc-1",
                     "tool_name": "http",
@@ -119,11 +119,11 @@ class TestFoldToolResults:
 
     def test_tool_failed_adds_result(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.TOOL_FAILED,
+                EventType.TOOL,
                 {
                     "tool_call_id": "tc-1",
                     "tool_name": "http",
@@ -142,11 +142,11 @@ class TestFoldToolResults:
 
     def test_tool_timeout_adds_result(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.TOOL_TIMEOUT,
+                EventType.TOOL,
                 {
                     "tool_call_id": "tc-1",
                     "tool_name": "browser",
@@ -161,11 +161,11 @@ class TestFoldToolResults:
 
     def test_guardrail_triggered_adds_result(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.GUARDRAIL_TRIGGERED,
+                EventType.TOOL,
                 {
                     "tool_call_id": "tc-1",
                     "tool_name": "file_op",
@@ -183,8 +183,8 @@ class TestFoldToolResults:
 class TestFoldStatusTransitions:
     def test_run_completed_changes_status(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
-            _event("r1", 2, EventType.RUN_COMPLETED, {"result_summary": "done"}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 2, EventType.RUN, {"result_summary": "done"}),
         ]
         state = fold_events(events)
         assert state.status == RunStatus.COMPLETED
@@ -192,8 +192,8 @@ class TestFoldStatusTransitions:
 
     def test_run_failed_changes_status(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
-            _event("r1", 2, EventType.RUN_FAILED, {"final_error": "boom", "event_count": 2}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 2, EventType.RUN, {"final_error": "boom", "event_count": 2}),
         ]
         state = fold_events(events)
         assert state.status == RunStatus.FAILED
@@ -201,9 +201,9 @@ class TestFoldStatusTransitions:
 
     def test_pause_and_resume(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
-            _event("r1", 2, EventType.RUN_PAUSED, {"reason": "confirm wait"}),
-            _event("r1", 3, EventType.RUN_RESUMED, {"resume_from_seq": 2}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 2, EventType.RUN, {"reason": "confirm wait"}),
+            _event("r1", 3, EventType.RUN, {"resume_from_seq": 2}),
         ]
         state = fold_events(events)
         assert state.status == RunStatus.RUNNING
@@ -211,7 +211,7 @@ class TestFoldStatusTransitions:
 
     def test_running_after_started_by_default(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
         ]
         state = fold_events(events)
         assert state.status == RunStatus.RUNNING
@@ -220,11 +220,11 @@ class TestFoldStatusTransitions:
 class TestFoldConfirmation:
     def test_confirmation_requested_adds_to_pending(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.CONFIRMATION_REQUESTED,
+                EventType.CONFIRMATION,
                 {
                     "confirmation_id": "cf-1",
                     "tool_call_id": "tc-foo",
@@ -243,11 +243,11 @@ class TestFoldConfirmation:
 
     def test_confirmation_received_confirmed_true(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.CONFIRMATION_REQUESTED,
+                EventType.CONFIRMATION,
                 {
                     "confirmation_id": "cf-1",
                     "tool_call_id": "tc-foo",
@@ -260,7 +260,7 @@ class TestFoldConfirmation:
             _event(
                 "r1",
                 3,
-                EventType.CONFIRMATION_RECEIVED,
+                EventType.CONFIRMATION,
                 {
                     "confirmation_id": "cf-1",
                     "confirmed": True,
@@ -274,11 +274,11 @@ class TestFoldConfirmation:
     def test_confirmation_received_confirmed_false(self):
         """When confirmed=False, the confirmation is still resolved (removed from pending)."""
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.CONFIRMATION_REQUESTED,
+                EventType.CONFIRMATION,
                 {
                     "confirmation_id": "cf-1",
                     "tool_call_id": "tc-foo",
@@ -291,7 +291,7 @@ class TestFoldConfirmation:
             _event(
                 "r1",
                 3,
-                EventType.CONFIRMATION_RECEIVED,
+                EventType.CONFIRMATION,
                 {
                     "confirmation_id": "cf-1",
                     "confirmed": False,
@@ -304,11 +304,11 @@ class TestFoldConfirmation:
 
     def test_confirmation_received_only_removes_matching_id(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.CONFIRMATION_REQUESTED,
+                EventType.CONFIRMATION,
                 {
                     "confirmation_id": "cf-1",
                     "tool_call_id": "tc-foo",
@@ -321,7 +321,7 @@ class TestFoldConfirmation:
             _event(
                 "r1",
                 3,
-                EventType.CONFIRMATION_REQUESTED,
+                EventType.CONFIRMATION,
                 {
                     "confirmation_id": "cf-2",
                     "tool_call_id": "tc-bar",
@@ -334,7 +334,7 @@ class TestFoldConfirmation:
             _event(
                 "r1",
                 4,
-                EventType.CONFIRMATION_RECEIVED,
+                EventType.CONFIRMATION,
                 {
                     "confirmation_id": "cf-1",
                     "confirmed": True,
@@ -351,12 +351,12 @@ class TestFoldDeterminism:
     def test_same_events_same_state(self):
         def make_events():
             return [
-                _event("r1", 1, EventType.RUN_STARTED, {"intent": "a", "context_snapshot": {"k": "v"}}),
-                _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "t1", "token_count": 5}),
+                _event("r1", 1, EventType.RUN, {"intent": "a", "context_snapshot": {"k": "v"}}),
+                _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "t1"}),
                 _event(
                     "r1",
                     3,
-                    EventType.TOOL_COMPLETED,
+                    EventType.TOOL,
                     {
                         "tool_call_id": "tc-1",
                         "tool_name": "http",
@@ -364,7 +364,7 @@ class TestFoldDeterminism:
                         "duration_ms": 10,
                     },
                 ),
-                _event("r1", 4, EventType.RUN_COMPLETED, {"result_summary": "done"}),
+                _event("r1", 4, EventType.RUN, {"result_summary": "done"}),
             ]
 
         s1 = fold_events(make_events())
@@ -373,12 +373,12 @@ class TestFoldDeterminism:
 
     def test_seq_does_not_affect_state(self):
         e1 = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "a", "context_snapshot": {}}),
-            _event("r1", 3, EventType.RUN_COMPLETED, {"result_summary": "ok"}),
+            _event("r1", 1, EventType.RUN, {"intent": "a", "context_snapshot": {}}),
+            _event("r1", 3, EventType.RUN, {"result_summary": "ok"}),
         ]
         e2 = [
-            _event("r1", 10, EventType.RUN_STARTED, {"intent": "a", "context_snapshot": {}}),
-            _event("r1", 11, EventType.RUN_COMPLETED, {"result_summary": "ok"}),
+            _event("r1", 10, EventType.RUN, {"intent": "a", "context_snapshot": {}}),
+            _event("r1", 11, EventType.RUN, {"result_summary": "ok"}),
         ]
         s1 = fold_events(e1)
         s2 = fold_events(e2)
@@ -390,13 +390,13 @@ class TestFoldDeterminism:
 class TestFoldContextCheckpointed:
     def test_checkpoint_sets_last_checkpoint_seq(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
-            _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "thinking", "token_count": 50}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "thinking"}),
             _event(
                 "r1",
                 3,
-                EventType.CONTEXT_CHECKPOINTED,
-                {"checkpoint_seq": 3, "snapshot_ref": "snap-1", "token_count": 500},
+                EventType.CONTEXT,
+                {"checkpoint_seq": 3, "snapshot_ref": "snap-1"},
             ),
         ]
         state = fold_events(events)
@@ -404,27 +404,27 @@ class TestFoldContextCheckpointed:
 
     def test_no_checkpoint_is_none(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
-            _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "thinking", "token_count": 50}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "thinking"}),
         ]
         state = fold_events(events)
         assert state.last_checkpoint_seq is None
 
     def test_latest_checkpoint_wins(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.CONTEXT_CHECKPOINTED,
-                {"checkpoint_seq": 2, "snapshot_ref": "snap-1", "token_count": 500},
+                EventType.CONTEXT,
+                {"checkpoint_seq": 2, "snapshot_ref": "snap-1"},
             ),
-            _event("r1", 3, EventType.AGENT_THOUGHT, {"thought": "thinking", "token_count": 50}),
+            _event("r1", 3, EventType.AGENT_THOUGHT, {"thought": "thinking"}),
             _event(
                 "r1",
                 4,
-                EventType.CONTEXT_CHECKPOINTED,
-                {"checkpoint_seq": 4, "snapshot_ref": "snap-2", "token_count": 800},
+                EventType.CONTEXT,
+                {"checkpoint_seq": 4, "snapshot_ref": "snap-2"},
             ),
         ]
         state = fold_events(events)
@@ -436,20 +436,20 @@ class TestFoldDagStepDedup:
 
     def test_dag_step_started_completed_no_duplicate(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1},
             ),
             _event(
                 "r1",
                 3,
-                EventType.DAG_STEP_STARTED,
+                EventType.STEP,
                 {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []},
             ),
-            _event("r1", 4, EventType.DAG_STEP_COMPLETED, {"plan_id": "p1", "step_id": "s1", "output_summary": "ok"}),
+            _event("r1", 4, EventType.STEP, {"plan_id": "p1", "step_id": "s1", "output_summary": "ok"}),
         ]
         state = fold_events(events)
         assert state.latest_plan is not None
@@ -459,23 +459,23 @@ class TestFoldDagStepDedup:
 
     def test_dag_step_started_failed_no_duplicate(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1},
             ),
             _event(
                 "r1",
                 3,
-                EventType.DAG_STEP_STARTED,
+                EventType.STEP,
                 {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []},
             ),
             _event(
                 "r1",
                 4,
-                EventType.DAG_STEP_FAILED,
+                EventType.STEP,
                 {"plan_id": "p1", "step_id": "s1", "error": "boom", "retryable": False},
             ),
         ]
@@ -488,30 +488,30 @@ class TestFoldDagStepDedup:
     def test_multiple_steps_no_collision(self):
         """Different step_ids should each have their own entry."""
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1},
             ),
             _event(
                 "r1",
                 3,
-                EventType.DAG_STEP_STARTED,
+                EventType.STEP,
                 {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []},
             ),
             _event(
                 "r1",
                 4,
-                EventType.DAG_STEP_STARTED,
+                EventType.STEP,
                 {"plan_id": "p1", "step_id": "s2", "tool_name": "echo", "depends_on": []},
             ),
-            _event("r1", 5, EventType.DAG_STEP_COMPLETED, {"plan_id": "p1", "step_id": "s1", "output_summary": "ok"}),
+            _event("r1", 5, EventType.STEP, {"plan_id": "p1", "step_id": "s1", "output_summary": "ok"}),
             _event(
                 "r1",
                 6,
-                EventType.DAG_STEP_FAILED,
+                EventType.STEP,
                 {"plan_id": "p1", "step_id": "s2", "error": "boom", "retryable": False},
             ),
         ]
@@ -525,39 +525,39 @@ class TestFoldDagStepDedup:
     def test_dag_step_different_plan_no_interference(self):
         """Steps from different plan_ids should not mix."""
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {"plan_id": "p1", "intent": "first", "steps_summary": "1 step", "layer_count": 1},
             ),
             _event(
                 "r1",
                 3,
-                EventType.DAG_STEP_STARTED,
+                EventType.STEP,
                 {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []},
             ),
-            _event("r1", 4, EventType.DAG_STEP_COMPLETED, {"plan_id": "p1", "step_id": "s1", "output_summary": "ok"}),
+            _event("r1", 4, EventType.STEP, {"plan_id": "p1", "step_id": "s1", "output_summary": "ok"}),
             _event(
                 "r1",
                 5,
-                EventType.PLAN_REVISED,
+                EventType.PLAN,
                 {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"},
             ),
             _event(
                 "r1",
                 6,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {"plan_id": "p2", "intent": "revised", "steps_summary": "1 step", "layer_count": 1},
             ),
             _event(
                 "r1",
                 7,
-                EventType.DAG_STEP_STARTED,
+                EventType.STEP,
                 {"plan_id": "p2", "step_id": "s2", "tool_name": "echo", "depends_on": []},
             ),
-            _event("r1", 8, EventType.DAG_STEP_COMPLETED, {"plan_id": "p2", "step_id": "s2", "output_summary": "done"}),
+            _event("r1", 8, EventType.STEP, {"plan_id": "p2", "step_id": "s2", "output_summary": "done"}),
         ]
         state = fold_events(events)
         assert state.latest_plan is not None
@@ -568,17 +568,17 @@ class TestFoldDagStepDedup:
     def test_plan_revised_steps_replace_blueprint(self):
         """v2.2 (P2): PLAN_REVISED 携带 steps → 折叠态 latest_plan 与实际修订计划对齐。"""
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {"plan_id": "p1", "intent": "first", "steps_summary": "2 steps", "layer_count": 1},
             ),
             _event(
                 "r1",
                 3,
-                EventType.PLAN_REVISED,
+                EventType.PLAN,
                 {
                     "plan_id": "p1",
                     "revision_reason": "step_failure_revised",
@@ -609,23 +609,23 @@ class TestFoldDagStepDedup:
     def test_plan_revised_without_steps_keeps_blueprint(self):
         """PLAN_REVISED 不带 steps（空修订）→ 保留原有步骤蓝图（兼容旧事件流）。"""
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
             _event(
                 "r1",
                 2,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {"plan_id": "p1", "intent": "first", "steps_summary": "1 step", "layer_count": 1},
             ),
             _event(
                 "r1",
                 3,
-                EventType.DAG_STEP_STARTED,
+                EventType.STEP,
                 {"plan_id": "p1", "step_id": "s1", "tool_name": "echo", "depends_on": []},
             ),
             _event(
                 "r1",
                 4,
-                EventType.PLAN_REVISED,
+                EventType.PLAN,
                 {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"},
             ),
         ]
@@ -638,7 +638,7 @@ class TestFoldDagStepDedup:
 class TestFoldFeedbackInjected:
     def test_feedback_injected_appends_to_feedbacks(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
             _event("r1", 2, EventType.FEEDBACK_INJECTED, {"feedback_text": "too slow", "priority": "high"}),
             _event("r1", 3, EventType.FEEDBACK_INJECTED, {"feedback_text": "retry", "priority": "medium"}),
         ]
@@ -651,7 +651,7 @@ class TestFoldFeedbackInjected:
 
     def test_feedback_injected_no_feedback(self):
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
         ]
         state = fold_events(events)
         assert state.feedbacks == []
@@ -659,7 +659,7 @@ class TestFoldFeedbackInjected:
     def test_feedback_injected_at_seq_set_by_fold(self):
         """Fold should set injected_at_seq on FeedbackInjectedPayload from event.seq."""
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
             _event("r1", 2, EventType.FEEDBACK_INJECTED, {"feedback_text": "first", "priority": "high"}),
             _event("r1", 5, EventType.FEEDBACK_INJECTED, {"feedback_text": "second", "priority": "medium"}),
         ]
@@ -671,19 +671,19 @@ class TestFoldFeedbackInjected:
     def test_plan_revised_marks_feedbacks_consumed(self):
         """PlanRevised should set consumed_at_seq on all unconsumed feedbacks."""
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
             _event("r1", 2, EventType.FEEDBACK_INJECTED, {"feedback_text": "warning", "priority": "high"}),
             _event("r1", 3, EventType.FEEDBACK_INJECTED, {"feedback_text": "info", "priority": "low"}),
             _event(
                 "r1",
                 4,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {"plan_id": "p1", "intent": "test", "steps_summary": "2 steps", "layer_count": 1},
             ),
             _event(
                 "r1",
                 5,
-                EventType.PLAN_REVISED,
+                EventType.PLAN,
                 {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"},
             ),
         ]
@@ -696,31 +696,31 @@ class TestFoldFeedbackInjected:
     def test_plan_revised_does_not_double_consume(self):
         """Subsequent PlanRevised should not overwrite consumed_at_seq of already-consumed feedbacks."""
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
             _event("r1", 2, EventType.FEEDBACK_INJECTED, {"feedback_text": "warning", "priority": "high"}),
             _event(
                 "r1",
                 3,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {"plan_id": "p1", "intent": "test", "steps_summary": "1 step", "layer_count": 1},
             ),
             _event(
                 "r1",
                 4,
-                EventType.PLAN_REVISED,
+                EventType.PLAN,
                 {"plan_id": "p1", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"},
             ),
             _event("r1", 5, EventType.FEEDBACK_INJECTED, {"feedback_text": "new_issue", "priority": "high"}),
             _event(
                 "r1",
                 6,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {"plan_id": "p2", "intent": "revised", "steps_summary": "1 step", "layer_count": 1},
             ),
             _event(
                 "r1",
                 7,
-                EventType.PLAN_REVISED,
+                EventType.PLAN,
                 {"plan_id": "p2", "revision_reason": "step_failure_revised", "remaining_steps_summary": "revised"},
             ),
         ]
@@ -734,111 +734,10 @@ class TestFoldFeedbackInjected:
     def test_feedback_without_plan_revised_not_consumed(self):
         """Feedbacks without any PlanRevised should have consumed_at_seq=None."""
         events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
+            _event("r1", 1, EventType.RUN, {"intent": "test", "context_snapshot": {}}),
             _event("r1", 2, EventType.FEEDBACK_INJECTED, {"feedback_text": "warning", "priority": "high"}),
         ]
         state = fold_events(events)
         assert len(state.feedbacks) == 1
         assert state.feedbacks[0].consumed_at_seq is None
 
-
-class TestFoldContextCompressedPruning:
-    """V0.7: ContextCompressed prunes thought_history and tool_results via original_event_refs."""
-
-    def test_compress_prunes_thoughts_and_results(self):
-        summary = Episode(
-            episode_range=(2, 5),
-            original_tokens=1000,
-            compressed_tokens=200,
-            key_decisions=[],
-            tools_used=["echo"],
-            key_findings=[],
-            errors_encountered=[],
-            original_event_refs=[2, 3],
-            title="Compressed Episode",
-        )
-        events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
-            _event(
-                "r1", 2, EventType.AGENT_THOUGHT, {"thought": "old thought", "tool_choice": None, "token_count": 10}
-            ),
-            _event(
-                "r1",
-                3,
-                EventType.TOOL_COMPLETED,
-                {"tool_call_id": "tc-1", "tool_name": "echo", "output": "old", "duration_ms": 5},
-            ),
-            _event(
-                "r1", 4, EventType.AGENT_THOUGHT, {"thought": "keep thought", "tool_choice": None, "token_count": 10}
-            ),
-            _event(
-                "r1",
-                5,
-                EventType.TOOL_COMPLETED,
-                {"tool_call_id": "tc-2", "tool_name": "echo", "output": "keep", "duration_ms": 5},
-            ),
-            _event(
-                "r1",
-                6,
-                EventType.CONTEXT_COMPRESSED,
-                {
-                    "original_tokens": 1000,
-                    "compressed_tokens": 200,
-                    "summary_ref": summary.model_dump(mode="json"),
-                    "keep_recent_count": 2,
-                },
-            ),
-        ]
-        state = fold_events(events)
-        assert state.summary is not None
-
-    def test_compress_no_prune_when_no_original_event_refs(self):
-        summary = Episode(
-            episode_range=(2, 3),
-            original_tokens=500,
-            compressed_tokens=100,
-            key_decisions=[],
-            tools_used=[],
-            key_findings=[],
-            errors_encountered=[],
-            original_event_refs=[],
-            title="Compressed Episode",
-        )
-        events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
-            _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "t1", "tool_choice": None, "token_count": 10}),
-            _event(
-                "r1",
-                3,
-                EventType.CONTEXT_COMPRESSED,
-                {
-                    "original_tokens": 500,
-                    "compressed_tokens": 100,
-                    "summary_ref": summary.model_dump(mode="json"),
-                    "keep_recent_count": 0,
-                },
-            ),
-        ]
-        state = fold_events(events)
-        assert len(state.thought_history) == 1
-        assert state.thought_history[0].thought == "t1"
-
-    def test_compress_with_string_summary_skips_pruning(self):
-        events = [
-            _event("r1", 1, EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}}),
-            _event("r1", 2, EventType.AGENT_THOUGHT, {"thought": "t1", "tool_choice": None, "token_count": 10}),
-            _event(
-                "r1",
-                3,
-                EventType.CONTEXT_COMPRESSED,
-                {
-                    "original_tokens": 500,
-                    "compressed_tokens": 100,
-                    "summary_ref": "legacy summary string",
-                    "keep_recent_count": 0,
-                },
-            ),
-        ]
-        state = fold_events(events)
-        assert state.summary == "legacy summary string"
-        assert len(state.thought_history) == 1

@@ -203,7 +203,7 @@ class TestExecutorSemanticRetry:
 
     async def _completed_events(self, store):
         events = await store.get_events("run-f5")
-        return [e for e in events if e.event_type == EventType.TOOL_COMPLETED]
+        return [e for e in events if (e.event_type == EventType.TOOL and e.phase == "completed")]
 
     @pytest.mark.asyncio
     async def test_transient_semantic_failure_retried_then_succeeds(self, init_store):

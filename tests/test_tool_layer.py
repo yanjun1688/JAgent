@@ -344,10 +344,10 @@ class TestToolExecutor:
         assert len(calls) == 1
 
         events = await store.get_events("run-1")
-        event_types = [e.event_type for e in events]
-        assert EventType.TOOL_CALLED in event_types
-        assert EventType.TOOL_COMPLETED in event_types
-        assert EventType.GUARDRAIL_TRIGGERED not in event_types
+        phases = [(e.event_type, e.phase) for e in events]
+        assert (EventType.TOOL, "called") in phases
+        assert (EventType.TOOL, "completed") in phases
+        assert (EventType.TOOL, "blocked") not in phases
 
     @pytest.mark.asyncio
     async def test_idempotency_cache_hit(self, store, http_tool_def):
@@ -413,9 +413,9 @@ class TestToolExecutor:
         assert result.guardrail_id == "schema"
 
         events = await store.get_events("run-1")
-        event_types = [e.event_type for e in events]
-        assert EventType.GUARDRAIL_TRIGGERED in event_types
-        assert EventType.TOOL_CALLED not in event_types
+        phases = [(e.event_type, e.phase) for e in events]
+        assert (EventType.TOOL, "blocked") in phases
+        assert (EventType.TOOL, "called") not in phases
 
     @pytest.mark.asyncio
     async def test_custom_guardrail_blocks(self, store):
@@ -435,8 +435,8 @@ class TestToolExecutor:
         assert result.guardrail_reason == "scope violation"
 
         events = await store.get_events("run-1")
-        assert any(e.event_type == EventType.GUARDRAIL_TRIGGERED for e in events)
-        assert not any(e.event_type == EventType.TOOL_CALLED for e in events)
+        assert any((e.event_type == EventType.TOOL and e.phase == "blocked") for e in events)
+        assert not any((e.event_type == EventType.TOOL and e.phase == "called") for e in events)
 
     @pytest.mark.asyncio
     async def test_requires_confirmation_returns_confirmation_needed(self, store, dangerous_tool_def):
@@ -449,8 +449,8 @@ class TestToolExecutor:
         assert result.confirmation_id is not None
 
         events = await store.get_events("run-1")
-        assert any(e.event_type == EventType.CONFIRMATION_REQUESTED for e in events)
-        assert not any(e.event_type == EventType.TOOL_CALLED for e in events)
+        assert any(e.event_type == EventType.CONFIRMATION for e in events)
+        assert not any((e.event_type == EventType.TOOL and e.phase == "called") for e in events)
 
     @pytest.mark.asyncio
     async def test_confirmation_reentry_still_needed_when_pending(self, store, dangerous_tool_def):
@@ -478,7 +478,7 @@ class TestToolExecutor:
 
         await store.append_event(
             "run-1",
-            EventType.CONFIRMATION_RECEIVED,
+            EventType.CONFIRMATION,
             ConfirmationReceivedPayload(
                 confirmation_id=r1.confirmation_id, confirmed=True, operator_id="op-1"
             ).model_dump(),
@@ -505,7 +505,7 @@ class TestToolExecutor:
         )
         await store.append_event(
             "run-1",
-            EventType.CONFIRMATION_RECEIVED,
+            EventType.CONFIRMATION,
             ConfirmationReceivedPayload(
                 confirmation_id=r1.confirmation_id, confirmed=False, operator_id="op-1"
             ).model_dump(),
@@ -531,8 +531,8 @@ class TestToolExecutor:
         assert result.error == "something went wrong"
 
         events = await store.get_events("run-1")
-        assert any(e.event_type == EventType.TOOL_CALLED for e in events)
-        assert any(e.event_type == EventType.TOOL_FAILED for e in events)
+        assert any((e.event_type == EventType.TOOL and e.phase == "called") for e in events)
+        assert any((e.event_type == EventType.TOOL and e.phase == "failed") for e in events)
 
     @pytest.mark.asyncio
     async def test_async_tool_fn_supported(self, store, http_tool_def):
@@ -629,9 +629,9 @@ class TestOutputSchemaStructuralFallback:
         assert result.output == {"status_code": 200, "body": [1, 2, 3]}
 
         events = await store.get_events("run-1")
-        event_types = [e.event_type for e in events]
-        assert EventType.TOOL_COMPLETED in event_types
-        assert EventType.TOOL_FAILED not in event_types
+        phases = [(e.event_type, e.phase) for e in events]
+        assert (EventType.TOOL, "completed") in phases
+        assert (EventType.TOOL, "failed") not in phases
 
     @pytest.mark.asyncio
     async def test_list_fails_schema_promotes_to_completed(self, store):
@@ -656,7 +656,7 @@ class TestOutputSchemaStructuralFallback:
         assert result.output == [{"login": "alice"}, {"login": "bob"}]
 
         events = await store.get_events("run-1")
-        assert EventType.TOOL_FAILED not in [e.event_type for e in events]
+        assert not any((e.event_type == EventType.TOOL and e.phase == "failed") for e in events)
 
     @pytest.mark.asyncio
     async def test_none_fails_both_phases(self, store):
@@ -681,8 +681,8 @@ class TestOutputSchemaStructuralFallback:
         assert "got NoneType" in result.error
 
         events = await store.get_events("run-1")
-        assert EventType.TOOL_FAILED in [e.event_type for e in events]
-        failed = [e for e in events if e.event_type == EventType.TOOL_FAILED]
+        assert EventType.TOOL in [e.event_type for e in events]
+        failed = [e for e in events if (e.event_type == EventType.TOOL and e.phase == "failed")]
         assert len(failed) == 1
         assert "got NoneType" in failed[0].payload["error"]
 
@@ -752,7 +752,7 @@ class TestOutputSchemaStructuralFallback:
         assert "None" not in result.error or "got NoneType" in result.error
 
         events = await store.get_events("run-1")
-        failed = [e for e in events if e.event_type == EventType.TOOL_FAILED]
+        failed = [e for e in events if (e.event_type == EventType.TOOL and e.phase == "failed")]
         error_text = failed[0].payload["error"]
         assert "None" not in error_text or "got NoneType" in error_text
 

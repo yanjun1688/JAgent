@@ -154,7 +154,7 @@ async def _count_step_starts(store: EventStore, run_id: str) -> Counter:
     events = await store.get_events(run_id)
     counts: Counter = Counter()
     for e in events:
-        if e.event_type.value == "DagStepStarted":
+        if e.event_type.value == "Step" and e.phase == "started":
             counts[e.payload["step_id"]] += 1
     return counts
 
@@ -246,7 +246,7 @@ async def test_unsuccessful_reruns_without_llm_not_achieved_marker():
             dag,
             defs,
             fns,
-            config=SchedulerConfig(max_iterations=10),
+            config=SchedulerConfig(run_attempt_budget=10, local_repair_enabled=False),
         )
         state = await sched.run("no_coop_heal", "复现")
         counts = await _count_step_starts(store, "no_coop_heal")
@@ -305,7 +305,7 @@ async def test_completed_step_not_achieved_does_not_rerun_in_place():
             dag,
             defs,
             fns,
-            config=SchedulerConfig(max_iterations=10),
+            config=SchedulerConfig(run_attempt_budget=10, local_repair_enabled=False),
         )
         state = await sched.run("completed_not_achieved", "复现")
         counts = await _count_step_starts(store, "completed_not_achieved")

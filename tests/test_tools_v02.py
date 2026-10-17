@@ -660,7 +660,7 @@ class TestSkillWithExecutor:
 
         store2 = store
         run_id = "skill-exec-test"
-        await store2.append_event(run_id, EventType.RUN_STARTED, {"intent": "test"})
+        await store2.append_event(run_id, EventType.RUN, {"intent": "test"})
 
         token = current_run_id.set(run_id)
         try:
@@ -672,9 +672,9 @@ class TestSkillWithExecutor:
         assert len(search_fn_calls) == 1
 
         events = await store2.get_events(run_id)
-        event_types = [e.event_type for e in events]
-        assert EventType.TOOL_CALLED in event_types
-        assert EventType.TOOL_COMPLETED in event_types
+        tool_phases = [e.phase for e in events if e.event_type == EventType.TOOL]
+        assert "called" in tool_phases
+        assert "completed" in tool_phases
 
     @pytest.mark.asyncio
     async def test_executor_wired_skill_fallback_no_run_id(self):

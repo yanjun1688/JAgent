@@ -20,12 +20,14 @@ Utilities:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 _logging_configured = False
+_trace_configured = False
 
 
 def setup_logging(
@@ -68,6 +70,64 @@ def setup_logging(
         root.addHandler(ch)
 
     _logging_configured = True
+
+
+def trace_logger() -> logging.Logger:
+    """Dedicated trace channel — LLM I/O and self-heal decisions only."""
+    return logging.getLogger("harness.trace")
+
+
+def _ensure_trace_configured() -> bool:
+    """Lazily wire the trace channel on first use.
+
+    Lazy because ``.env`` loads after logging is configured (serve.py); reading
+    ``HARNESS_TRACE`` at import time would miss it. Idempotent.
+    """
+    global _trace_configured
+    if _trace_configured:
+        return bool(trace_logger().handlers)
+    _trace_configured = True
+
+    enabled = os.environ.get("HARNESS_TRACE", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return False
+
+    logger = trace_logger()
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    fmt = logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S")
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    logger.addHandler(console)
+
+    trace_file = os.environ.get("HARNESS_TRACE_FILE", "").strip()
+    if trace_file:
+        path = Path(trace_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(str(path), encoding="utf-8")
+        file_handler.setFormatter(fmt)
+        logger.addHandler(file_handler)
+    return True
+
+
+def trace_event(run_id: str | None, kind: str, **fields: Any) -> None:
+    """Emit one structured trace line; values are never truncated.
+
+    No-op unless ``HARNESS_TRACE`` is enabled. Message contents and rejection
+    reasons are rendered in full so the trace completely records what entered
+    and left the LLM and how self-heal decided.
+    """
+    if not _ensure_trace_configured():
+        return
+    parts = [f"[{kind}]", f"run={run_id or '-'}"]
+    for key, value in fields.items():
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+        else:
+            rendered = "null" if value is None else str(value)
+        parts.append(f"{key}={rendered}")
+    trace_logger().info(" ".join(parts))
 
 
 def guard_logger(name: str) -> logging.Logger:

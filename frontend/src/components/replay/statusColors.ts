@@ -86,15 +86,18 @@ export function statusLabel(status: string | null | undefined): string {
 }
 
 // Colour an event-type label the same way the realtime event stream does.
-export function eventTypeColor(eventType: string): string {
-  if (eventType.startsWith('Tool')) return 'text-accent-primary'
-  if (eventType.startsWith('Run')) return 'text-accent-secondary'
-  if (eventType.startsWith('Confirm')) return 'text-status-warning'
-  if (eventType.startsWith('Guardrail')) return 'text-status-error'
-  if (eventType.startsWith('Plan') || eventType.startsWith('Dag')) return 'text-accent-quaternary'
-  if (eventType.startsWith('Think') || eventType.startsWith('Observe') || eventType.startsWith('Agent')) {
-    return 'text-status-info'
+// Consolidated taxonomy: match the aggregate `event_type`, refine by `phase`
+// for transitions that carry a distinct tone (e.g. Tool/blocked).
+export function eventTypeColor(eventType: string, phase?: string | null): string {
+  if (eventType === 'Tool') {
+    return phase === 'blocked' ? 'text-status-error' : 'text-accent-primary'
   }
+  if (eventType === 'Run') return 'text-accent-secondary'
+  if (eventType === 'Confirmation') return 'text-status-warning'
+  if (eventType === 'Plan' || eventType === 'Step' || eventType === 'StepRepair') {
+    return 'text-accent-quaternary'
+  }
+  if (eventType === 'AgentThought') return 'text-status-info'
   return 'text-text-tertiary'
 }
 

@@ -149,7 +149,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--case-id", default=None, help="Only run this case id")
     p.add_argument("--api-base", default=None, help="HTTP mode: base URL of a running JAgent server")
     p.add_argument("--timeout", type=float, default=300.0, help="Per-case timeout in seconds")
-    p.add_argument("--max-iterations", type=int, default=20, help="Scheduler max_iterations")
+    p.add_argument("--run-attempt-budget", type=int, default=20, help="Scheduler run_attempt_budget")
     p.add_argument("--no-llm-judge", action="store_true", help="Skip LLM-as-Judge scoring")
     p.add_argument("--consistency-runs", type=int, default=0,
                    help="Run each case N times to compute tool-sequence consistency (0=disabled)")
@@ -164,7 +164,7 @@ def _build_parser() -> argparse.ArgumentParser:
 class _InProcessEngine:
     """Assemble and run the same trusted pipeline as serve.py."""
 
-    def __init__(self, max_iterations: int, tracer: LangfuseTracer | None = None) -> None:
+    def __init__(self, run_attempt_budget: int, tracer: LangfuseTracer | None = None) -> None:
         self.store = EventStore(":memory:")
         self.executor = ToolExecutor(self.store)
         self.registry = ToolRegistry()
@@ -178,7 +178,7 @@ class _InProcessEngine:
             _HttpRateLimitTool(),
         ):
             self.registry.register_tool(tool)
-        self.max_iterations = max_iterations
+        self.run_attempt_budget = run_attempt_budget
         self.tracer = tracer
         self.llm_client: OpenAILLMClient | None = None
         if os.environ.get("LLM_API_KEY"):
@@ -191,7 +191,7 @@ class _InProcessEngine:
     async def run_case(self, case: EvalCase) -> dict[str, Any]:
         await self.store.initialize()
         run_id = f"eval_{case.id}"
-        config = SchedulerConfig(max_iterations=self.max_iterations)
+        config = SchedulerConfig(run_attempt_budget=self.run_attempt_budget)
         if case.mock_actions:
             # Trusted-component scenarios (Guardrail / confirmation): drive
             # deterministically with a MockAgentKernel that issues the scripted
@@ -328,7 +328,7 @@ class _InProcessEngine:
                 await asyncio.sleep(0.2)
                 events = await self.store.get_events(run_id)
                 terminal = any(
-                    e.event_type in (EventType.RUN_COMPLETED, EventType.RUN_FAILED)
+                    e.event_type in (EventType.RUN, EventType.RUN)
                     for e in events
                 )
                 if terminal:
@@ -339,19 +339,19 @@ class _InProcessEngine:
                 if confirmed:
                     continue
                 paused = any(
-                    e.event_type == EventType.RUN_PAUSED
+                    e.event_type == EventType.RUN
                     and e.payload.get("reason") == "waiting_confirmation"
                     for e in events
                 )
                 requested = [
                     e for e in events
-                    if e.event_type == EventType.CONFIRMATION_REQUESTED
+                    if e.event_type == EventType.CONFIRMATION
                 ]
                 if paused and requested:
                     payload = requested[-1].payload
                     await self.store.append_event(
                         run_id,
-                        EventType.CONFIRMATION_RECEIVED,
+                        EventType.CONFIRMATION,
                         ConfirmationReceivedPayload(
                             confirmation_id=payload["confirmation_id"],
                             confirmed=True,
@@ -571,7 +571,7 @@ async def _main(args: argparse.Namespace) -> int:
         http = _HttpClient(args.api_base)
         tool_names = None
     else:
-        engine = _InProcessEngine(args.max_iterations, tracer)
+        engine = _InProcessEngine(args.run_attempt_budget, tracer)
         tool_names = list(engine.registry.tool_names)
 
     consistency = args.consistency_runs if args.consistency_runs > 1 else 0

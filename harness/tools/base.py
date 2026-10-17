@@ -44,7 +44,6 @@ def operation(
     idempotency_key_fields: list[str] | None = None,
     probe_allowed: bool = False,
     retry_policy: RetryPolicy | None = None,
-    ref_allowed_fields: dict[str, bool] | None = None,
     required_input: list[str] | None = None,
 ) -> Callable[[Callable], Callable]:
     """标记业务方法并生成 ``OperationContract``（ADR-010 D-01）。
@@ -63,7 +62,6 @@ def operation(
             idempotency_key_fields=idempotency_key_fields,
             probe_allowed=probe_allowed,
             retry_policy=retry_policy,
-            ref_allowed_fields=ref_allowed_fields or {},
             required_input=required_input or [],
         )
         return fn
@@ -75,18 +73,22 @@ class BaseTool(ABC):
     """声明式工具基类 — 契约声明 + 业务实现 + 统一入口。"""
 
     # ── 声明（类属性，工具作者填写）──────────────────────────────
-    name: ClassVar[str] = ""
-    description: ClassVar[str] = ""
-    input_schema: ClassVar[JSONSchema] = {}
-    output_schema: ClassVar[JSONSchema] = {}
+    # Plain annotated (not ClassVar): per-instance shadowing is required by
+    # dynamically constructed tools (McpDynamicTool carries its own name/
+    # schema). Values defined at class level behave identically for static
+    # tools; ClassVar here would forbid the dynamic-tool instance overrides.
+    name: str = ""
+    description: str = ""
+    input_schema: JSONSchema = {}
+    output_schema: JSONSchema = {}
     operation_key: ClassVar[str] = "operation"
     default_operation: ClassVar[str | None] = None
-    side_effects: ClassVar[list[SideEffect]] = []
-    idempotency_key_fields: ClassVar[list[str] | None] = None
+    side_effects: list[SideEffect] = []
+    idempotency_key_fields: list[str] | None = None
     guardrails: ClassVar[list[Guardrail]] = []
     scope_targets: ClassVar[list[ToolScopeTarget]] = []
-    requires_confirmation: ClassVar[bool] = False
-    timeout_ms: ClassVar[int] = 30000
+    requires_confirmation: bool = False
+    timeout_ms: int = 30000
     retry_policy: ClassVar[RetryPolicy] = RetryPolicy()
     success_indicator: ClassVar[SuccessIndicator | None] = None
     dangerous_with: ClassVar[list[str]] = []

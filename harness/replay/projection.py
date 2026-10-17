@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from harness.core.fold import RunState, fold_events
-from harness.models.events import Event, EventType, GuardrailTriggeredPayload
+from harness.models.events import Event, EventType, GuardrailTriggeredPayload, is_terminal_event
 from harness.replay.schemas import (
     ErrorChangeView,
     GuardrailBlockView,
@@ -42,9 +42,6 @@ from harness.replay.schemas import (
     ToolResultChangeView,
     ToolResultView,
 )
-
-_TERMINAL_TYPES = {EventType.RUN_COMPLETED, EventType.RUN_FAILED}
-
 
 # ── The reconstruction seam (pure; reused by a future rollback path) ──
 
@@ -88,7 +85,7 @@ def project_timeline_event(event: Event) -> ReplayTimelineEvent:
         tool_name=p.get("tool_name"),
         tool_call_id=p.get("tool_call_id"),
         step_id=p.get("step_id"),
-        is_terminal=event.event_type in _TERMINAL_TYPES,
+        is_terminal=is_terminal_event(event.event_type, event.payload),
     )
 
 
@@ -98,7 +95,7 @@ def project_timeline_event(event: Event) -> ReplayTimelineEvent:
 def _guardrail_blocks(events: Sequence[Event]) -> list[GuardrailBlockView]:
     blocks: list[GuardrailBlockView] = []
     for e in events:
-        if e.event_type is not EventType.GUARDRAIL_TRIGGERED:
+        if not (e.event_type is EventType.TOOL and e.phase == "blocked"):
             continue
         p = GuardrailTriggeredPayload(**e.payload)
         blocks.append(
@@ -119,7 +116,7 @@ def _pending_confirmations(state: RunState, events: Sequence[Event]) -> list[Pen
     # event seq by scanning the slice for the matching CONFIRMATION_REQUESTED.
     seq_by_id: dict[str, int] = {}
     for e in events:
-        if e.event_type is EventType.CONFIRMATION_REQUESTED:
+        if e.event_type is EventType.CONFIRMATION and e.phase == "requested":
             seq_by_id[e.payload.get("confirmation_id", "")] = e.seq
     views: list[PendingConfirmationView] = []
     for c in state.pending_confirmations:

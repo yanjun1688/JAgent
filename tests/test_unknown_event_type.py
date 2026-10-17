@@ -13,10 +13,10 @@ Root cause per AGENTS.md §3.5:
   2. Why existing mechanisms didn't catch it — no fallback at the trusted
      component boundary; `Append-Only` forbid DELETE of legacy rows but
      nothing tolerated them on read.
-  3. How to prevent recurrence — every `_row_to_event` materializer now
+  3. How to prevent recurrence — the single `event_from_row` materializer now
      returns `Event | None` and skips unknown event_type values with a
-     warning; list comprehensions filter None. A scenario test below
-     pins the behavior.
+     warning; all read surfaces share it and filter None. A scenario test
+     below pins the behavior.
 
 Also covers the run-level cache eviction hook (evict_run_caches) tied to
 scheduler terminal state (technical debt from P0-04 fix).
@@ -62,7 +62,7 @@ class TestUnknownEventTypeTolerance:
 
         await store.append_event(
             "run-X",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="i").model_dump(),
         )
         await _inject_row(store, "run-X", 2, "QualityCheckCompleted", '{"k":"v"}')
@@ -70,28 +70,28 @@ class TestUnknownEventTypeTolerance:
         events = await store.get_events("run-X")
         # Legacy row is skipped, valid RunStarted still returned
         assert len(events) == 1
-        assert events[0].event_type == EventType.RUN_STARTED
+        assert events[0].event_type == EventType.RUN
 
     async def test_get_event_range_skips_legacy_row(self, store: EventStore):
         from harness.models.events import AgentThoughtPayload
 
         await store.append_event(
             "run-Y",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "i", "context_snapshot": {}},
         )
         await _inject_row(store, "run-Y", 2, "QualityCheckCompleted")
         await store.append_event(
             "run-Y",
             EventType.AGENT_THOUGHT,
-            AgentThoughtPayload(thought="t", token_count=1).model_dump(),
+            AgentThoughtPayload(thought="t").model_dump(),
         )
 
         events = await store.get_event_range("run-Y", from_seq=1)
         # Two valid events returned; the legacy seq=2 row is dropped
         assert len(events) == 2
         types = [e.event_type for e in events]
-        assert EventType.RUN_STARTED in types
+        assert EventType.RUN in types
         assert EventType.AGENT_THOUGHT in types
 
     async def test_get_events_for_runs_skips_legacy_row(self, store: EventStore):
@@ -99,14 +99,14 @@ class TestUnknownEventTypeTolerance:
 
         await store.append_event(
             "run-Z",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="i").model_dump(),
         )
         await _inject_row(store, "run-Z", 2, "SomethingRemoved")
 
         events = await store.get_events_for_runs(["run-Z"])
         assert len(events) == 1
-        assert events[0].event_type == EventType.RUN_STARTED
+        assert events[0].event_type == EventType.RUN
 
     async def test_find_by_idempotency_key_returns_none_for_legacy_row(self, store: EventStore):
         """A legacy row that matches the idempotency-key lookup signature must
@@ -120,8 +120,8 @@ class TestUnknownEventTypeTolerance:
         )
         await store.conn.commit()
         # Looking up by a known current EventType should not find the legacy row
-        result = await store.find_by_idempotency_key("run-W", EventType.RUN_STARTED, "ik-1")
-        # No hit because event_type doesn't match EventType.RUN_STARTED.value
+        result = await store.find_by_idempotency_key("run-W", EventType.RUN, "ik-1")
+        # No hit because event_type doesn't match EventType.RUN.value
         assert result is None
 
     async def test_find_confirmation_by_id_skips_legacy_row(self, store: EventStore):
@@ -135,14 +135,14 @@ class TestUnknownEventTypeTolerance:
         # Then append a valid CONFIRMATION_RECEIVED for the same run
         await store.append_event(
             "run-C",
-            EventType.CONFIRMATION_RECEIVED,
+            EventType.CONFIRMATION,
             ConfirmationReceivedPayload(confirmation_id="c1", confirmed=True, operator_id="op").model_dump(),
             idempotency_key="confirm_c1",
         )
 
         result = await store.find_confirmation_by_id("run-C", "c1")
         assert result is not None
-        assert result.event_type == EventType.CONFIRMATION_RECEIVED
+        assert (result.event_type == EventType.CONFIRMATION and result.phase == "received")
 
 
 class TestUnknownEventLegacyPersistence:
@@ -174,23 +174,10 @@ class TestUnknownEventLegacyPersistence:
 
 
 class TestQueryPathUnknownEventType:
-    """api/query._row_to_event and analysis/service._row_to_event parity."""
+    """Every read surface shares the single `event_from_row` materializer."""
 
-    async def test_api_query_row_to_event_returns_none_for_legacy(self, store: EventStore):
-        from harness.api.query import _row_to_event
-
-        row = {
-            "run_id": "r1",
-            "seq": 1,
-            "event_type": "QualityCheckCompleted",
-            "payload": "{}",
-            "idempotency_key": None,
-            "created_at": 1.0,
-        }
-        assert _row_to_event(row) is None
-
-    async def test_analysis_service_row_to_event_returns_none_for_legacy(self, store: EventStore):
-        from harness.analysis.service import AnalysisService
+    async def test_event_from_row_returns_none_for_legacy(self, store: EventStore):
+        from harness.storage.event_store import event_from_row
 
         row = {
             "run_id": "r1",
@@ -200,7 +187,13 @@ class TestQueryPathUnknownEventType:
             "idempotency_key": None,
             "created_at": 1.0,
         }
-        assert AnalysisService._row_to_event(row) is None
+        assert event_from_row(row) is None
+
+    async def test_analysis_delegates_to_event_from_row(self, store: EventStore):
+        """analysis/service no longer owns a private _row_to_event copy."""
+        import harness.analysis.service as analysis_mod
+
+        assert not hasattr(analysis_mod.AnalysisService, "_row_to_event")
 
 
 class TestRunCacheEviction:
@@ -219,7 +212,7 @@ class TestRunCacheEviction:
 
         await store.append_event(
             "run-E",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="i", conversation_id="conv-E").model_dump(),
             workspace_id="ws-E",
         )
@@ -237,7 +230,7 @@ class TestRunCacheEviction:
 
         await store.append_event(
             "run-F",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "i", "context_snapshot": {}, "conversation_id": "conv-F"},
             workspace_id="ws-F",
         )
@@ -246,7 +239,7 @@ class TestRunCacheEviction:
         await store.append_event(
             "run-F",
             EventType.AGENT_THOUGHT,
-            AgentThoughtPayload(thought="t", token_count=1).model_dump(),
+            AgentThoughtPayload(thought="t").model_dump(),
         )
         # The AGENT_THOUGHT row should have NULL conversation_id column
         cursor = await store.conn.execute(

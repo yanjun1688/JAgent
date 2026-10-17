@@ -36,7 +36,7 @@ def registry():
         ToolDefinition(
             name="echo",
             description="Echo",
-            input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
+            input_schema={"type": "object", "properties": {"msg": {"type": "string", "x-role": "data"}}},
             output_schema={"type": "object"},
             idempotency_key_fields=[],
             side_effects=[],
@@ -225,7 +225,14 @@ class TestPlanPromptBug1:
         """The PLAN prompt must instruct the LLM that answering is handled by the Answer phase."""
         from harness.core.system_prompt import AgentPhase, get_prompt
 
-        prompt = get_prompt(AgentPhase.PLAN, step_schema="", tool_descriptions="", intent="test")
+        prompt = get_prompt(
+            AgentPhase.PLAN,
+            step_schema="",
+            tool_descriptions="",
+            intent="test",
+            context_section="",
+            feedback_section="",
+        )
         assert "conversational responses are handled" in prompt.lower() or "answer phase" in prompt.lower(), (
             "Prompt should tell Planner NOT to plan conversation/answer tool calls"
         )
@@ -288,7 +295,14 @@ class TestPlanPromptBug2:
         """The PLAN prompt must explicitly forbid the Planner from computing values."""
         from harness.core.system_prompt import AgentPhase, get_prompt
 
-        prompt = get_prompt(AgentPhase.PLAN, step_schema="", tool_descriptions="", intent="test")
+        prompt = get_prompt(
+            AgentPhase.PLAN,
+            step_schema="",
+            tool_descriptions="",
+            intent="test",
+            context_section="",
+            feedback_section="",
+        )
         assert "never compute" in prompt.lower() or "do not hardcode" in prompt.lower(), (
             "Prompt should forbid Planner from computing/hardcoding values"
         )
@@ -311,7 +325,7 @@ class TestPlanPromptBug2:
                     "properties": {
                         "operation": {"type": "string"},
                         "path": {"type": "string"},
-                        "content": {"type": "string"},
+                        "content": {"type": "string", "x-role": "data"},
                     },
                 },
                 output_schema={"type": "object"},
@@ -368,7 +382,14 @@ class TestPlanPromptBug3:
         """Example 2 must NOT hardcode 'done' — it should use $s1.result instead."""
         from harness.core.system_prompt import AgentPhase, get_prompt
 
-        prompt = get_prompt(AgentPhase.PLAN, step_schema="", tool_descriptions="", intent="test")
+        prompt = get_prompt(
+            AgentPhase.PLAN,
+            step_schema="",
+            tool_descriptions="",
+            intent="test",
+            context_section="",
+            feedback_section="",
+        )
         assert '"content": "done"' not in prompt, "Bug 3: Example 2 should NOT hardcode 'done' — use $s1.result instead"
         assert "$s1.result" in prompt, "Bug 3: Example 2 should demonstrate $s1.result data flow reference"
 
@@ -376,7 +397,14 @@ class TestPlanPromptBug3:
         """The Data Flow section must include syntax examples like $s1.result, $s1.body."""
         from harness.core.system_prompt import AgentPhase, get_prompt
 
-        prompt = get_prompt(AgentPhase.PLAN, step_schema="", tool_descriptions="", intent="test")
+        prompt = get_prompt(
+            AgentPhase.PLAN,
+            step_schema="",
+            tool_descriptions="",
+            intent="test",
+            context_section="",
+            feedback_section="",
+        )
         assert "Syntax:" in prompt or "$s1.result" in prompt, (
             "Bug 3: Data Flow section should explain $step_id.field syntax with examples"
         )
@@ -386,7 +414,14 @@ class TestPlanPromptBug3:
         """Example 3 must demonstrate $step_id.field usage between dependent steps."""
         from harness.core.system_prompt import AgentPhase, get_prompt
 
-        prompt = get_prompt(AgentPhase.PLAN, step_schema="", tool_descriptions="", intent="test")
+        prompt = get_prompt(
+            AgentPhase.PLAN,
+            step_schema="",
+            tool_descriptions="",
+            intent="test",
+            context_section="",
+            feedback_section="",
+        )
         assert "Example 3" in prompt, "Bug 3: Should have an Example 3 demonstrating data flow with $ references"
         assert "$s1.body" in prompt, "Bug 3: Example 3 should use $s1.body to show data flow between steps"
 

@@ -24,7 +24,7 @@ def _derive_run_tenant(events: list[Event]) -> str:
     counts: dict[str, int] = {}
     for t in tenants:
         counts[t] = counts.get(t, 0) + 1
-    chosen = max(counts, key=counts.get)
+    chosen = max(counts, key=lambda t: counts[t])
     if len(counts) > 1:
         _log.error(
             "Run %s has events spanning multiple tenants %s; attributing orphan terminal events to %s",
@@ -97,7 +97,7 @@ async def mark_orphans(store: EventStore) -> int:
         # 1) Diagnostic flag (idempotent across restarts).
         await store.append_event(
             run_id,
-            EventType.RUN_ORPHANED,
+            EventType.RUN,
             RunOrphanedPayload(
                 reason="server_restart",
                 detected_at=now,
@@ -112,7 +112,7 @@ async def mark_orphans(store: EventStore) -> int:
         event_count = len(events) + 2  # + RUN_ORPHANED + this RUN_FAILED
         await store.append_event(
             run_id,
-            EventType.RUN_FAILED,
+            EventType.RUN,
             RunFailedPayload(
                 final_error=(
                     "Run was terminated because the server process restarted while it was active "

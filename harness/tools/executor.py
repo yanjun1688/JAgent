@@ -19,7 +19,6 @@ from harness.models.events import (
     ConfirmationRequestedPayload,
     EventType,
     GuardrailTriggeredPayload,
-    OutputBlobStoredPayload,
     ToolCalledPayload,
     ToolCompletedPayload,
     ToolFailedPayload,
@@ -29,7 +28,7 @@ from harness.models.events import (
 from harness.models.tools import ToolDefinition
 from harness.models.workspace import WorkspaceScope
 from harness.monitoring.langfuse_tracer import _get_current_trace_ctx, _get_current_tracer
-from harness.storage.event_store import EventStore
+from harness.storage import EventStoreLike
 from harness.tools.base import current_backend
 from harness.tools.guardrails import GuardrailRunner
 from harness.tools.idempotency import IdempotencyKeyGenerator
@@ -112,7 +111,7 @@ class ToolExecutionResult:
 class ToolExecutor:
     def __init__(
         self,
-        store: EventStore,
+        store: EventStoreLike,
         guardrail_runner: GuardrailRunner | None = None,
         output_inline_max_chars: int = 8000,
     ):
@@ -156,18 +155,8 @@ class ToolExecutor:
             return output
         await self.store.append_event(
             run_id,
-            EventType.OUTPUT_BLOB_STORED,
-            OutputBlobStoredPayload(
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                ref=stored.ref,
-                sha256=stored.sha256,
-                bytes=stored.bytes,
-                summary=stored.summary,
-                truncated=stored.truncated,
-                step_id=step_id,
-                workspace_id=workspace_id,
-            ).model_dump(),
+            EventType.TOOL,
+            stored.model_dump(),
         )
         _log_sandbox.info(
             "[output] tool=%s call=%s large output offloaded bytes=%d ref=%s",
@@ -244,7 +233,7 @@ class ToolExecutor:
 
         # ── Step 2: Compute idempotency key ──────────────────────
         ik_key = IdempotencyKeyGenerator.compute(
-            tool_def, input, key_fields=op_contract.idempotency_key_fields if op_contract else None
+            tool_def, input, key_fields=tool_def.effective_idempotency_key_fields(input)
         )
         _log_idem.debug("[idem] ik=%s", ik_key or "null")
 
@@ -280,7 +269,7 @@ class ToolExecutor:
                 _log_guardrails.warning("[guardrails] Blocked by '%s': %s (%dms)", gr.guardrail_id, gr.reason, _ms_gr)
                 await self.store.append_event(
                     run_id,
-                    EventType.GUARDRAIL_TRIGGERED,
+                    EventType.TOOL,
                     GuardrailTriggeredPayload(
                         tool_call_id=tool_call_id,
                         tool_name=tool_name,
@@ -315,7 +304,7 @@ class ToolExecutor:
 
         # ── Step 3: Idempotency cache lookup ─────────────────────
         if ik_key is not None:
-            existing_tc = await self.store.find_by_idempotency_key(run_id, EventType.TOOL_COMPLETED, ik_key)
+            existing_tc = await self.store.find_by_idempotency_key(run_id, EventType.TOOL, ik_key)
             if existing_tc is not None:
                 payload = ToolCompletedPayload.model_validate(existing_tc.payload)
                 se_flag = payload.result_type == ToolResultType.UNSUCCESSFUL
@@ -348,9 +337,7 @@ class ToolExecutor:
             _log_idem.debug("[idem] Cache miss")
 
         # ── Step 5: Confirmation check ───────────────────────────
-        requires_confirmation = (
-            op_contract.requires_confirmation if op_contract is not None else tool_def.requires_confirmation
-        )
+        requires_confirmation = tool_def.effective_requires_confirmation(input)
         needs_confirmation = requires_confirmation or guardrail_triggers_confirmation
         if needs_confirmation:
             _log_confirm.info("[confirm] Tool requires human confirmation")
@@ -360,7 +347,7 @@ class ToolExecutor:
             )
             confirm_key = ik_key or f"_noik_{tool_name}"
             existing_req = await self.store.find_by_idempotency_key(
-                run_id, EventType.CONFIRMATION_REQUESTED, confirm_key
+                run_id, EventType.CONFIRMATION, confirm_key
             )
             if existing_req is not None:
                 req_payload = ConfirmationRequestedPayload.model_validate(existing_req.payload)
@@ -374,7 +361,7 @@ class ToolExecutor:
                         _log_confirm.info("[confirm] Operator declined")
                         await self.store.append_event(
                             run_id,
-                            EventType.TOOL_FAILED,
+                            EventType.TOOL,
                             ToolFailedPayload(
                                 tool_call_id=tool_call_id,
                                 tool_name=tool_name,
@@ -413,7 +400,7 @@ class ToolExecutor:
                 )
                 await self.store.append_event(
                     run_id,
-                    EventType.CONFIRMATION_REQUESTED,
+                    EventType.CONFIRMATION,
                     confirmation_payload.model_dump(),
                     idempotency_key=confirm_key,
                 )
@@ -430,7 +417,7 @@ class ToolExecutor:
         _agent_log.info("[exec] Writing ToolCalled event")
         await self.store.append_event(
             run_id,
-            EventType.TOOL_CALLED,
+            EventType.TOOL,
             ToolCalledPayload(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -501,7 +488,7 @@ class ToolExecutor:
                     _log_sandbox.info(
                         "[sidefx] tool=%s side_effects=%s", tool_name, [s.value for s in tool_def.side_effects]
                     )
-                tp = ToolCompletedPayload(
+                tp: ToolCompletedPayload | ToolFailedPayload | ToolTimeoutPayload = ToolCompletedPayload(
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     output=output,
@@ -515,7 +502,7 @@ class ToolExecutor:
                 # unsuccessful result were cached, a same-input retry would hit
                 # the cache and never actually re-run the tool — silently
                 # defeating self-heal (Bug S1.1, AGENTS.md constraint 4).
-                await self.store.append_event(run_id, EventType.TOOL_COMPLETED, tp.model_dump())
+                await self.store.append_event(run_id, EventType.TOOL, tp.model_dump())
                 _log_sandbox.info(
                     "[semantic] Wrote TOOL_COMPLETED(UNSUCCESSFUL) tool=%s call_id=%s (not idempotency-cached)",
                     tool_name,
@@ -582,7 +569,7 @@ class ToolExecutor:
                             retryable=False,
                             step_id=step_id,
                         )
-                        await self.store.append_event(run_id, EventType.TOOL_FAILED, tp.model_dump())
+                        await self.store.append_event(run_id, EventType.TOOL, tp.model_dump())
                         self._trace_tool(
                             tool_name,
                             input,
@@ -637,7 +624,7 @@ class ToolExecutor:
                 duration_ms=duration_ms,
                 step_id=step_id,
             )
-            await self.store.append_event(run_id, EventType.TOOL_COMPLETED, tp.model_dump(), idempotency_key=ik_key)
+            await self.store.append_event(run_id, EventType.TOOL, tp.model_dump(), idempotency_key=ik_key)
             self._trace_tool(
                 tool_name,
                 input,
@@ -671,7 +658,7 @@ class ToolExecutor:
                 timeout_ms=tool_def.timeout_ms,
                 step_id=step_id,
             )
-            await self.store.append_event(run_id, EventType.TOOL_TIMEOUT, tp.model_dump())
+            await self.store.append_event(run_id, EventType.TOOL, tp.model_dump())
             self._trace_tool(
                 tool_name,
                 input,
@@ -729,7 +716,7 @@ class ToolExecutor:
                 retryable=retryable,
                 step_id=step_id,
             )
-            await self.store.append_event(run_id, EventType.TOOL_FAILED, tp.model_dump())
+            await self.store.append_event(run_id, EventType.TOOL, tp.model_dump())
             self._trace_tool(
                 tool_name,
                 input,

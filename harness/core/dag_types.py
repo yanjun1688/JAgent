@@ -41,6 +41,22 @@ class ExecState(str, Enum):
     CANCELLED = "cancelled"
 
 
+def exec_state_is_normal(exec_state: ExecState | str, probe: bool) -> bool:
+    """单一「步骤正常」谓词（完成门原子判据），供 StepResult 与 fold.StepEvidence 共用。
+
+    纯函数 (exec_state, probe) → bool，系统计算，**不读取 task_state**（约束 4）。
+    UNSUCCESSFUL 且 probe=True 时算正常（探测型步骤"没有/不存在"就是正确答案）。
+
+    ``ExecState`` 是 ``str`` 枚举，故原始字符串 ``"completed"`` 亦等价匹配。
+
+    True for: COMPLETED, IDEMPOTENT, (UNSUCCESSFUL and probe)
+    False for: UNSUCCESSFUL(非 probe), FAILED, SKIPPED, PENDING, RUNNING, CANCELLED
+    """
+    return exec_state in (ExecState.COMPLETED, ExecState.IDEMPOTENT) or (
+        exec_state == ExecState.UNSUCCESSFUL and probe
+    )
+
+
 class TaskState(str, Enum):
     """任务达成态 — 由 LLM 在 revise() 中判定。
 
@@ -115,16 +131,9 @@ class StepResult:
     def step_normal(self) -> bool:
         """v2.2 (D3): 步骤是否"正常" — 完成门（任务完成聚合）的原子判据。
 
-        纯函数 (exec_state, probe) → bool，系统计算，**不读取 task_state**（约束 4）。
-        UNSUCCESSFUL 且 step.probe=True 时算正常（探测型步骤"没有/不存在"就是正确答案）。
-
-        True for: COMPLETED, IDEMPOTENT, (UNSUCCESSFUL and probe)
-        False for: UNSUCCESSFUL(非 probe), FAILED, SKIPPED, PENDING, RUNNING, CANCELLED
+        复用模块级 ``exec_state_is_normal``（与 fold.StepEvidence 单一谓词）。
         """
-        return self.exec_state in (
-            ExecState.COMPLETED,
-            ExecState.IDEMPOTENT,
-        ) or (self.exec_state == ExecState.UNSUCCESSFUL and self.probe)
+        return exec_state_is_normal(self.exec_state, self.probe)
 
     @property
     def output_available(self) -> bool:

@@ -158,6 +158,7 @@ class LangfuseTracer:
         self._sk = os.getenv("LANGFUSE_SECRET_KEY", "")
         self._host = os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
 
+        self._client: Langfuse | None
         if self._enabled and self._pk and self._sk:
             self._client = Langfuse(
                 public_key=self._pk,

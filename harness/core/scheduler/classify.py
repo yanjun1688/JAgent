@@ -11,6 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import re
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from harness.core.fold import RunState
+    from harness.core.planner import Planner
 
 from harness.core.llm_client import timed_chat
 from harness.core.logger import agent_logger
@@ -58,7 +63,24 @@ def intent_requires_tools(intent: str) -> bool:
 
 
 class ClassifyMixin:
-    """Contract extraction + intent classification for the planning scheduler."""
+    """Contract extraction + intent classification for the planning scheduler.
+
+    Mixin: attributes/methods below come from the combined scheduler; stubs
+    declared here so mypy checks the calls.
+    """
+
+    if TYPE_CHECKING:
+        planner: Planner
+
+        async def _refresh_state(self, run_id: str) -> RunState: ...
+
+        def _run_remaining_s(self, run_id: str) -> float | None: ...
+
+        async def _append_run_event(
+            self, run_id: str, event_type: Any, payload: dict[str, Any], **kwargs: Any
+        ) -> Any: ...
+
+        async def _phase_call(self, run_id: str, phase: str, coro: Any) -> Any: ...
 
     async def _resolve_contracts(self, run_id: str, intent: str) -> None:
         """S07 (D-02 / 方案 B): 首轮 plan 前的契约解析（run 内异步前置）。

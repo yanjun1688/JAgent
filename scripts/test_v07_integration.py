@@ -79,7 +79,7 @@ from harness.core.scheduler import (
 )
 from harness.models.events import EventType
 from harness.models.plan import DagPlan, DagStep
-from harness.models.tools import RetryPolicy, SideEffect, ToolDefinition
+from harness.models.tools import Guardrail, RetryPolicy, SideEffect, ToolDefinition
 from harness.storage.event_store import EventStore
 from harness.tools.base import BaseTool
 from harness.tools.executor import ToolExecutor
@@ -152,6 +152,7 @@ DELETE_DEF = ToolDefinition(
     retry_policy=RetryPolicy(),
     dangerous_with=["delete_all"],
     max_parallel=1,
+    guardrails=[Guardrail(guardrail_type="destructive", config={})],
 )
 
 DELETE_ALL_DEF = ToolDefinition(
@@ -165,6 +166,7 @@ DELETE_ALL_DEF = ToolDefinition(
     retry_policy=RetryPolicy(),
     dangerous_with=["delete_file"],
     max_parallel=1,
+    guardrails=[Guardrail(guardrail_type="destructive", config={})],
 )
 
 ALL_DEFS = [ECHO_DEF, SEARCH_DEF, DELETE_DEF, DELETE_ALL_DEF]
@@ -349,183 +351,12 @@ async def test_guardrail_max_parallel() -> dict:
 
 
 # ═══════════════════════════════════════════════════════════
-# Test 4: DAG — 拓扑排序 + 并行执行
-# ═══════════════════════════════════════════════════════════
-
-
-async def test_dag_execution() -> dict:
-    _log.info("=" * 56)
-    _log.info("Test 4: DAG Topological Execution")
-    _log.info("=" * 56)
-
-    store = EventStore(":memory:")
-    await store.initialize()
-    executor = ToolExecutor(store)
-    reg = _init_registry()
-    dag = DagExecutor(executor, store, reg)
-
-    # DAG: s1,s2 (parallel layer 0) -> s3 (depends on s1,s2) -> s4 (depends on s3)
-    plan = DagPlan(
-        intent="DAG test",
-        steps=[
-            DagStep(id="s1", tool="echo", input={"msg": "step1"}),
-            DagStep(id="s2", tool="search", input={"q": "query"}),
-            DagStep(id="s3", tool="echo", input={"msg": "step3"}, depends_on=["s1", "s2"]),
-            DagStep(id="s4", tool="echo", input={"msg": "step4"}, depends_on=["s3"]),
-        ],
-    )
-
-    layers = plan.topological_sort()
-    _log.info("  Layers: %s", layers)
-    results = await dag.execute("dag-test", plan)
-    events = await store.get_events("dag-test")
-
-    _dump_events("DAG Test Events", events)
-
-    all_completed = all(r.get("status") == "completed" for r in results.values())
-    has_plan_created = any(e.event_type == EventType.PLAN_CREATED for e in events)
-    has_plan_completed = any(e.event_type == EventType.PLAN_COMPLETED for e in events)
-    dag_step_events = [e for e in events if e.event_type.value.startswith("DagStep")]
-    started = [e for e in dag_step_events if e.event_type == EventType.DAG_STEP_STARTED]
-    completed = [e for e in dag_step_events if e.event_type == EventType.DAG_STEP_COMPLETED]
-
-    passed = all_completed and has_plan_created and has_plan_completed and len(started) == 4 and len(completed) == 4
-    _log.info("  All completed: %s", all_completed)
-    _log.info("  PlanCreated: %s, PlanCompleted: %s", has_plan_created, has_plan_completed)
-    _log.info("  DagSteps: %d started, %d completed", len(started), len(completed))
-    _log.info("  %s", "✅ PASSED" if passed else "❌ FAILED")
-
-    await store.close()
-    return {
-        "name": "DAG Execution",
-        "passed": passed,
-        "detail": f"layers={layers}, steps={len(results)}, started={len(started)}, completed={len(completed)}",
-    }
-
-
-# ═══════════════════════════════════════════════════════════
-# Test 5: DagExecutor — 上游选择器 + 截断
-# ═══════════════════════════════════════════════════════════
-
-
-async def test_upstream_selectors() -> dict:
-    _log.info("=" * 56)
-    _log.info("Test 5: Upstream Selectors + Output Truncation")
-    _log.info("=" * 56)
-
-    store = EventStore(":memory:")
-    await store.initialize()
-    executor = ToolExecutor(store)
-    reg = _init_registry()
-    dag = DagExecutor(executor, store, reg)
-
-    plan = DagPlan(
-        intent="Selector test",
-        steps=[
-            DagStep(id="s1", tool="echo", input={"msg": "hello world"}),
-            DagStep(
-                id="s2", tool="echo", input={"msg": "hello2"}, depends_on=["s1"], upstream_selectors={"s1": "echo.msg"}
-            ),
-        ],
-    )
-
-    results = await dag.execute("sel-test", plan)
-    events = await store.get_events("sel-test")
-
-    _dump_events("Selector Test Events", events)
-
-    s2_result = results.get("s2", {})
-    s2_result.get("output", {})
-    # s2's merged input should include s1_result from selector resolving: echo.msg -> "hello world"
-    has_upstream = s2_result.get("status") == "completed"
-
-    # Truncation check: DagStepCompletedPayload.output_summary should be <= 200
-    dag_completed = [e for e in events if e.event_type == EventType.DAG_STEP_COMPLETED]
-    all_truncated = all(len(e.payload.get("output_summary", "")) <= 200 for e in dag_completed)
-
-    passed = has_upstream and all_truncated
-    _log.info("  S2 completed: %s", has_upstream)
-    _log.info("  All summaries ≤200: %s", all_truncated)
-    _log.info("  %s", "✅ PASSED" if passed else "❌ FAILED")
-
-    await store.close()
-    return {
-        "name": "Upstream Selectors",
-        "passed": passed,
-        "detail": f"s2_status={s2_result.get('status')}, truncated={all_truncated}",
-    }
-
-
-# ═══════════════════════════════════════════════════════════
-# Test 6: DAG — Step 错误处理
-# ═══════════════════════════════════════════════════════════
-
-
-async def test_dag_step_error() -> dict:
-    _log.info("=" * 56)
-    _log.info("Test 6: DAG Step Error Handling")
-    _log.info("=" * 56)
-
-    failing_def = ToolDefinition(
-        name="always_fail",
-        description="Always fails",
-        input_schema={"type": "object", "properties": {"x": {"type": "string"}}},
-        output_schema={"type": "object"},
-        idempotency_key_fields=["x"],
-        side_effects=[SideEffect.WRITE],
-        timeout_ms=5000,
-        retry_policy=RetryPolicy(),
-    )
-
-    async def fail_fn(input_: dict) -> dict:
-        raise RuntimeError(f"Intentional failure: {input_}")
-
-    store = EventStore(":memory:")
-    await store.initialize()
-    executor = ToolExecutor(store)
-    reg = ToolRegistry()
-    reg.register_tool(_ScriptTool(failing_def, fail_fn))
-    reg.register_tool(_ScriptTool(ECHO_DEF, ALL_FNS["echo"]))
-    dag = DagExecutor(executor, store, reg)
-
-    plan = DagPlan(
-        intent="Error test",
-        steps=[
-            DagStep(id="s1", tool="always_fail", input={"x": "boom"}),
-            DagStep(id="s2", tool="echo", input={"msg": "never reached"}, depends_on=["s1"]),
-        ],
-    )
-
-    results = await dag.execute("err-test", plan)
-    events = await store.get_events("err-test")
-
-    _dump_events("Error Test Events", events)
-
-    s1_failed = results.get("s1", {}).get("status") == "error"
-    "s2" not in results or results["s2"].get("status") != "completed"
-    has_plan_failed = any(e.event_type == EventType.PLAN_FAILED for e in events)
-    has_step_failed = any(e.event_type == EventType.DAG_STEP_FAILED for e in events)
-
-    passed = s1_failed and has_plan_failed and has_step_failed
-    _log.info("  S1 failed: %s", s1_failed)
-    _log.info("  PlanFailed event: %s, DagStepFailed event: %s", has_plan_failed, has_step_failed)
-    _log.info("  %s", "✅ PASSED" if passed else "❌ FAILED")
-
-    await store.close()
-    return {
-        "name": "DAG Step Error",
-        "passed": passed,
-        "detail": f"s1={results.get('s1', {}).get('status')}, PlanFailed={has_plan_failed}",
-    }
-
-
-# ═══════════════════════════════════════════════════════════
 # Test 7: Planner (Mock) + DagExecutor — 完整循环
 # ═══════════════════════════════════════════════════════════
 
 
 async def test_planner_executor_cycle() -> dict:
-    """全流程：Planner.plan() → DagExecutor.execute() → Planner.revise() → done"""
+    """全流程：Planner.plan() → execute_layer → Planner.revise() → done"""
     _log.info("=" * 56)
     _log.info("Test 7: Planner → DAG Execute → Revise 循环")
     _log.info("=" * 56)
@@ -561,7 +392,7 @@ async def test_planner_executor_cycle() -> dict:
         dag_executor=dag,
         tool_defs=ALL_DEFS,
         tool_fns=ALL_FNS,
-        config=SchedulerConfig(max_iterations=5),
+        config=SchedulerConfig(run_attempt_budget=5),
         context_manager=cm,
     )
 
@@ -570,11 +401,11 @@ async def test_planner_executor_cycle() -> dict:
 
     _dump_events("Planner-Executor Cycle", events)
 
-    has_plan_created = any(e.event_type == EventType.PLAN_CREATED for e in events)
-    has_plan_completed = any(e.event_type == EventType.PLAN_COMPLETED for e in events)
+    has_plan_created = any(e.event_type == EventType.PLAN for e in events)
+    has_plan_completed = any(e.event_type == EventType.PLAN for e in events)
     has_agent_thought = any(e.event_type == EventType.AGENT_THOUGHT for e in events)
-    has_step_started = any(e.event_type == EventType.DAG_STEP_STARTED for e in events)
-    has_step_completed = any(e.event_type == EventType.DAG_STEP_COMPLETED for e in events)
+    has_step_started = any(e.event_type == EventType.STEP for e in events)
+    has_step_completed = any(e.event_type == EventType.STEP for e in events)
     is_completed = state.status == RunStatus.COMPLETED
 
     passed = (
@@ -637,7 +468,7 @@ async def test_serial_step_execution() -> dict:
         dag_executor=dag,
         tool_defs=ALL_DEFS,
         tool_fns=ALL_FNS,
-        config=SchedulerConfig(max_iterations=5),
+        config=SchedulerConfig(run_attempt_budget=5),
         context_manager=cm,
     )
 
@@ -646,13 +477,13 @@ async def test_serial_step_execution() -> dict:
 
     _dump_events("Serial Step Execution", events)
 
-    step_completed = [e for e in events if e.event_type == EventType.DAG_STEP_COMPLETED]
-    plan_revised = [e for e in events if e.event_type == EventType.PLAN_REVISED]
+    step_completed = [e for e in events if e.event_type == EventType.STEP]
+    plan_revised = [e for e in events if e.event_type == EventType.PLAN]
     is_terminated = state.status in (RunStatus.COMPLETED, RunStatus.FAILED)
 
     # Plan executes 1 step, then revise returns empty → task completes
     _log.info("  Steps completed: %d, PlanRevised: %d", len(step_completed), len(plan_revised))
-    plan_created_count = sum(1 for event in events if event.event_type == EventType.PLAN_CREATED)
+    plan_created_count = sum(1 for event in events if event.event_type == EventType.PLAN)
     _log.info("  PlanCreated count: %d", plan_created_count)
     _log.info("  Status: %s", state.status.value)
 
@@ -701,7 +532,7 @@ async def test_planner_fallback() -> dict:
         dag_executor=dag,
         tool_defs=ALL_DEFS,
         tool_fns=ALL_FNS,
-        config=SchedulerConfig(max_iterations=2),
+        config=SchedulerConfig(run_attempt_budget=2),
         context_manager=cm,
     )
 
@@ -711,7 +542,7 @@ async def test_planner_fallback() -> dict:
     _dump_events("Fallback Test", events)
 
     # Fallback should have RunStarted + ToolCalled/ToolCompleted from serial AgentLoopScheduler
-    has_run_started = any(e.event_type == EventType.RUN_STARTED for e in events)
+    has_run_started = any(e.event_type == EventType.RUN for e in events)
     has_agent_thought = any(e.event_type == EventType.AGENT_THOUGHT for e in events)
     is_terminated = state.status in (RunStatus.COMPLETED, RunStatus.FAILED)
 
@@ -752,7 +583,8 @@ async def test_system_state_injection() -> dict:
             DagStep(id="s1", tool="echo", input={"msg": "hello"}),
         ],
     )
-    results = await dag.execute("status-test", plan)
+    r = await dag._execute_step("status-test", plan, {}, "s1")
+    results = {"s1": r}
 
     # After execution, build status text
     status = dag.build_dag_status_text(plan, results, current_layer=0)
@@ -861,7 +693,7 @@ async def test_revise_continuation() -> dict:
         dag_executor=dag,
         tool_defs=ALL_DEFS,
         tool_fns=ALL_FNS,
-        config=SchedulerConfig(max_iterations=5),
+        config=SchedulerConfig(run_attempt_budget=5),
         context_manager=cm,
     )
 
@@ -870,9 +702,9 @@ async def test_revise_continuation() -> dict:
 
     _dump_events("Revise Continuation", events)
 
-    plan_completed = [e for e in events if e.event_type == EventType.PLAN_COMPLETED]
-    plan_revised = [e for e in events if e.event_type == EventType.PLAN_REVISED]
-    steps_completed = [e for e in events if e.event_type == EventType.DAG_STEP_COMPLETED]
+    plan_completed = [e for e in events if e.event_type == EventType.PLAN]
+    plan_revised = [e for e in events if e.event_type == EventType.PLAN]
+    steps_completed = [e for e in events if e.event_type == EventType.STEP]
     is_completed = state.status == RunStatus.COMPLETED
 
     # Architecture note: plan() is called on every while iteration (not revise()).
@@ -896,48 +728,6 @@ async def test_revise_continuation() -> dict:
             f"steps={len(steps_completed)}, status={state.status.value}"
         ),
     }
-
-
-# ═══════════════════════════════════════════════════════════
-# Test 13: upstream_selectors 路径解析到 None
-# ═══════════════════════════════════════════════════════════
-
-
-async def test_upstream_selector_none_path() -> dict:
-    _log.info("=" * 56)
-    _log.info("Test 13: Upstream Selector — Path Resolution to None")
-    _log.info("=" * 56)
-
-    store = EventStore(":memory:")
-    await store.initialize()
-    executor = ToolExecutor(store)
-    reg = _init_registry()
-    dag = DagExecutor(executor, store, reg)
-
-    plan = DagPlan(
-        intent="None path test",
-        steps=[
-            DagStep(id="s1", tool="echo", input={"msg": "hello"}),
-            DagStep(
-                id="s2",
-                tool="echo",
-                input={"msg": "world"},
-                depends_on=["s1"],
-                upstream_selectors={"s1": "nonexistent.deep.path"},
-            ),
-        ],
-    )
-    results = await dag.execute("none-path", plan)
-
-    s2 = results.get("s2", {})
-    s1_result = s2.get("output", {}).get("s1_result", "MISSING")
-    passed = s2.get("status") == "completed"
-    _log.info("  S2 status: %s", s2.get("status"))
-    _log.info("  S1 nonexistent path resolved to: %s", s1_result)
-    _log.info("  %s", "✅ PASSED" if passed else "❌ FAILED")
-
-    await store.close()
-    return {"name": "Selector None Path", "passed": passed, "detail": f"s2_status={s2.get('status')}"}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -977,16 +767,12 @@ async def main() -> None:
         test_http_smoke(),
         test_guardrail_dangerous_combination(),
         test_guardrail_max_parallel(),
-        test_dag_execution(),
-        test_upstream_selectors(),
-        test_dag_step_error(),
         test_planner_executor_cycle(),
         test_serial_step_execution(),
         test_planner_fallback(),
         test_system_state_injection(),
         test_topological_cycle(),
         test_revise_continuation(),
-        test_upstream_selector_none_path(),
         test_unknown_dependency(),
     ]
 

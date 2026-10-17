@@ -29,7 +29,7 @@
 ```
               ┌──────────────────────────────────────────┐
               │  Interface Layer                         │
-              │  REST · WebSocket · Analysis · Query     │
+              │  REST · WebSocket · Analysis           │
               │  X-Tenant-Id → TenantContext (contextvar) │
               └────────────────────┬─────────────────────┘
                                   │  POST /api/v1/runs
@@ -94,43 +94,59 @@
 - **执行依赖唯一**：DAG 步骤间唯一执行依赖是 `DagStep.depends_on`
 - **完成判定只信契约**：mutating 覆盖、任务完成判定只认 `DeliveryContract` + `StepResult`
 
-## 事件类型 (41 种)
+## 事件类型 (13 种)
 
-**核心循环**:
+R-events 重构 (2026-09-12) 将事件由 **41 收敛为 13**：每个*聚合生命周期*一个 `EventType`，具体跃迁由 payload 的 `phase` 判别（普通 Pydantic Union + smart order，非 discriminated union），每 phase 独立强类型 payload。`harness/models/events.py` 是唯一真源。
+
+| EventType | phases |
+|---|---|
+| `Run` | started / paused / resumed / completed / failed / orphaned |
+| `Plan` | created / revised / completed / failed |
+| `Step` | started / completed / failed / skipped |
+| `StepRepair` | started / completed |
+| `Tool` | called / completed / failed / timeout / blocked / output_stored |
+| `Confirmation` | requested / received |
+| `Context` | checkpointed / archived / pruned |
+| `Conversation` | started / message |
+| `Workspace` | created / updated / deleted |
+| `Diagnostic` | phase_timeout / cleanup_timeout / late_event_rejected / plan_rejected |
+| `AgentThought` | 单例 |
+| `FeedbackInjected` | 单例 |
+| `DeliveryContractsResolved` | 单例 |
+
+**核心循环 (aggregate/phase)**:
 ```
-RunStarted → DeliveryContractsResolved → AgentThought → ToolCalled
-                                          → ToolCompleted / ToolFailed / ToolTimeout
-                                          → GuardrailTriggered
-                                          → ConfirmationRequested → ConfirmationReceived
-                                          → RunPaused → RunResumed → RunCommand
-                                          → RunCompleted / RunFailed
+Run/started → DeliveryContractsResolved → AgentThought → Tool/called
+            → Tool/completed · Tool/failed · Tool/timeout · Tool/blocked
+            → Confirmation/requested → Confirmation/received
+            → Run/paused → Run/resumed → Run/completed · Run/failed
 ```
 
 **DAG 规划与执行**:
 ```
-PlanCreated → DagStepStarted → DagStepCompleted / DagStepFailed / DagStepSkipped
-            → PlanRevised → PlanCompleted / PlanFailed
+Plan/created → Step/started → Step/completed · Step/failed · Step/skipped
+             → Plan/revised → Plan/completed · Plan/failed
 ```
 
 **本地修复**:
 ```
-StepLocalRepairStarted → StepLocalRepairCompleted
+StepRepair/started → StepRepair/completed
 ```
 
 **上下文与监控**:
 ```
-ContextCompressed (EpisodeSummary) · ContextCheckpointed · ContextPruned · EpisodeArchived
-FeedbackInjected · RunOrphaned · LateEventRejected · PhaseTimedOut · TaskCleanupTimeout · OutputBlobStored
+Context/checkpointed · Context/archived · Context/pruned · Tool/output_stored
+FeedbackInjected · Run/orphaned · Diagnostic/phase_timeout · Diagnostic/cleanup_timeout · Diagnostic/late_event_rejected · Diagnostic/plan_rejected
 ```
 
 **Workspace 审计 (V3.3)**:
 ```
-WorkspaceCreated · WorkspaceUpdated · WorkspaceDeleted
+Workspace/created · Workspace/updated · Workspace/deleted
 ```
 
 **Conversation**:
 ```
-ConversationStarted · ConversationMessage · ConversationEnded
+Conversation/started · Conversation/message
 ```
 
 所有事件 Append-Only 存储在 SQLite，`PRIMARY KEY (run_id, seq)` 保证全局有序，`fold_events()` 纯函数可重建任意时刻状态快照。写入后自动通过 WebSocket 广播给前端。事件列含 `tenant_id` / `workspace_id` / `is_audit`。
@@ -143,7 +159,6 @@ harness/
 │   ├── app.py                 # 应用组装 (CORS, lifespan, API version 0.3.0)
 │   ├── deps.py                # HarnessAPI DI 容器 + start_run + WS 广播
 │   ├── routes.py              # REST 端点 (workspace/run/conversation CRUD + confirm/feedback)
-│   ├── query.py               # Unified Query — 18 种 type 聚合查询
 │   ├── ws.py                  # WebSocket 事件推送 (seq 有序回放 + 实时)
 │   ├── analysis_routes.py     # 分析 API (dashboard/tools/guardrails/timeline/traces)
 │   ├── serve.py               # 生产入口 — 装配 Real LLM/Mock + 工具 + 日志
@@ -169,7 +184,7 @@ harness/
 │   ├── docker.py              # DockerSandboxBackend
 │   └── ssh.py                 # SSHSFTPBackend (remote)
 ├── models/                    # Pydantic v2 数据模型（唯一事实来源）
-│   ├── events.py              # 41 种 EventType + Payload
+│   ├── events.py              # 13 种 EventType + 按 phase 强类型 Payload
 │   ├── workspace.py           # Tenant / Workspace / ExecutionTarget / WorkspaceScope
 │   ├── intent.py              # DeliveryContract / OperationContract
 │   ├── conversation.py        # Conversation 模型
@@ -206,7 +221,7 @@ scripts/
 ├── test_llm_dag.py            # Planner-Executor 集成测试
 └── test_real_llm_flow.py      # 真实 LLM 流测试
 
-tests/                         # 79 个测试文件，1441 项测试全部通过
+tests/                         # 85 个测试文件，1423 项测试全部通过
 ```
 
 ## 开发进度
@@ -223,12 +238,12 @@ tests/                         # 79 个测试文件，1441 项测试全部通过
 | V1.0 | 分析平台（AnalysisService + API + 操作锚点） | ✓ 完成 |
 | V0.7.1 (S1) | 任务完成语义链（DeliveryContract 完成门 + ExecState/TaskState 正交） | ✓ 完成 |
 | S2-S10 | 契约细化 / PlanGuardrail / 输出引用 / 覆盖检查 / Reviser 限制 / 终态守卫 / 生命周期取消 | ✓ 完成 |
-| S11 | 可观测性（统一 Query + Langfuse + 日志角色化） | ✓ 完成 |
+| S11 | 可观测性（Langfuse + 日志角色化） | ✓ 完成 |
 | S12 | 回归与真实 LLM 验证（1109 项测试 + 黑盒用例） | ✓ 完成 |
 | V3.3 | Workspace 多租户 + 执行载体（directory / docker / remote） | ✓ 完成 |
 | Q01-Q08 | 质量门禁与执行依赖分离（ADR-009） | ✓ 完成 |
 
-**测试基线：1441 passed / 2 skipped**（Windows 本地 ~61s；Linux CI 62.11s，双平台一致；`python -m pytest -q -p no:cacheprovider`；阶段零护栏基线见 `BASELINE.md`）
+**测试基线：1431 passed**（Windows 本地 ~67s；`uv run pytest -q`；事件整合后 41→13 契约面变更及 R6 `plan_rejected` 见 `JAgent-docs/reviews/review_20260909_accidental_complexity_and_trusted_seam_audit.md` §5.7/§5.8；阶段零护栏基线见 `BASELINE.md`）
 
 ## 快速开始
 
@@ -312,6 +327,7 @@ curl -X POST http://localhost:8000/api/v1/runs \
 | `LLM_MODEL_NAME` | `qwen3.7-max` | LLM 模型名 |
 | `LLM_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI 兼容端点 |
 | `HARNESS_RUN_TIMEOUT_MS` | `600000` (10min) | Run 全局总预算（Q-07 watchdog） |
+| `HARNESS_CONTEXT_TOKEN_LIMIT` | `160000` (200K×0.8) | 上下文压缩基准限额；三档边界比例 0.6/0.8/0.95 |
 | `JAGENT_WORKSPACE_BASE_DIR` | `data/workspaces` | Workspace 受信基目录 |
 | `HARNESS_DB_PATH` | `.harness.db` | SQLite Event Store 路径 |
 | `HARNESS_LOG_DIR` | `data/logs` | 轮转日志目录 |
@@ -370,10 +386,6 @@ curl -X POST http://localhost:8000/api/v1/runs \
 | GET | `/api/v1/analysis/runs/{run_id}/tool-traces` | 工具 Trace 列表 |
 | POST | `/api/v1/operations/retry` | 操作层预留 (501) |
 
-### Unified Query（S11）
-`GET /api/v1/query?type=<type>&run_id=&since=&until=&page=`
-18 种 type：`runs` / `run` / `events` / `dashboard` / `tool-stats` / `guardrail-stats` / `run-analysis` / `timeline` / `tool-traces` / `feedback` / `monitor` / `health` / `tool-defs` / `schedulers` / `mcp` / `plans` / `system` / `ws-clients`
-
 ## 技术栈
 
 | 组件 | 选型 |
@@ -385,7 +397,7 @@ curl -X POST http://localhost:8000/api/v1/runs \
 | 沙盒执行 | ExecutionBackend：本地目录 / Docker 容器 / SSH-SFTP |
 | 浏览器工具 | `@playwright/mcp`（BrowserPool 按 Run 租借，ADR-011） |
 | 前端 | React 18 + Vite + TypeScript + zustand + three.js |
-| 观测 | Langfuse · 统一 Query API |
+| 观测 | Langfuse |
 | 测试 | pytest (asyncio_mode=auto) + ruff + vitest |
 
 ## 交流与学习

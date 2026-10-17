@@ -96,19 +96,19 @@ export const statusBadge = (status: string): React.CSSProperties => {
 
 export const eventTypeBadge = (type: string): React.CSSProperties => {
   const map: Record<string, string> = {
-    RunStarted: colors.blue,
+    Run: colors.blue,
+    Plan: colors.teal,
+    Step: colors.gray,
+    StepRepair: colors.orange,
+    Tool: colors.orange,
+    Confirmation: colors.teal,
+    Context: colors.gray,
+    Conversation: colors.blue,
+    Workspace: colors.teal,
+    Diagnostic: colors.red,
     AgentThought: colors.purple,
-    ToolCalled: colors.orange,
-    ToolCompleted: colors.success,
-    ToolFailed: colors.red,
-    ToolTimeout: colors.red,
-    GuardrailTriggered: '#ff7043',
-    ConfirmationRequested: colors.orange,
-    ConfirmationReceived: colors.teal,
-    RunPaused: colors.gray,
-    RunResumed: colors.teal,
-    RunCompleted: colors.success,
-    RunFailed: colors.red,
+    FeedbackInjected: colors.purple,
+    DeliveryContractsResolved: colors.teal,
   }
   return badge(map[type] || '#999')
 }

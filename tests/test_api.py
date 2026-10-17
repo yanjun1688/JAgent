@@ -53,7 +53,7 @@ class TestListRuns:
 
     async def test_with_one_run(self, client, api):
         _, store = api
-        await store.append_event("test-1", EventType.RUN_STARTED, RunStartedPayload(intent="hello").model_dump())
+        await store.append_event("test-1", EventType.RUN, RunStartedPayload(intent="hello").model_dump())
         resp = await client.get("/api/v1/runs")
         data = resp.json()
         assert len(data["runs"]) == 1
@@ -71,7 +71,7 @@ class TestCreateRun:
         _, store = api
         events = await store.get_events(data["run_id"])
         assert len(events) == 1
-        assert events[0].event_type.value == "RunStarted"
+        assert events[0].event_type == EventType.RUN and events[0].phase == "started"
 
 
 class TestGetRun:
@@ -81,7 +81,7 @@ class TestGetRun:
 
     async def test_returns_run_state(self, client, api):
         _, store = api
-        await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r1", EventType.RUN, RunStartedPayload(intent="test").model_dump())
         await store.append_event("r1", EventType.AGENT_THOUGHT, AgentThoughtPayload(thought="thinking").model_dump())
         resp = await client.get("/api/v1/runs/r1")
         data = resp.json()
@@ -93,7 +93,7 @@ class TestGetRun:
 class TestGetEvents:
     async def test_returns_events_ordered(self, client, api):
         _, store = api
-        await store.append_event("r2", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r2", EventType.RUN, RunStartedPayload(intent="test").model_dump())
         await store.append_event("r2", EventType.AGENT_THOUGHT, AgentThoughtPayload(thought="t1").model_dump())
         resp = await client.get("/api/v1/runs/r2/events")
         data = resp.json()
@@ -103,7 +103,7 @@ class TestGetEvents:
 
     async def test_from_seq_filter(self, client, api):
         _, store = api
-        await store.append_event("r3", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r3", EventType.RUN, RunStartedPayload(intent="test").model_dump())
         await store.append_event("r3", EventType.AGENT_THOUGHT, AgentThoughtPayload(thought="t1").model_dump())
         await store.append_event("r3", EventType.AGENT_THOUGHT, AgentThoughtPayload(thought="t2").model_dump())
         resp = await client.get("/api/v1/runs/r3/events?from_seq=2")
@@ -119,19 +119,19 @@ class TestPauseResume:
         fake-PAUSED / fake-RUNNING zombies. Both control ops fail closed with
         409 and write no control events."""
         _, store = api
-        await store.append_event("r4", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r4", EventType.RUN, RunStartedPayload(intent="test").model_dump())
 
         pause_resp = await client.post("/api/v1/runs/r4/pause", json={"reason": "testing"})
         assert pause_resp.status_code == 409
 
         events = await store.get_events("r4")
-        assert all(e.event_type != EventType.RUN_PAUSED for e in events)
+        assert not any((e.event_type == EventType.RUN and e.phase == "paused") for e in events)
 
         resume_resp = await client.post("/api/v1/runs/r4/resume")
         assert resume_resp.status_code == 409
 
         events = await store.get_events("r4")
-        assert all(e.event_type != EventType.RUN_RESUMED for e in events)
+        assert not any((e.event_type == EventType.RUN and e.phase == "resumed") for e in events)
 
     async def test_resume_without_live_scheduler_is_rejected(self, client, api):
         """Direction A: a PAUSED run with no live scheduler (process restarted)
@@ -139,10 +139,10 @@ class TestPauseResume:
         would produce a fake-RUNNING zombie. Fail closed with 409; the operator
         re-submits the task instead."""
         _, store = api
-        await store.append_event("r-orphan", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r-orphan", EventType.RUN, RunStartedPayload(intent="test").model_dump())
         await store.append_event(
             "r-orphan",
-            EventType.RUN_PAUSED,
+            EventType.RUN,
             RunPausedPayload(reason="waiting for confirmation").model_dump(),
         )
 
@@ -150,7 +150,7 @@ class TestPauseResume:
         assert resp.status_code == 409
 
         events = await store.get_events("r-orphan")
-        assert all(e.event_type != EventType.RUN_RESUMED for e in events), (
+        assert not any((e.event_type == EventType.RUN and e.phase == "resumed") for e in events), (
             "must not write RunResumed for a run with no live scheduler"
         )
 
@@ -159,10 +159,10 @@ class TestPauseResume:
         so a stale confirmation must be refused by the state guard (no scheduler
         to wake, run is not waiting for confirmation)."""
         _, store = api
-        await store.append_event("r-orphan2", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r-orphan2", EventType.RUN, RunStartedPayload(intent="test").model_dump())
         await store.append_event(
             "r-orphan2",
-            EventType.CONFIRMATION_REQUESTED,
+            EventType.CONFIRMATION,
             ConfirmationRequestedPayload(
                 confirmation_id="cid-orphan",
                 tool_call_id="tc-1",
@@ -173,7 +173,7 @@ class TestPauseResume:
         )
         await store.append_event(
             "r-orphan2",
-            EventType.RUN_PAUSED,
+            EventType.RUN,
             RunPausedPayload(reason="waiting for confirmation").model_dump(),
         )
         # Simulate startup orphan termination (mark_orphans writes ORPHANED + FAILED).
@@ -191,10 +191,10 @@ class TestPauseResume:
 class TestConfirm:
     async def test_confirm_idempotent(self, client, api):
         _, store = api
-        await store.append_event("r5", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r5", EventType.RUN, RunStartedPayload(intent="test").model_dump())
         await store.append_event(
             "r5",
-            EventType.CONFIRMATION_REQUESTED,
+            EventType.CONFIRMATION,
             ConfirmationRequestedPayload(
                 confirmation_id="cid-1",
                 tool_call_id="tc-1",
@@ -205,7 +205,7 @@ class TestConfirm:
         )
         await store.append_event(
             "r5",
-            EventType.RUN_PAUSED,
+            EventType.RUN,
             RunPausedPayload(reason="waiting for confirmation").model_dump(),
         )
 
@@ -230,7 +230,9 @@ class TestConfirm:
         assert resp2.status_code == 200
 
         events = await store.get_events("r5")
-        confirmation_events = [e for e in events if e.event_type.value == "ConfirmationReceived"]
+        confirmation_events = [
+            e for e in events if e.event_type == EventType.CONFIRMATION and e.phase == "received"
+        ]
         assert len(confirmation_events) == 1, (
             f"CT-9: idempotency_key should prevent duplicate CONFIRMATION_RECEIVED. "
             f"Got {len(confirmation_events)} events"
@@ -238,10 +240,10 @@ class TestConfirm:
 
     async def test_confirm_unknown_id_is_rejected(self, client, api):
         _, store = api
-        await store.append_event("r5-invalid", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r5-invalid", EventType.RUN, RunStartedPayload(intent="test").model_dump())
         await store.append_event(
             "r5-invalid",
-            EventType.RUN_PAUSED,
+            EventType.RUN,
             RunPausedPayload(reason="waiting for confirmation").model_dump(),
         )
         response = await client.post(
@@ -255,7 +257,7 @@ class TestConfirm:
 class TestOperatorFeedback:
     async def test_expires_in_seqs_is_relative_to_current_seq(self, client, api):
         _, store = api
-        await store.append_event("r-feedback", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r-feedback", EventType.RUN, RunStartedPayload(intent="test").model_dump())
         await store.append_event("r-feedback", EventType.AGENT_THOUGHT, AgentThoughtPayload(thought="x").model_dump())
         current_seq = (await store.get_events("r-feedback"))[-1].seq
         response = await client.post(
@@ -275,7 +277,7 @@ class TestOperatorFeedback:
         should produce exactly one event.
         """
         _, store = api
-        await store.append_event("r5b", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r5b", EventType.RUN, RunStartedPayload(intent="test").model_dump())
 
         # Simulate two concurrent confirm writes with same idempotency_key
         from harness.models.events import ConfirmationReceivedPayload
@@ -287,8 +289,8 @@ class TestOperatorFeedback:
         ).model_dump()
 
         results = await asyncio.gather(
-            store.append_event("r5b", EventType.CONFIRMATION_RECEIVED, payload, idempotency_key="confirm_cid-2"),
-            store.append_event("r5b", EventType.CONFIRMATION_RECEIVED, payload, idempotency_key="confirm_cid-2"),
+            store.append_event("r5b", EventType.CONFIRMATION, payload, idempotency_key="confirm_cid-2"),
+            store.append_event("r5b", EventType.CONFIRMATION, payload, idempotency_key="confirm_cid-2"),
             return_exceptions=True,
         )
 
@@ -296,7 +298,9 @@ class TestOperatorFeedback:
         assert success_count >= 1, "At least one append should succeed"
 
         events = await store.get_events("r5b")
-        confirmation_events = [e for e in events if e.event_type.value == "ConfirmationReceived"]
+        confirmation_events = [
+            e for e in events if e.event_type == EventType.CONFIRMATION and e.phase == "received"
+        ]
         assert len(confirmation_events) == 1, (
             f"CT-9: database-level idempotency_key should dedup. "
             f"Got {len(confirmation_events)} CONFIRMATION_RECEIVED events, expected 1"
@@ -306,18 +310,18 @@ class TestOperatorFeedback:
 class TestDeleteRun:
     async def test_delete_marks_failed(self, client, api):
         _, store = api
-        await store.append_event("r6", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r6", EventType.RUN, RunStartedPayload(intent="test").model_dump())
         resp = await client.delete("/api/v1/runs/r6")
         assert resp.status_code == 200
         events = await store.get_events("r6")
-        assert events[-1].event_type.value == "RunFailed"
+        assert events[-1].event_type == EventType.RUN and events[-1].phase == "failed"
 
 
 class TestRunSummaryFields:
     async def test_summary_includes_all_fields(self, client, api):
         _, store = api
-        await store.append_event("r7", EventType.RUN_STARTED, RunStartedPayload(intent="summary test").model_dump())
-        await store.append_event("r7", EventType.RUN_COMPLETED, RunCompletedPayload(result_summary="done").model_dump())
+        await store.append_event("r7", EventType.RUN, RunStartedPayload(intent="summary test").model_dump())
+        await store.append_event("r7", EventType.RUN, RunCompletedPayload(result_summary="done").model_dump())
 
         resp = await client.get("/api/v1/runs/r7")
         data = resp.json()
@@ -345,7 +349,7 @@ class TestWebSocket:
         from starlette.testclient import TestClient
 
         _, store = sync_api
-        asyncio.run(store.append_event("w1", EventType.RUN_STARTED, RunStartedPayload(intent="ws test").model_dump()))
+        asyncio.run(store.append_event("w1", EventType.RUN, RunStartedPayload(intent="ws test").model_dump()))
         asyncio.run(
             store.append_event("w1", EventType.AGENT_THOUGHT, AgentThoughtPayload(thought="hello").model_dump())
         )
@@ -353,7 +357,8 @@ class TestWebSocket:
         client = TestClient(app)
         with client.websocket_connect("/api/v1/runs/w1/events") as ws:
             first = ws.receive_json()
-            assert first["event_type"] == "RunStarted"
+            assert first["event_type"] == "Run"
+            assert first["payload"]["phase"] == "started"
             assert first["payload"]["intent"] == "ws test"
 
             second = ws.receive_json()
@@ -364,12 +369,13 @@ class TestWebSocket:
         from starlette.testclient import TestClient
 
         _, store = sync_api
-        asyncio.run(store.append_event("w2", EventType.RUN_STARTED, RunStartedPayload(intent="ping test").model_dump()))
+        asyncio.run(store.append_event("w2", EventType.RUN, RunStartedPayload(intent="ping test").model_dump()))
 
         client = TestClient(app)
         with client.websocket_connect("/api/v1/runs/w2/events") as ws:
             first = ws.receive_json()
-            assert first["event_type"] == "RunStarted"
+            assert first["event_type"] == "Run"
+            assert first["payload"]["phase"] == "started"
 
     def test_unknown_run_returns_empty(self, sync_api):
         from starlette.testclient import TestClient
@@ -388,10 +394,10 @@ class TestWebSocket:
 class TestPauseErrors:
     async def test_pause_non_running_returns_409(self, client, api):
         _, store = api
-        await store.append_event("r8", EventType.RUN_STARTED, RunStartedPayload(intent="test").model_dump())
+        await store.append_event("r8", EventType.RUN, RunStartedPayload(intent="test").model_dump())
         from harness.models.events import RunPausedPayload
 
-        await store.append_event("r8", EventType.RUN_PAUSED, RunPausedPayload(reason="manual").model_dump())
+        await store.append_event("r8", EventType.RUN, RunPausedPayload(reason="manual").model_dump())
 
         resp = await client.post("/api/v1/runs/r8/pause", json={"reason": "again"})
         assert resp.status_code == 409
@@ -436,16 +442,15 @@ class TestHarnessAPIFullWiring:
         hapi.tool_defs = [echo_def]
         hapi.tool_fns = {"echo": lambda x: {"ok": True}}
 
-        hapi.llm_client = MockLLMClient(
-            responses=[
-                json.dumps({"steps": [{"id": "s1", "tool": "echo", "input": {}, "depends_on": []}]}),
-                json.dumps({"steps": []}),
-            ]
-        )
+        # classify / contract-extractor / planner all draw from this client;
+        # repeat a valid plan so the planner succeeds no matter how many
+        # pre-plan calls consume a response.
+        _plan = json.dumps({"steps": [{"id": "s1", "tool": "echo", "input": {}, "depends_on": []}]})
+        hapi.llm_client = MockLLMClient(responses=[_plan] * 6)
         registry = ToolRegistry()
         registry._register(echo_def, hapi.tool_fns["echo"])
         hapi.registry = registry
-        hapi.scheduler_config = SchedulerConfig(max_iterations=3)
+        hapi.scheduler_config = SchedulerConfig(run_attempt_budget=3)
         hapi.monitor = RunMonitor(store)
         hapi.monitor.attach()
         hapi.wire_broadcast()
@@ -471,9 +476,9 @@ class TestHarnessAPIFullWiring:
 
         hapi, store = full_api
         events = await store.get_events(run_id)
-        event_types = [e.event_type for e in events]
-        assert EventType.RUN_STARTED in event_types
-        assert EventType.RUN_COMPLETED in event_types
+        run_phases = [e.phase for e in events if e.event_type == EventType.RUN]
+        assert "started" in run_phases
+        assert "completed" in run_phases
 
     async def test_start_run_failure_writes_run_failed_not_orphan(self, full_client, full_api):
         """Bug 6 回归（Run 017dc1f8）：start_run 内 backend 创建失败 →
@@ -504,8 +509,8 @@ class TestHarnessAPIFullWiring:
             rid = row.get("run_id")
             evs = await store.get_events(rid)
             types = [e.event_type for e in evs]
-            if EventType.RUN_STARTED in types:
-                if EventType.RUN_FAILED not in types:
+            if EventType.RUN in types:
+                if EventType.RUN not in types:
                     started_without_failed.append(rid)
                 else:
                     failed_found = True

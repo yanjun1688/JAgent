@@ -18,13 +18,10 @@ def step_is_mutating(step: DagStep, registry: ToolRegistry) -> bool:
     无副作用 ⇒ 不得假设无害；与 ``recovery._is_read_only_action`` 的未知工具默认
     （非只读）对齐，否则 Q-06 反向覆盖会对未知工具步骤静默失效。
     """
-    tool_def = registry.get_tool_def(step.tool)
+    tool_def, _ = registry.tool_def_or_error(step.tool)
     if tool_def is None:
         return True
-    op = tool_def.resolve_operation(step.input)
-    if op is not None:
-        return bool(op.side_effects)
-    return bool(tool_def.side_effects)
+    return bool(tool_def.effective_side_effects(step.input))
 
 
 def validate_revision_invariants(

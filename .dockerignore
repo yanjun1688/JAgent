@@ -1,0 +1,34 @@
+# VCS / CI
+.git
+.github
+
+# Python
+.venv
+**/__pycache__
+**/*.pyc
+*.egg-info
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+
+# Runtime artifacts (host)
+.harness.db
+.harness_outputs
+.sandbox_tmp
+.playwright-mcp
+data
+*.log
+
+# Secrets — never bake into images (pass via compose env_file)
+.env
+
+# Node
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# Docs / scratch
+JAgent-docs
+.harness_outputs

@@ -34,11 +34,11 @@ def _event(run_id: str, seq: int, event_type: EventType, payload: dict) -> Event
 def _failed_plan_run(run_id: str = "run-1") -> list[Event]:
     """A run whose plan fails at step s2 (guardrail block → plan failed → run failed)."""
     return [
-        _event(run_id, 1, EventType.RUN_STARTED, {"intent": "do thing", "context_snapshot": {}}),
+        _event(run_id, 1, EventType.RUN, {"intent": "do thing", "context_snapshot": {}}),
         _event(
             run_id,
             2,
-            EventType.PLAN_CREATED,
+            EventType.PLAN,
             {
                 "plan_id": "p1",
                 "intent": "do thing",
@@ -50,30 +50,30 @@ def _failed_plan_run(run_id: str = "run-1") -> list[Event]:
                 ],
             },
         ),
-        _event(run_id, 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "read"}),
+        _event(run_id, 3, EventType.STEP, {"plan_id": "p1", "step_id": "s1", "tool_name": "read"}),
         _event(
             run_id,
             4,
-            EventType.TOOL_CALLED,
+            EventType.TOOL,
             {"tool_call_id": "tc1", "tool_name": "read", "input": {"path": "a.txt"}},
         ),
         _event(
             run_id,
             5,
-            EventType.TOOL_COMPLETED,
+            EventType.TOOL,
             {"tool_call_id": "tc1", "tool_name": "read", "output": "ok", "duration_ms": 12},
         ),
         _event(
             run_id,
             6,
-            EventType.DAG_STEP_COMPLETED,
+            EventType.STEP,
             {"plan_id": "p1", "step_id": "s1", "output_summary": "ok", "status": "completed"},
         ),
-        _event(run_id, 7, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s2", "tool_name": "write"}),
+        _event(run_id, 7, EventType.STEP, {"plan_id": "p1", "step_id": "s2", "tool_name": "write"}),
         _event(
             run_id,
             8,
-            EventType.GUARDRAIL_TRIGGERED,
+            EventType.TOOL,
             {
                 "tool_call_id": "tc2",
                 "tool_name": "write",
@@ -84,19 +84,19 @@ def _failed_plan_run(run_id: str = "run-1") -> list[Event]:
         _event(
             run_id,
             9,
-            EventType.DAG_STEP_FAILED,
+            EventType.STEP,
             {"plan_id": "p1", "step_id": "s2", "error": "blocked by guardrail", "tool_call_id": "tc2"},
         ),
         _event(
             run_id,
             10,
-            EventType.PLAN_FAILED,
+            EventType.PLAN,
             {"plan_id": "p1", "completed_steps": 1, "total_layers": 1, "final_error": "s2 failed"},
         ),
         _event(
             run_id,
             11,
-            EventType.RUN_FAILED,
+            EventType.RUN,
             {
                 "final_error": "Plan failed: s2 failed",
                 "event_count": 11,
@@ -180,11 +180,11 @@ class TestProjectStateView:
 
     def test_view_surfaces_pending_confirmations(self):
         events = [
-            _event("r", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}}),
+            _event("r", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}}),
             _event(
                 "r",
                 2,
-                EventType.CONFIRMATION_REQUESTED,
+                EventType.CONFIRMATION,
                 {
                     "confirmation_id": "cf1",
                     "tool_call_id": "tc9",
@@ -201,7 +201,7 @@ class TestProjectStateView:
         assert view.pending_confirmations[0].risk_level == "high"
 
     def test_view_without_plan(self):
-        events = [_event("r", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}})]
+        events = [_event("r", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}})]
         view = project_state_view(events, at_seq=1, latest_seq=1)
         assert view.plan is None
         assert view.status == "running"
@@ -219,11 +219,11 @@ class TestStepEvidenceProjection:
         # Given a plan run where s1 completed (with a blob output_ref) and s2
         # ended UNSUCCESSFUL (semantic failure)
         events = [
-            _event("r", 1, EventType.RUN_STARTED, {"intent": "do", "context_snapshot": {}}),
+            _event("r", 1, EventType.RUN, {"intent": "do", "context_snapshot": {}}),
             _event(
                 "r",
                 2,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {
                     "plan_id": "p1",
                     "intent": "do",
@@ -235,12 +235,12 @@ class TestStepEvidenceProjection:
                     ],
                 },
             ),
-            _event("r", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "read"}),
-            _event("r", 4, EventType.TOOL_CALLED, {"tool_call_id": "tc1", "tool_name": "read", "input": {"x": 1}}),
+            _event("r", 3, EventType.STEP, {"plan_id": "p1", "step_id": "s1", "tool_name": "read"}),
+            _event("r", 4, EventType.TOOL, {"tool_call_id": "tc1", "tool_name": "read", "input": {"x": 1}}),
             _event(
                 "r",
                 5,
-                EventType.TOOL_COMPLETED,
+                EventType.TOOL,
                 {
                     "tool_call_id": "tc1",
                     "tool_name": "read",
@@ -252,15 +252,15 @@ class TestStepEvidenceProjection:
             _event(
                 "r",
                 6,
-                EventType.DAG_STEP_COMPLETED,
+                EventType.STEP,
                 {"plan_id": "p1", "step_id": "s1", "output_summary": "big", "status": "completed", "tool_call_id": "tc1"},
             ),
-            _event("r", 7, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s2", "tool_name": "http_request"}),
-            _event("r", 8, EventType.TOOL_CALLED, {"tool_call_id": "tc2", "tool_name": "http_request", "input": {}}),
+            _event("r", 7, EventType.STEP, {"plan_id": "p1", "step_id": "s2", "tool_name": "http_request"}),
+            _event("r", 8, EventType.TOOL, {"tool_call_id": "tc2", "tool_name": "http_request", "input": {}}),
             _event(
                 "r",
                 9,
-                EventType.TOOL_COMPLETED,
+                EventType.TOOL,
                 {
                     "tool_call_id": "tc2",
                     "tool_name": "http_request",
@@ -274,7 +274,7 @@ class TestStepEvidenceProjection:
             _event(
                 "r",
                 10,
-                EventType.DAG_STEP_COMPLETED,
+                EventType.STEP,
                 {
                     "plan_id": "p1",
                     "step_id": "s2",
@@ -307,11 +307,11 @@ class TestStepEvidenceProjection:
         # Given a run whose early TOOL events were pruned by ContextPruned
         # (compression trims only the LLM working view: tool_results/thoughts)
         events = [
-            _event("r", 1, EventType.RUN_STARTED, {"intent": "do", "context_snapshot": {}}),
+            _event("r", 1, EventType.RUN, {"intent": "do", "context_snapshot": {}}),
             _event(
                 "r",
                 2,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {
                     "plan_id": "p1",
                     "intent": "do",
@@ -320,27 +320,27 @@ class TestStepEvidenceProjection:
                     "steps": [{"step_id": "s1", "tool_name": "read", "status": "pending"}],
                 },
             ),
-            _event("r", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "read"}),
-            _event("r", 4, EventType.TOOL_CALLED, {"tool_call_id": "tc1", "tool_name": "read", "input": {"x": 1}}),
+            _event("r", 3, EventType.STEP, {"plan_id": "p1", "step_id": "s1", "tool_name": "read"}),
+            _event("r", 4, EventType.TOOL, {"tool_call_id": "tc1", "tool_name": "read", "input": {"x": 1}}),
             _event(
                 "r",
                 5,
-                EventType.TOOL_COMPLETED,
+                EventType.TOOL,
                 {"tool_call_id": "tc1", "tool_name": "read", "output": "content", "duration_ms": 2, "step_id": "s1"},
             ),
             _event(
                 "r",
                 6,
-                EventType.DAG_STEP_COMPLETED,
+                EventType.STEP,
                 {"plan_id": "p1", "step_id": "s1", "output_summary": "ok", "status": "completed", "tool_call_id": "tc1"},
             ),
             _event(
                 "r",
                 7,
-                EventType.CONTEXT_PRUNED,
-                {"pruned_event_refs": [4, 5], "pruned_token_count": 900, "pruned_seq_count": 2},
+                EventType.CONTEXT,
+                {"pruned_event_refs": [4, 5], "pruned_seq_count": 2},
             ),
-            _event("r", 8, EventType.RUN_COMPLETED, {"result_summary": "done"}),
+            _event("r", 8, EventType.RUN, {"result_summary": "done"}),
         ]
         # When projected after the prune at latest seq
         view = project_state_view(events, at_seq=8, latest_seq=8)
@@ -359,11 +359,11 @@ class TestStepEvidenceProjection:
     def test_evidence_at_midpoint_shows_running_not_terminal(self):
         # Given reconstruction as-of the step-started event (before completion)
         events = [
-            _event("r", 1, EventType.RUN_STARTED, {"intent": "do", "context_snapshot": {}}),
+            _event("r", 1, EventType.RUN, {"intent": "do", "context_snapshot": {}}),
             _event(
                 "r",
                 2,
-                EventType.PLAN_CREATED,
+                EventType.PLAN,
                 {
                     "plan_id": "p1",
                     "intent": "do",
@@ -372,7 +372,7 @@ class TestStepEvidenceProjection:
                     "steps": [{"step_id": "s1", "tool_name": "read", "status": "pending"}],
                 },
             ),
-            _event("r", 3, EventType.DAG_STEP_STARTED, {"plan_id": "p1", "step_id": "s1", "tool_name": "read"}),
+            _event("r", 3, EventType.STEP, {"plan_id": "p1", "step_id": "s1", "tool_name": "read"}),
         ]
         view = project_state_view(events, at_seq=3, latest_seq=3)
         assert len(view.step_evidence) == 1
@@ -380,7 +380,7 @@ class TestStepEvidenceProjection:
         assert view.step_evidence[0].step_normal is False
 
     def test_view_without_steps_has_empty_evidence(self):
-        events = [_event("r", 1, EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}})]
+        events = [_event("r", 1, EventType.RUN, {"intent": "x", "context_snapshot": {}})]
         view = project_state_view(events, at_seq=1, latest_seq=1)
         assert view.step_evidence == []
 

@@ -10,12 +10,10 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
-from uuid import uuid4
 
 from harness.core.dag_types import ExecState, StepResult
 from harness.core.dag_vars import VariableResolutionError, resolve_variables_in_input, truncate_output
 from harness.core.logger import agent_logger
-from harness.core.planner import PlanGuardrail
 from harness.execution.base import ExecutionBackend
 from harness.models.events import (
     DagStepCompletedPayload,
@@ -23,13 +21,10 @@ from harness.models.events import (
     DagStepSkippedPayload,
     DagStepStartedPayload,
     EventType,
-    PlanCompletedPayload,
-    PlanCreatedPayload,
-    PlanFailedPayload,
 )
 from harness.models.plan import DagPlan, DagStep
 from harness.models.workspace import Workspace
-from harness.storage.event_store import EventStore
+from harness.storage import EventStoreLike
 from harness.tools.executor import ExecutionStatus, ToolExecutor
 from harness.tools.registry import ToolRegistry, unknown_tool_message
 
@@ -77,7 +72,7 @@ class DagExecutor:
     def __init__(
         self,
         executor: ToolExecutor,
-        store: EventStore,
+        store: EventStoreLike,
         registry: ToolRegistry,
         max_parallel: int = 10,
         workspace: Workspace | None = None,
@@ -93,7 +88,6 @@ class DagExecutor:
         self._tool_semaphores: dict[str, asyncio.Semaphore] = {}
         self.workspace = workspace
         self.backend = backend
-        self._guardrail = PlanGuardrail(registry, store)
 
     def _tool_semaphore(self, tool_name: str, limit: int) -> asyncio.Semaphore:
         sem = self._tool_semaphores.get(tool_name)
@@ -103,90 +97,6 @@ class DagExecutor:
         return sem
 
     # ── Public API ──────────────────────────────────────────────────────
-
-    async def execute(self, run_id: str, plan: DagPlan) -> dict[str, StepResult]:
-        plan_id = f"plan_{run_id}_{uuid4().hex[:8]}"
-        errors = self._guardrail.validate(plan)
-        if errors:
-            await self.store.append_event(
-                run_id,
-                EventType.PLAN_FAILED,
-                PlanFailedPayload(
-                    plan_id=plan_id,
-                    completed_steps=0,
-                    total_layers=0,
-                    final_error="; ".join(errors),
-                ).model_dump(),
-            )
-            return {}
-        layers = plan.topological_sort()
-
-        _log.info("[plan] PlanCreated %s: %d steps in %d layers", plan_id, len(plan.steps), len(layers))
-        await self.store.append_event(
-            run_id,
-            EventType.PLAN_CREATED,
-            PlanCreatedPayload(
-                plan_id=plan_id,
-                intent=plan.intent,
-                steps_summary=f"{len(plan.steps)} steps in {len(layers)} layers",
-                layer_count=len(layers),
-                steps=plan_steps_to_payload(plan),
-            ).model_dump(),
-        )
-
-        all_results: dict[str, StepResult] = {}
-        total_completed = 0
-
-        for layer_idx, layer in enumerate(layers):
-            ok = await self._execute_layer(run_id, plan, plan_id, layer, layer_idx, layers, all_results)
-            completed_here = sum(1 for sid in layer if sid in all_results and all_results[sid].step_normal)
-            hard_completed = sum(1 for sid in layer if sid in all_results and all_results[sid].is_completed)
-            unsuccess_here = sum(1 for sid in layer if sid in all_results and all_results[sid].is_unsuccessful)
-            total_completed += completed_here
-            _log.info(
-                "[semantic] [layer %d/%d] normal=%d hard=%d unsuccessful=%d",
-                layer_idx + 1,
-                len(layers),
-                completed_here,
-                hard_completed,
-                unsuccess_here,
-            )
-            if not ok:
-                completed_count = sum(1 for r in all_results.values() if r.step_normal)
-                failed = [(sid, r.error or "unknown") for sid, r in all_results.items() if r.is_failed]
-                if failed:
-                    first_error = failed[0][1]
-                    await self.store.append_event(
-                        run_id,
-                        EventType.PLAN_FAILED,
-                        PlanFailedPayload(
-                            plan_id=plan_id,
-                            completed_steps=completed_count,
-                            total_layers=len(layers),
-                            final_error=first_error,
-                        ).model_dump(),
-                    )
-                return all_results
-
-        _log.info(
-            "[plan] PlanCompleted %s: %d/%d steps across %d layers",
-            plan_id,
-            total_completed,
-            len(plan.steps),
-            len(layers),
-        )
-        await self.store.append_event(
-            run_id,
-            EventType.PLAN_COMPLETED,
-            PlanCompletedPayload(
-                plan_id=plan_id,
-                completed_steps=total_completed,
-                total_layers=len(layers),
-                summary=f"Completed {total_completed}/{len(plan.steps)} steps across {len(layers)} layers",
-            ).model_dump(),
-        )
-
-        return all_results
 
     async def execute_layer(
         self,
@@ -253,7 +163,7 @@ class DagExecutor:
                 _log.warning("[gate] [layer %d/%d] %s SKIPPED — %s", layer_idx + 1, len(layers), sid, reason)
                 await self.store.append_event(
                     run_id,
-                    EventType.DAG_STEP_SKIPPED,
+                    EventType.STEP,
                     DagStepSkippedPayload(
                         plan_id=plan_id,
                         step_id=sid,
@@ -272,7 +182,7 @@ class DagExecutor:
             if step:
                 await self.store.append_event(
                     run_id,
-                    EventType.DAG_STEP_STARTED,
+                    EventType.STEP,
                     DagStepStartedPayload(
                         plan_id=plan_id,
                         step_id=sid,
@@ -295,12 +205,16 @@ class DagExecutor:
         any_failed = False
         pending_confirmations: list[tuple[str, str]] = []
         for sid, raw in zip(exec_layer, results):
-            if isinstance(raw, Exception):
+            if isinstance(raw, BaseException):
+                # return_exceptions=True yields BaseException; non-Exception
+                # (CancelledError etc.) must propagate, not become a StepResult.
+                if not isinstance(raw, Exception):
+                    raise raw
                 error = f"DagExecutor layer {layer_idx}: {raw}"
                 _log.error("[fail] step=%s error=%s", sid, error)
                 await self.store.append_event(
                     run_id,
-                    EventType.DAG_STEP_FAILED,
+                    EventType.STEP,
                     DagStepFailedPayload(
                         plan_id=plan_id,
                         step_id=sid,
@@ -317,7 +231,7 @@ class DagExecutor:
                 _log.info("[step] %s completed — %.200s%s", sid, raw.summary, "..." if len(raw.summary) > 200 else "")
                 await self.store.append_event(
                     run_id,
-                    EventType.DAG_STEP_COMPLETED,
+                    EventType.STEP,
                     DagStepCompletedPayload(
                         plan_id=plan_id,
                         step_id=sid,
@@ -331,7 +245,7 @@ class DagExecutor:
                 _log.info("[step] %s idempotent (cached) — %s", sid, raw.summary)
                 await self.store.append_event(
                     run_id,
-                    EventType.DAG_STEP_COMPLETED,
+                    EventType.STEP,
                     DagStepCompletedPayload(
                         plan_id=plan_id,
                         step_id=sid,
@@ -352,7 +266,7 @@ class DagExecutor:
                 )
                 await self.store.append_event(
                     run_id,
-                    EventType.DAG_STEP_COMPLETED,
+                    EventType.STEP,
                     DagStepCompletedPayload(
                         plan_id=plan_id,
                         step_id=sid,
@@ -362,7 +276,7 @@ class DagExecutor:
                         tool_call_id=raw.tool_call_id,
                     ).model_dump(),
                 )
-            elif raw.needs_confirmation:
+            elif raw.confirmation_id is not None:
                 all_results[sid] = raw
                 cid = raw.confirmation_id
                 pending_confirmations.append((sid, cid))
@@ -378,7 +292,7 @@ class DagExecutor:
                 )
                 await self.store.append_event(
                     run_id,
-                    EventType.DAG_STEP_SKIPPED,
+                    EventType.STEP,
                     DagStepSkippedPayload(
                         plan_id=plan_id,
                         step_id=sid,
@@ -393,7 +307,7 @@ class DagExecutor:
                 any_failed = True
                 await self.store.append_event(
                     run_id,
-                    EventType.DAG_STEP_FAILED,
+                    EventType.STEP,
                     DagStepFailedPayload(
                         plan_id=plan_id,
                         step_id=sid,
@@ -480,9 +394,9 @@ class DagExecutor:
         # v2.2 (D8): upstream injection uses step_normal — UNSUCCESSFUL (non-probe)
         # results are not injected (their downstream is gated above anyway).
         upstream: dict[str, Any] = {}
-        for sid, result in all_results.items():
-            if isinstance(result, StepResult) and result.step_normal:
-                upstream[sid] = result.output
+        for sid, r in all_results.items():
+            if isinstance(r, StepResult) and r.step_normal:
+                upstream[sid] = r.output
 
         # Legacy key mapping: older plans/tools may reference $step_id_result
         for dep_id in step.depends_on:

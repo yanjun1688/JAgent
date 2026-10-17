@@ -193,15 +193,14 @@ def _run_completed_payload(verdict) -> RunCompletedPayload:
         result_summary="done",
         all_normal=verdict.mechanical_complete,
         unmet_step_ids=verdict.unmet_step_ids,
-        deliverable_met=verdict.deliverable_met,
         deliverable_status=verdict.deliverable_status,
         deliverable_summary=[asdict(d) for d in verdict.deliverables],
     )
 
 
 async def _fold_with_run_completed(store, payload):
-    await store.append_event("r", EventType.RUN_STARTED, {"intent": "t"})
-    await store.append_event("r", EventType.RUN_COMPLETED, payload.model_dump())
+    await store.append_event("r", EventType.RUN, {"intent": "t"})
+    await store.append_event("r", EventType.RUN, payload.model_dump())
     return fold_events(await store.get_events("r"))
 
 
@@ -223,7 +222,6 @@ async def test_fold_exposes_deliverable_status(store):
     results = _results({"s1": ExecState.COMPLETED})
     verdict = PlanningExecutorScheduler._completion_gate(plan, results, contracts=contracts)
     state = await _fold_with_run_completed(store, _run_completed_payload(verdict))
-    assert state.completion_evidence["deliverable_met"] is True
     assert state.completion_evidence["deliverable_status"] == "met"
 
 
@@ -233,7 +231,6 @@ async def test_fold_exposes_unverified_marking(store):
     results = _results({"s1": ExecState.COMPLETED})
     verdict = PlanningExecutorScheduler._completion_gate(plan, results, contracts=[])
     state = await _fold_with_run_completed(store, _run_completed_payload(verdict))
-    assert state.completion_evidence["deliverable_met"] is False
     assert state.completion_evidence["deliverable_status"] == "unverified"
 
 
@@ -259,7 +256,7 @@ async def test_e2e_planner_dropping_write_never_claims_deliverable(store):
     executor = ToolExecutor(store)
     dag = DagExecutor(executor, store, registry)
 
-    sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=SchedulerConfig(max_iterations=5))
+    sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=SchedulerConfig(run_attempt_budget=5))
 
     async def fake_plan(intent, state=None, feedback=None, conversation_context="", run_id=None):
         # Planner 弱化：只生成 read，丢掉 write
@@ -282,7 +279,7 @@ async def test_e2e_planner_dropping_write_never_claims_deliverable(store):
     ]
     await store.append_event(
         "r1",
-        EventType.RUN_STARTED,
+        EventType.RUN,
         {
             "intent": "create and read blackbox.txt",
             "intent_raw": "create and read blackbox.txt",
@@ -293,7 +290,7 @@ async def test_e2e_planner_dropping_write_never_claims_deliverable(store):
     state = await sched.run("r1", "create and read blackbox.txt")
     assert state.status == RunStatus.FAILED
     evidence = state.completion_evidence or {}
-    assert evidence.get("deliverable_met") is not True
+    assert evidence.get("deliverable_status") != "met"
 
 
 @pytest.mark.asyncio
@@ -316,7 +313,7 @@ async def test_tail_deliverable_fail_emits_plan_failed_and_run_failed(store):
     executor = ToolExecutor(store)
     dag = DagExecutor(executor, store, registry)
 
-    sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=SchedulerConfig(max_iterations=5))
+    sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=SchedulerConfig(run_attempt_budget=5))
 
     async def fake_plan(intent, state=None, feedback=None, conversation_context="", run_id=None):
         # 弱化 Planner：只写 other.txt，完全没碰契约要求的 blackbox.txt
@@ -341,7 +338,7 @@ async def test_tail_deliverable_fail_emits_plan_failed_and_run_failed(store):
     ]
     await store.append_event(
         "r2",
-        EventType.RUN_STARTED,
+        EventType.RUN,
         {
             "intent": "create and read blackbox.txt",
             "intent_raw": "create and read blackbox.txt",
@@ -351,10 +348,17 @@ async def test_tail_deliverable_fail_emits_plan_failed_and_run_failed(store):
     state = await sched.run("r2", "create and read blackbox.txt")
     assert state.status == RunStatus.FAILED, "机械全 normal 但契约 unmet 仍必须 fail（绝不假绿）"
     evidence = state.completion_evidence or {}
-    assert evidence.get("deliverable_met") is not True
+    assert evidence.get("deliverable_status") != "met"
 
-    seqs = {e.event_type: e.seq for e in await store.get_events("r2")}
-    assert EventType.PLAN_FAILED in seqs, "tail deliverable 失败应统一发 PLAN_FAILED（review #2 收敛）"
-    assert seqs[EventType.PLAN_FAILED] < seqs[EventType.RUN_FAILED], "PLAN_FAILED 应先于 RUN_FAILED"
-    assert EventType.PLAN_COMPLETED not in seqs, "契约未达成不得发 PLAN_COMPLETED"
-    assert EventType.RUN_COMPLETED not in seqs, "契约未达成不得 RunCompleted"
+    events = await store.get_events("r2")
+    plan_failed = [e for e in events if (e.event_type == EventType.PLAN and e.phase == "failed")]
+    run_failed = [e for e in events if (e.event_type == EventType.RUN and e.phase == "failed")]
+    assert plan_failed, "tail deliverable 失败应统一发 PLAN_FAILED（review #2 收敛）"
+    assert run_failed, "契约未达成必须发 RUN_FAILED"
+    assert plan_failed[0].seq < run_failed[0].seq, "PLAN_FAILED 应先于 RUN_FAILED"
+    assert not any(
+        (e.event_type == EventType.PLAN and e.phase == "completed") for e in events
+    ), "契约未达成不得发 PLAN_COMPLETED"
+    assert not any(
+        (e.event_type == EventType.RUN and e.phase == "completed") for e in events
+    ), "契约未达成不得 RunCompleted"

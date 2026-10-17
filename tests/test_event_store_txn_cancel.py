@@ -38,7 +38,7 @@ async def test_append_after_cancel_during_commit_leaves_no_open_transaction(stor
     task = asyncio.create_task(
         store.append_event(
             "run-cancel",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "x", "context_snapshot": {}},
         )
     )
@@ -59,7 +59,7 @@ async def test_append_after_cancel_during_commit_leaves_no_open_transaction(stor
     follow_up = await store.append_event(
         "run-cancel",
         EventType.AGENT_THOUGHT,
-        {"thought": "after cancel", "token_count": 1},
+        {"thought": "after cancel"},
     )
     assert follow_up.seq == 1
     rows = await store.get_events("run-cancel")
@@ -80,7 +80,7 @@ async def test_cancelled_append_releases_write_lock(store: EventStore):
     task = asyncio.create_task(
         store.append_event(
             "run-lock",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "x", "context_snapshot": {}},
         )
     )
@@ -99,7 +99,7 @@ async def test_cancelled_append_releases_write_lock(store: EventStore):
         store.append_event(
             "run-lock",
             EventType.AGENT_THOUGHT,
-            {"thought": "lock free", "token_count": 1},
+            {"thought": "lock free"},
         ),
         timeout=2,
     )
@@ -140,7 +140,7 @@ async def test_cancel_when_begin_queued_but_not_executed_closes_transaction(stor
     task = asyncio.create_task(
         store.append_event(
             "run-queued",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "x", "context_snapshot": {}},
         )
     )
@@ -159,7 +159,7 @@ async def test_cancel_when_begin_queued_but_not_executed_closes_transaction(stor
         store.append_event(
             "run-queued",
             EventType.AGENT_THOUGHT,
-            {"thought": "watchdog terminal write", "token_count": 1},
+            {"thought": "watchdog terminal write"},
         ),
         timeout=2,
     )
@@ -176,7 +176,7 @@ async def test_cancel_when_begin_queued_then_repeated_cancels_still_closes(store
     task = asyncio.create_task(
         store.append_event(
             "run-queued2",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             {"intent": "x", "context_snapshot": {}},
         )
     )
@@ -195,7 +195,7 @@ async def test_cancel_when_begin_queued_then_repeated_cancels_still_closes(store
         store.append_event(
             "run-queued2",
             EventType.AGENT_THOUGHT,
-            {"thought": "watchdog terminal write", "token_count": 1},
+            {"thought": "watchdog terminal write"},
         ),
         timeout=2,
     )
@@ -214,7 +214,7 @@ async def test_append_self_heals_from_orphaned_open_transaction(store: EventStor
         store.append_event(
             "run-orphan",
             EventType.AGENT_THOUGHT,
-            {"thought": "write despite orphaned txn", "token_count": 1},
+            {"thought": "write despite orphaned txn"},
         ),
         timeout=2,
     )

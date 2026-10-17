@@ -19,7 +19,7 @@ def _echo_def() -> ToolDefinition:
     return ToolDefinition(
         name="echo",
         description="e",
-        input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
+        input_schema={"type": "object", "properties": {"msg": {"type": "string", "x-role": "data"}}},
         output_schema={"type": "object", "properties": {"echo": {"type": "string"}}},
         side_effects=[],
     )
@@ -101,7 +101,7 @@ def test_additional_properties_lenient(registry):
     td = ToolDefinition(
         name="flex",
         description="f",
-        input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
+        input_schema={"type": "object", "properties": {"msg": {"type": "string", "x-role": "data"}}},
         output_schema={"type": "object", "additionalProperties": True},
         side_effects=[],
     )
@@ -118,7 +118,9 @@ def test_additional_properties_lenient(registry):
 # ── C-04: ref_allowed per field ──────────────────────────────────
 
 
-def test_file_op_content_reference_rejected(registry):
+def test_file_op_content_reference_allowed(registry):
+    # T-R8b field-role contract: content is a DATA sink (x-role: data) → a $ref
+    # may flow in (this was the root-cause A deadlock: fetch → save to file).
     plan = _plan(
         DagStep(id="s1", tool="echo", input={"msg": "hello"}),
         DagStep(
@@ -128,8 +130,7 @@ def test_file_op_content_reference_rejected(registry):
             depends_on=["s1"],
         ),
     )
-    errors = parse_output_refs(plan, registry=registry)
-    assert any("'content' does not allow" in e for e in errors)
+    assert parse_output_refs(plan, registry=registry) == []
 
 
 def test_file_op_path_reference_rejected(registry):

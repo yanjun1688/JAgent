@@ -1,7 +1,7 @@
 """Trusted monitoring component — subscribes to Event Store, injects feedback.
 
 RunMonitor is a trusted component. It listens to EventStore.on_append callbacks
-in real time, detects anomalies (consecutive failures, token overuse), and writes
+in real time, detects anomalies (consecutive failures, repeated calls), and writes
 FeedbackInjected events into the Event Store. The Scheduler pulls these feedbacks
 before each THINK step and injects them into the Agent's System Prompt.
 
@@ -11,6 +11,7 @@ The Agent never knows about the monitoring mechanism — feedback appears like
 
 from __future__ import annotations
 
+from typing import Literal
 from urllib.parse import urlparse
 
 from harness.core.fold import fold_events
@@ -36,7 +37,6 @@ class RunMonitor:
 
     Detection rules:
       - Consecutive failures: 3+ ToolFailed/GuardrailTriggered in a row
-      - Token overuse: estimated tokens exceed max_tokens * warning_ratio
       - Repeated identical tool calls: 3+ identical (tool, input_hash, output_hash)
 
     All feedbacks are written as FeedbackInjected events to EventStore,
@@ -46,17 +46,11 @@ class RunMonitor:
     def __init__(
         self,
         store: EventStore,
-        max_tokens: int = 5000,
-        token_warning_ratio: float = 0.8,
     ) -> None:
         self.store = store
-        self.max_tokens = max_tokens
-        self.token_warning_ratio = token_warning_ratio
 
         self._consecutive_failures: dict[str, int] = {}
         self._consecutive_per_ep: dict[str, dict[str, int]] = {}
-        self._token_totals: dict[str, int] = {}
-        self._token_warning_sent: set[str] = set()
 
         self._pending_calls: dict[str, dict[str, tuple[str, int, str]]] = {}
         self._last_sig: dict[str, tuple[str, int, int] | None] = {}
@@ -90,7 +84,9 @@ class RunMonitor:
         _log_observe.debug("Event: seq=%d type=%s", event.seq, event.event_type.value)
 
         # ── Unified failure tracking (TOOL_FAILED + GUARDRAIL_TRIGGERED + DAG_STEP_FAILED) ──────
-        if event.event_type in (EventType.TOOL_FAILED, EventType.GUARDRAIL_TRIGGERED, EventType.DAG_STEP_FAILED):
+        if (event.event_type == EventType.TOOL and event.phase in ("failed", "blocked")) or (
+            event.event_type == EventType.STEP and event.phase == "failed"
+        ):
             tool = event.payload.get("tool_name", "?")
             error = event.payload.get("error", "")
             error_type = self._extract_error_type(error)
@@ -147,11 +143,11 @@ class RunMonitor:
                     ),
                 )
                 await self._check_and_inject_feedback(
-                    rid, tool, ep_key, error_type, event.event_type, error_detail=error
+                    rid, tool, ep_key, error_type, event.event_type, event.phase, error_detail=error
                 )
 
         # ── Repeated identical tool call detection ────────────────────────────
-        elif event.event_type == EventType.TOOL_CALLED:
+        elif event.event_type == EventType.TOOL and event.phase == "called":
             tc_id = event.payload.get("tool_call_id", "")
             t_name = event.payload.get("tool_name", "")
             input_dict = event.payload.get("input", {}) or {}
@@ -160,7 +156,7 @@ class RunMonitor:
             ep_key = self._endpoint_key(t_name, url)
             self._pending_calls.setdefault(rid, {})[tc_id] = (t_name, inp_hash, ep_key)
 
-        elif event.event_type == EventType.TOOL_COMPLETED:
+        elif event.event_type == EventType.TOOL and event.phase == "completed":
             tc_id = event.payload.get("tool_call_id", "")
             tool_name = event.payload.get("tool_name", "")
             tc_info = self._pending_calls.get(rid, {}).pop(tc_id, None)
@@ -212,7 +208,7 @@ class RunMonitor:
                         ),
                     )
                     await self._check_and_inject_feedback(
-                        rid, tool_name, ep_key, error_type, event.event_type, error_detail=err_text
+                        rid, tool_name, ep_key, error_type, event.event_type, event.phase, error_detail=err_text
                     )
                 _log_anomaly.info(
                     "UNSUCCESSFUL accumulated %s",
@@ -278,13 +274,13 @@ class RunMonitor:
             if tc_info is not None:
                 inp_hash_val = tc_info[1]
                 out_hash = hash(str(event.payload.get("output")))
-                new_sig = (ep_key, inp_hash_val, out_hash)
-                last_sig = self._last_sig.get(rid)
-                if new_sig == last_sig:
+                new_call_sig = (ep_key, inp_hash_val, out_hash)
+                last_call_sig = self._last_sig.get(rid)
+                if new_call_sig == last_call_sig:
                     self._repeated_call_count[rid] = self._repeated_call_count.get(rid, 0) + 1
                 else:
                     self._repeated_call_count[rid] = 0
-                    self._last_sig[rid] = new_sig
+                    self._last_sig[rid] = new_call_sig
                     self._stuck_feedback_sent[rid] = 0
                 count = self._repeated_call_count[rid]
                 if count >= 3 and count % 3 == 0:
@@ -307,31 +303,6 @@ class RunMonitor:
                             expires_at_seq=event.seq + 50,
                         )
 
-        # ── Token overuse detection ──────────────────────────────────────────
-        if event.event_type == EventType.AGENT_THOUGHT:
-            thought_text = event.payload.get("thought", "") if isinstance(event.payload, dict) else ""
-            tokens = max(1, int(len(thought_text) * 0.25))
-            self._token_totals[rid] = self._token_totals.get(rid, 0) + tokens
-            threshold = int(self.max_tokens * self.token_warning_ratio)
-            _log_anomaly.debug("Token total: ~%d (threshold: %d)", self._token_totals[rid], threshold)
-            if self._token_totals[rid] > threshold and rid not in self._token_warning_sent:
-                _log_anomaly.warning(
-                    "Anomaly: ~%d tokens exceeds %d (%.0f%%), injecting medium-priority feedback",
-                    self._token_totals[rid],
-                    threshold,
-                    self.token_warning_ratio * 100,
-                )
-                self._token_warning_sent.add(rid)
-                await self._inject_feedback(
-                    rid,
-                    "medium",
-                    feedback_text=f"Token warning: approximately {self._token_totals[rid]} tokens consumed "
-                    f"({int(self.token_warning_ratio * 100)}% threshold reached). "
-                    "Consider simplifying subsequent steps.",
-                    category=FeedbackCategory.TOKEN_WARNING,
-                    expires_at_seq=event.seq + 30,
-                )
-
     # ── Unified injection logic (per-tool, no dominant derivation) ──────────
 
     async def _check_and_inject_feedback(
@@ -341,6 +312,7 @@ class RunMonitor:
         ep_key: str,
         error_type: str,
         event_type: EventType,
+        phase: str | None,
         error_detail: str = "",
     ) -> None:
         err_map = self._failure_error_map.get(rid, {}).get(tool, {})
@@ -349,13 +321,12 @@ class RunMonitor:
         if total_errors == 0:
             return
 
-        dominant_error = max(err_map, key=err_map.get)
-        err_map[dominant_error]
+        dominant_error = max(err_map, key=lambda k: err_map[k])
 
         current_seq = self._last_seen_seq.get(rid, 0)
         category = (
             FeedbackCategory.GUARDRAIL_TRIGGERED
-            if event_type == EventType.GUARDRAIL_TRIGGERED
+            if event_type == EventType.TOOL and phase == "blocked"
             else FeedbackCategory.TOOL_FAILURE
         )
 
@@ -511,7 +482,7 @@ class RunMonitor:
     async def _inject_feedback(
         self,
         run_id: str,
-        priority: str,
+        priority: Literal["high", "medium", "low"],
         feedback_text: str,
         *,
         source: FeedbackSource = FeedbackSource.MONITOR,
@@ -585,8 +556,6 @@ class RunMonitor:
             "consecutive_per_endpoint": dict(per_ep),
             "failures_per_tool": dict(per_tool),
             "failure_error_map": err_map,
-            "estimated_tokens": self._token_totals.get(rid, 0),
-            "token_warning_sent": rid in self._token_warning_sent,
             "repeated_call_count": self._repeated_call_count.get(rid, 0),
             "repeated_fail_count": self._repeat_fail_count.get(rid, 0),
             "stuck_feedback_sent": self._stuck_feedback_sent.get(rid, 0),
@@ -594,15 +563,11 @@ class RunMonitor:
             if rid in self._fed_ep_keys
             else [],
             "pending_calls": len(self._pending_calls.get(rid, {})),
-            "config": {
-                "max_tokens": self.max_tokens,
-                "token_warning_ratio": self.token_warning_ratio,
-            },
         }
 
     def _global_state(self) -> dict:
         monitored_runs = (
-            set(self._consecutive_failures.keys()) | set(self._token_totals.keys()) | set(self._pending_calls.keys())
+            set(self._consecutive_failures.keys()) | set(self._pending_calls.keys())
         )
         runs: list[dict] = []
         for rid in sorted(monitored_runs):
@@ -611,8 +576,6 @@ class RunMonitor:
                     "run_id": rid,
                     "last_seen_seq": self._last_seen_seq.get(rid),
                     "consecutive_failures": self._consecutive_failures.get(rid, 0),
-                    "estimated_tokens": self._token_totals.get(rid, 0),
-                    "token_warning_sent": rid in self._token_warning_sent,
                     "endpoints_tracked": len(self._consecutive_per_ep.get(rid, {})),
                     "tools_with_failures": len(self._failures_per_tool.get(rid, {})),
                     "deduped_feedback_count": len(self._fed_ep_keys.get(rid, set())),
@@ -621,10 +584,6 @@ class RunMonitor:
         return {
             "monitored_run_count": len(runs),
             "runs": runs,
-            "config": {
-                "max_tokens": self.max_tokens,
-                "token_warning_ratio": self.token_warning_ratio,
-            },
         }
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
@@ -633,12 +592,10 @@ class RunMonitor:
         """Release per-run state when a run finishes or is cancelled."""
         pending_count = len(self._pending_calls.get(run_id, {}))
         was_ep_entries = self._consecutive_per_ep.pop(run_id, None)
-        was_tokens = self._token_totals.pop(run_id, None)
         self._pending_calls.pop(run_id, None)
         self._last_sig.pop(run_id, None)
         self._repeated_call_count.pop(run_id, None)
         self._stuck_feedback_sent.pop(run_id, None)
-        self._token_warning_sent.discard(run_id)
         self._failures_per_tool.pop(run_id, None)
         self._failure_error_map.pop(run_id, None)
         self._captured_ep_key.pop(run_id, None)
@@ -653,7 +610,6 @@ class RunMonitor:
             "Cleaned up run %s %s",
             run_id,
             fmtkv(
-                token_total=was_tokens,
                 pending_calls=pending_count,
                 error_map_entries=err_map_entries,
                 tracked_endpoints=ep_keys,

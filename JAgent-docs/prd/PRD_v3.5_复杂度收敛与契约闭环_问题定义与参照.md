@@ -66,6 +66,7 @@ Harness 的内核设计（受信/非受信边界、证据不因压缩丢失、fa
   Q-07 watchdog、幂等+语义重试共享预算……单组件接缝极多。
 - **B3 同类"兜底"多层叠加**：未知工具的拦截同时由 revision invariants → PlanGuardrail → dag_executor
   三层保证（见 Q-06 review 的"三层兜底"论述）——每层都对，但任何一层被单独调用即成真洞，靠隐式顺序依赖。
+  > **处置注记（2026-10-02，R5）**：第三层复检原只存在于生产不调用的 `DagExecutor.execute()`，已移入生产真实接缝——`scheduler/plan.py` 每次进入 layer 循环前强制 `guardrail.validate(plan)`（首次/修订/local-repair 重入均覆盖）；`execute()` 第二份编排实现已删除。三层兜底不再依赖隐式顺序。
 - **B4 每加一个概念的边际成本是线性叠加的**：要同步架构文档 + AGENTS 校验清单（§6.3 人肉）+ 前后端枚举 +
   事件 payload + 测试 pin + OpenAPI。概念越多，同步链越长，漂移概率越高。
 - **B5 两条主路径并存**：Mock 与 Real LLM 客户端、文本/function-calling 双路径、serial/planning 双调度器；
@@ -225,3 +226,20 @@ Harness 的内核设计（受信/非受信边界、证据不因压缩丢失、fa
 不是再来一轮大重构（你现在的状态经不起），而是*"冻结新功能 + 删除配额"跑两三个迭代*：每个迭代砍掉一个非内核概念或合并一份副本，砍完跑全量。两三个迭代后你会发现维护面肉眼可见地小一圈。别重写——你的内核是对的，重写只会把已经验证过的正确性丢掉。
 最后一句实话
 这套系统是你和 AI 协作维护的。那就要为"AI 可维护性"设计：单一真源、小文件、显式契约、CI 能自动判错的规则——因为这些正是让 AI 不漂移的东西。你现在的文档很厚，但文档是"给人防漂移"的；把防漂移从文档搬进 CI 和类型系统，才是让你真正喘过气来的方向。
+
+---
+
+## 处置注记（2026-10-04，R4 关闭）
+
+owner 裁决：**删除全部 token 记账功能，仅保留驱动压缩触发的 token 估算器**。
+
+1. **删除（记账，生产恒为 0 / 零消费）**：
+   - Run 级记账：`AgentThoughtPayload.token_count`、`ThinkResult.token_count`、`ThoughtEntry.token_count`；analysis 的 token_sum SQL 与 `DashboardOverview.total_tokens_consumed`、`RunAnalysisSummary.total_tokens`；前端两处展示。
+   - 压缩内部遥测（零消费）：`Episode.original_tokens/compressed_tokens`、`EpisodeArchivedPayload` 同名字段、`ContextPrunedPayload.pruned_token_count`、`ContextCheckpointedPayload.token_count`。
+   - run_monitor 的 token 过量检测块及 `FeedbackCategory.TOKEN_WARNING`（短上下文时代遗物）。
+2. **保留（驱动压缩）**：`token_counter.py` 估算器（tiktoken / heuristic / provider）与 `context_manager` 的触发估算。
+3. **阈值调大**：窗口基准 128K→**200K**、安全系数 0.7→**0.8** → 默认限额 **160K**；默认比例 lazy/archive/emergency = **0.6 / 0.8 / 0.95** → 边界 96K / 128K / 152K。
+4. **估算补全（C1 漏算收口）**：已归档的 `state.summary`（最新 Episode 经 `to_context_text()` 渲染文本）纳入压缩触发估算。
+5. **提示词重写**：`_SUMMARIZE_PROMPT` 按"episodic memory writer + 保真契约 + JSON 输出契约"范式重写；摘要 `max_tokens` 2048→4096。
+6. 成本可观测性继续走厂商计量（Langfuse），与 §3 owner 裁决一致。
+7. 破坏性 schema 变更：本地 `.harness.db` 删除重建。机器门禁与测试设计见 `tests/test_token_accounting_removed.py`。

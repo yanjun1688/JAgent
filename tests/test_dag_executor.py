@@ -14,6 +14,8 @@ from harness.storage.event_store import EventStore
 from harness.tools.executor import ToolExecutor
 from harness.tools.registry import ToolRegistry, unknown_tool_message
 
+from tests.dag_layer_runner import run_plan_layers
+
 
 @pytest.fixture
 async def store():
@@ -28,7 +30,7 @@ def echo_def():
     return ToolDefinition(
         name="echo",
         description="Echo input",
-        input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
+        input_schema={"type": "object", "properties": {"msg": {"type": "string", "x-role": "data"}}},
         output_schema={"type": "object"},
         idempotency_key_fields=["msg"],
         side_effects=[],
@@ -54,7 +56,7 @@ def nested_echo_def():
     return ToolDefinition(
         name="nested_echo",
         description="Echo input with nested output body.uuid",
-        input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
+        input_schema={"type": "object", "properties": {"msg": {"type": "string", "x-role": "data"}}},
         output_schema={"type": "object"},
         idempotency_key_fields=["msg"],
         side_effects=[],
@@ -97,7 +99,7 @@ class TestDagExecutorBasic:
                 DagStep(id="s3", tool="echo", input={"msg": "c"}),
             ],
         )
-        results = await dag.execute("run-1", plan)
+        results = await run_plan_layers(dag, "run-1", plan)
         assert len(results) == 3
         for sid in ("s1", "s2", "s3"):
             assert results[sid].output_available
@@ -121,27 +123,16 @@ class TestDagExecutorBasic:
                 DagStep(id="s1", tool="echo", input={"msg": "first"}),
             ],
         )
-        await dag.execute("run-3", plan)
+        await run_plan_layers(dag, "run-3", plan)
         events = await store.get_events("run-3")
-        dag_started = [e for e in events if e.event_type == EventType.DAG_STEP_STARTED]
-        dag_completed = [e for e in events if e.event_type == EventType.DAG_STEP_COMPLETED]
+        dag_started = [e for e in events if (e.event_type == EventType.STEP and e.phase == "started")]
+        dag_completed = [e for e in events if (e.event_type == EventType.STEP and e.phase == "completed")]
         assert len(dag_started) == 1
         assert len(dag_completed) == 1
         assert dag_started[0].seq < dag_completed[0].seq
 
 
 class TestDagExecutorEdgeCases:
-    async def test_unknown_tool_returns_error(self, store, executor, registry):
-        dag = DagExecutor(executor, store, registry)
-        plan = DagPlan(
-            intent="test unknown tool",
-            steps=[DagStep(id="s1", tool="nonexistent", input={})],
-        )
-        results = await dag.execute("run-edge-1", plan)
-        assert results == {}
-        events = await store.get_events("run-edge-1")
-        assert any(event.event_type == EventType.PLAN_FAILED for event in events)
-
     async def test_execute_step_unknown_tool_fail_closed_with_shared_fragment(self, store, executor, registry):
         """R7 #4 execution-time defense in depth: an unknown tool at step
         execution returns a FAILED StepResult whose message keeps this seam's
@@ -171,7 +162,7 @@ class TestDagExecutorEdgeCases:
                 DagStep(id="s2", tool="echo", input={"msg": ""}, depends_on=["s1"]),
             ],
         )
-        results = await dag.execute("run-edge-2", plan)
+        results = await run_plan_layers(dag, "run-edge-2", plan)
         assert results["s1"].output_available
         assert results["s2"].output_available
 
@@ -340,7 +331,7 @@ class TestDagExecutorConfirmationPhase2:
         return ToolDefinition(
             name="confirm_echo",
             description="Echo that requires confirmation",
-            input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
+            input_schema={"type": "object", "properties": {"msg": {"type": "string", "x-role": "data"}}},
             output_schema={"type": "object"},
             idempotency_key_fields=["msg"],
             requires_confirmation=True,
@@ -395,9 +386,9 @@ class TestDagExecutorConfirmationPhase2:
         # The CONFIRMATION_REQUESTED event should have been written by executor
         events = await store.get_events("run-conf-2")
         types = [e.event_type for e in events]
-        assert EventType.CONFIRMATION_REQUESTED in types
+        assert EventType.CONFIRMATION in types
         # No DAG_STEP_FAILED should have been written for the suspended step
-        assert EventType.DAG_STEP_FAILED not in types
+        assert not any((e.event_type == EventType.STEP and e.phase == "failed") for e in events)
 
     async def test_retry_step_after_confirmation(self, store, executor, registry_with_confirm):
         """retry_step succeeds after CONFIRMATION_RECEIVED is written."""
@@ -422,7 +413,7 @@ class TestDagExecutorConfirmationPhase2:
         # Simulate operator confirmation
         await store.append_event(
             "run-conf-3",
-            EventType.CONFIRMATION_RECEIVED,
+            EventType.CONFIRMATION,
             ConfirmationReceivedPayload(
                 confirmation_id=confirmation_id,
                 confirmed=True,
@@ -478,7 +469,7 @@ class TestDagExecutorConfirmationPhase2:
         # Operator denies confirmation
         await store.append_event(
             "plan-deny",
-            EventType.CONFIRMATION_RECEIVED,
+            EventType.CONFIRMATION,
             ConfirmationReceivedPayload(
                 confirmation_id=confirmation_id,
                 confirmed=False,
@@ -497,7 +488,7 @@ class TestDagExecutorConfirmationPhase2:
         confirm_def_a = ToolDefinition(
             name="confirm_a",
             description="A",
-            input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
+            input_schema={"type": "object", "properties": {"msg": {"type": "string", "x-role": "data"}}},
             output_schema={"type": "object"},
             idempotency_key_fields=["msg"],
             requires_confirmation=True,
@@ -508,7 +499,7 @@ class TestDagExecutorConfirmationPhase2:
         confirm_def_b = ToolDefinition(
             name="confirm_b",
             description="B",
-            input_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
+            input_schema={"type": "object", "properties": {"msg": {"type": "string", "x-role": "data"}}},
             output_schema={"type": "object"},
             idempotency_key_fields=["msg"],
             requires_confirmation=True,
@@ -552,7 +543,7 @@ class TestDagExecutorConfirmationPhase2:
         for sid_i, cid_i in exc_info.value.confirmations:
             await store.append_event(
                 "run-multi-confirm",
-                EventType.CONFIRMATION_RECEIVED,
+                EventType.CONFIRMATION,
                 ConfirmationReceivedPayload(
                     confirmation_id=cid_i,
                     confirmed=True,
@@ -587,7 +578,7 @@ class TestDagExecutorVariableIntegration:
                 DagStep(id="s2", tool="echo", input={"msg": "$s1.echo"}, depends_on=["s1"]),
             ],
         )
-        results = await dag.execute("run-var-int", plan)
+        results = await run_plan_layers(dag, "run-var-int", plan)
         assert results["s1"].is_completed
         assert results["s2"].output_available
         s2_output = results["s2"].output or {}
@@ -609,7 +600,7 @@ class TestDagExecutorVariableIntegration:
                 DagStep(id="s2", tool="echo", input={"msg": "$s1.body.uuid"}, depends_on=["s1"]),
             ],
         )
-        results = await dag.execute("run-var-nested", plan)
+        results = await run_plan_layers(dag, "run-var-nested", plan)
         assert results["s1"].is_completed
         assert results["s2"].is_completed
         s2_output = results["s2"].output or {}
@@ -657,40 +648,6 @@ class TestDagExecutorMergedStep:
         result = await dag._execute_step("run-x", plan, {}, "nonexistent", is_retry=True)
         assert result.is_failed
         assert "not found" in (result.error or "")
-
-
-class TestDagExecutorPlanId:
-    """plan_id now uses uuid4 instead of int(time.time())."""
-
-    async def test_plan_id_is_uuid_based(self, store, executor, registry):
-        dag = DagExecutor(executor, store, registry)
-        plan = DagPlan(
-            intent="test plan id",
-            steps=[DagStep(id="s1", tool="echo", input={"msg": "x"})],
-        )
-        await dag.execute("run-pid", plan)
-        events = await store.get_events("run-pid")
-        plan_created = [e for e in events if e.event_type == EventType.PLAN_CREATED]
-        assert len(plan_created) == 1
-        # plan_id format: plan_{run_id}_{8 hex chars}
-        pid = plan_created[0].payload["plan_id"]
-        import re
-
-        assert re.match(r"^plan_run-pid_[0-9a-f]{8}$", pid), f"Unexpected plan_id format: {pid}"
-
-    async def test_two_plans_have_different_ids(self, store, executor, registry):
-        dag = DagExecutor(executor, store, registry)
-        plan = DagPlan(
-            intent="test",
-            steps=[DagStep(id="s1", tool="echo", input={"msg": "x"})],
-        )
-        await dag.execute("run-uniq-a", plan)
-        await dag.execute("run-uniq-b", plan)
-        events_a = await store.get_events("run-uniq-a")
-        events_b = await store.get_events("run-uniq-b")
-        pid_a = [e for e in events_a if e.event_type == EventType.PLAN_CREATED][0].payload["plan_id"]
-        pid_b = [e for e in events_b if e.event_type == EventType.PLAN_CREATED][0].payload["plan_id"]
-        assert pid_a != pid_b
 
 
 class TestDagExecutorBuildStatus:

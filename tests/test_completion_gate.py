@@ -150,7 +150,7 @@ async def _make_sched(store, plan_responses, revise_response, tool_fn=None):
         dag,
         [],
         {},
-        config=SchedulerConfig(max_iterations=10),
+        config=SchedulerConfig(run_attempt_budget=10),
     )
     sched.dag = dag
     # Override revise to return a fixed empty plan (LLM "says done" but steps unmet)
@@ -165,14 +165,14 @@ async def _assert_terminal_fail(store, run_id, expected_reason, err_fragment="St
     state = await store.get_events(run_id)
     events = state
     seqs = {e.event_type: e.seq for e in events}
-    assert not any(e.event_type == EventType.RUN_COMPLETED for e in events), "禁止假绿 RUN_COMPLETED"
-    assert EventType.RUN_FAILED in seqs
-    revised = [e for e in events if e.event_type == EventType.PLAN_REVISED]
+    assert not any((e.event_type == EventType.RUN and e.phase == "completed") for e in events), "禁止假绿 RUN_COMPLETED"
+    assert EventType.RUN in seqs
+    revised = [e for e in events if (e.event_type == EventType.PLAN and e.phase == "revised")]
     assert revised, "应写入 PLAN_REVISED"
     assert revised[-1].payload.get("revision_reason") == expected_reason, "应经预期 revise 分支（site）"
     # 完成门统一分派（review #2）：任何 revise-empty 失败都发 PLAN_FAILED，且先于 RUN_FAILED。
-    assert EventType.PLAN_FAILED in seqs, "完成门判定应统一发 PLAN_FAILED（review #2 收敛）"
-    assert seqs[EventType.PLAN_FAILED] < seqs[EventType.RUN_FAILED], "PLAN_FAILED 应先于 RUN_FAILED"
+    assert EventType.PLAN in seqs, "完成门判定应统一发 PLAN_FAILED（review #2 收敛）"
+    assert seqs[EventType.PLAN] < seqs[EventType.RUN], "PLAN_FAILED 应先于 RUN_FAILED"
     last_revised_summary = revised[-1].payload.get("remaining_steps_summary") or ""
     assert "task complete" not in last_revised_summary.lower(), "失败结局不得在 PLAN_REVISED 自称 task complete"
 
@@ -231,7 +231,7 @@ async def test_run_completes_when_all_steps_normal(store):
         max_plan_retries=1,
     )
     dag = DagExecutor(executor, store, registry)
-    sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=SchedulerConfig(max_iterations=10))
+    sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=SchedulerConfig(run_attempt_budget=10))
     sched.dag = dag
     planner.generate_answer = AsyncMock(return_value="Done")
 
@@ -239,7 +239,7 @@ async def test_run_completes_when_all_steps_normal(store):
     assert state.status.value == "completed"
 
     events = await store.get_events("run-ok")
-    completed = next(e for e in events if e.event_type == EventType.RUN_COMPLETED)
+    completed = next(e for e in events if (e.event_type == EventType.RUN and e.phase == "completed"))
     assert completed.payload["all_normal"] is True
     assert completed.payload["unmet_step_ids"] == []
 
@@ -272,7 +272,7 @@ async def test_plan_revised_carries_step_tasks_audit_note(store):
         max_plan_retries=1,
     )
     dag = DagExecutor(executor, store, registry)
-    sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=SchedulerConfig(max_iterations=10))
+    sched = PlanningExecutorScheduler(store, executor, planner, dag, [], {}, config=SchedulerConfig(run_attempt_budget=10))
     sched.dag = dag
 
     # LLM 自评: s1 achieved（系统机械判定: UNSUCCESSFUL → unmet）
@@ -284,7 +284,7 @@ async def test_plan_revised_carries_step_tasks_audit_note(store):
     await sched.run("run-audit", "t")
     events = await store.get_events("run-audit")
 
-    revised = [e for e in events if e.event_type == EventType.PLAN_REVISED]
+    revised = [e for e in events if (e.event_type == EventType.PLAN and e.phase == "revised")]
     assert revised, "应写入 PLAN_REVISED"
     last = revised[-1]
     assert last.payload["step_tasks"].get("s1") == "achieved", "D11: task_state 便签应随 PLAN_REVISED 落事件"
@@ -301,12 +301,12 @@ async def test_fold_surfaces_completion_evidence(store):
 
     await store.append_event(
         "r",
-        EventType.RUN_STARTED,
+        EventType.RUN,
         {"intent": "t", "context_snapshot": {}},
     )
     await store.append_event(
         "r",
-        EventType.RUN_COMPLETED,
+        EventType.RUN,
         RunCompletedPayload(
             result_summary="done",
             all_normal=False,
@@ -320,7 +320,6 @@ async def test_fold_surfaces_completion_evidence(store):
     assert state.completion_evidence == {
         "all_normal": False,
         "unmet_step_ids": ["s2"],
-        "deliverable_met": None,
         "deliverable_status": "unverified",
         "deliverable_summary": [],
     }
@@ -334,19 +333,18 @@ async def test_fold_completion_evidence_all_normal_default(store):
 
     await store.append_event(
         "r",
-        EventType.RUN_STARTED,
+        EventType.RUN,
         {"intent": "t", "context_snapshot": {}},
     )
     await store.append_event(
         "r",
-        EventType.RUN_COMPLETED,
+        EventType.RUN,
         RunCompletedPayload(result_summary="done").model_dump(),
     )
     state = fold_events(await store.get_events("r"))
     assert state.completion_evidence == {
         "all_normal": True,
         "unmet_step_ids": [],
-        "deliverable_met": None,
         "deliverable_status": "unverified",
         "deliverable_summary": [],
     }

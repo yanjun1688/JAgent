@@ -51,28 +51,28 @@ def directory_scope(root: str | None = None) -> dict:
 
 
 async def seed_analysable_run(store: EventStore, run_id: str = "integration-run") -> None:
-    await store.append_event(run_id, EventType.RUN_STARTED, RunStartedPayload(intent="integration").model_dump())
+    await store.append_event(run_id, EventType.RUN, RunStartedPayload(intent="integration").model_dump())
     await store.append_event(
-        run_id, EventType.AGENT_THOUGHT, AgentThoughtPayload(thought="observe", token_count=7).model_dump()
+        run_id, EventType.AGENT_THOUGHT, AgentThoughtPayload(thought="observe").model_dump()
     )
     await store.append_event(
         run_id,
-        EventType.TOOL_CALLED,
+        EventType.TOOL,
         ToolCalledPayload(tool_call_id="tc-1", tool_name="echo", input={"value": "ok"}).model_dump(),
     )
     await store.append_event(
         run_id,
-        EventType.TOOL_COMPLETED,
+        EventType.TOOL,
         ToolCompletedPayload(tool_call_id="tc-1", tool_name="echo", output={"ok": True}, duration_ms=12).model_dump(),
     )
     await store.append_event(
         run_id,
-        EventType.GUARDRAIL_TRIGGERED,
+        EventType.TOOL,
         GuardrailTriggeredPayload(
             tool_call_id="tc-1", tool_name="echo", guardrail_id="qa", reason="test trigger"
         ).model_dump(),
     )
-    await store.append_event(run_id, EventType.RUN_COMPLETED, RunCompletedPayload(result_summary="done").model_dump())
+    await store.append_event(run_id, EventType.RUN, RunCompletedPayload(result_summary="done").model_dump())
 
 
 class TestWorkspaceRunConversationIntegration:
@@ -98,7 +98,9 @@ class TestWorkspaceRunConversationIntegration:
 
         events = await client.get(f"/api/v1/workspaces/{workspace_id}/events")
         assert events.status_code == 200
-        assert [event["event_type"] for event in events.json()["events"]] == ["WorkspaceCreated", "WorkspaceUpdated"]
+        workspace_events = events.json()["events"]
+        assert [event["event_type"] for event in workspace_events] == ["Workspace", "Workspace"]
+        assert [event["payload"]["phase"] for event in workspace_events] == ["created", "updated"]
 
         deleted = await client.delete(f"/api/v1/workspaces/{workspace_id}")
         assert deleted.status_code == 200
@@ -118,14 +120,14 @@ class TestWorkspaceRunConversationIntegration:
         # resume with no live scheduler are rejected rather than faked).
         from harness.models.events import RunPausedPayload, RunResumedPayload
 
-        await store.append_event(run_id, EventType.RUN_PAUSED, RunPausedPayload(reason="integration").model_dump())
+        await store.append_event(run_id, EventType.RUN, RunPausedPayload(reason="integration").model_dump())
         seq3 = await store.get_latest_seq(run_id)
         await store.append_event(
-            run_id, EventType.RUN_RESUMED, RunResumedPayload(resume_from_seq=seq3).model_dump()
+            run_id, EventType.RUN, RunResumedPayload(resume_from_seq=seq3).model_dump()
         )
 
         await store.append_event(
-            run_id, EventType.RUN_COMPLETED, RunCompletedPayload(result_summary="done").model_dump()
+            run_id, EventType.RUN, RunCompletedPayload(result_summary="done").model_dump()
         )
         detail = await client.get(f"/api/v1/runs/{run_id}")
         assert detail.status_code == 200
@@ -188,40 +190,6 @@ class TestAnalysisQueryIntegration:
         traces = await client.get("/api/v1/analysis/runs/integration-run/tool-traces")
         assert traces.json()["tool_traces"][0]["tool_name"] == "echo"
 
-    @pytest.mark.parametrize(
-        "query_type",
-        [
-            "runs",
-            "run",
-            "events",
-            "dashboard",
-            "tool-stats",
-            "guardrail-stats",
-            "run-analysis",
-            "timeline",
-            "tool-traces",
-            "tool-defs",
-            "schedulers",
-            "mcp",
-            "plans",
-            "system",
-            "ws-clients",
-            "feedback",
-            "monitor",
-            "health",
-        ],
-    )
-    async def test_unified_query_dispatches_every_declared_type(self, backend, query_type):
-        api, store, client = backend
-        await seed_analysable_run(store)
-        needs_run_id = {"run", "events", "run-analysis", "timeline", "tool-traces", "plans"}
-        params = {"type": query_type}
-        if query_type in needs_run_id:
-            params["run_id"] = "integration-run"
-        response = await client.get("/api/v1/query", params=params)
-        assert response.status_code == 200, (query_type, response.text)
-        assert response.json()["type"] == query_type
-
     async def test_operations_retry_is_explicitly_not_implemented(self, backend):
         _, _, client = backend
         response = await client.post("/api/v1/operations/retry")
@@ -278,7 +246,8 @@ class TestTenantAndWebSocketIntegration:
 
         api._ws_clients["ws-run"] = [FakeWebSocket()]
         api.wire_broadcast()
-        await store.append_event("ws-run", EventType.RUN_STARTED, RunStartedPayload(intent="ws").model_dump())
+        await store.append_event("ws-run", EventType.RUN, RunStartedPayload(intent="ws").model_dump())
         await asyncio.sleep(0)
         assert len(received) == 1
-        assert json.loads(received[0])["event_type"] == "RunStarted"
+        assert json.loads(received[0])["event_type"] == "Run"
+        assert json.loads(received[0])["payload"]["phase"] == "started"

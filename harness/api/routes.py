@@ -14,6 +14,7 @@ import time
 import uuid
 from collections import defaultdict
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -30,6 +31,7 @@ from harness.api.schemas import (
     FeedbackResponse,
     PauseRequest,
     PendingConfirmationItem,
+    RequiredOperationInput,
     RunControlResponse,
     RunDetailResponse,
     RunListResponse,
@@ -134,7 +136,7 @@ async def create_workspace(body: CreateWorkspaceRequest, api: HarnessAPI = Depen
         raise HTTPException(status_code=409, detail="Workspace name already exists") from exc
     await api.store.append_event(
         workspace.workspace_id,
-        EventType.WORKSPACE_CREATED,
+        EventType.WORKSPACE,
         WorkspaceCreatedPayload(
             workspace_id=workspace.workspace_id,
             tenant_id=workspace.tenant_id,
@@ -184,7 +186,7 @@ async def update_workspace(workspace_id: str, body: WorkspaceUpdate, api: Harnes
     changed = list(body.model_dump(exclude_unset=True))
     await api.store.append_event(
         workspace_id,
-        EventType.WORKSPACE_UPDATED,
+        EventType.WORKSPACE,
         WorkspaceUpdatedPayload(
             workspace_id=workspace_id,
             tenant_id=api.store.tenant_id,
@@ -207,7 +209,7 @@ async def delete_workspace(workspace_id: str, api: HarnessAPI = Depends(get_hapi
         raise HTTPException(status_code=404, detail="Workspace not found")
     await api.store.append_event(
         workspace_id,
-        EventType.WORKSPACE_DELETED,
+        EventType.WORKSPACE,
         WorkspaceDeletedPayload(workspace_id=workspace_id, tenant_id=api.store.tenant_id).model_dump(),
         workspace_id=workspace_id,
         is_audit=True,
@@ -301,7 +303,7 @@ async def create_run(body: CreateRunRequest, api: HarnessAPI = Depends(get_hapi)
     写入 RunStarted 后立即通过 start_run() 拉起 PlanningExecutorScheduler 的后台循环。
     Scheduler 自动执行 plan→execute→revise，事件写入后通过 WebSocket 广播。
     API 响应不等待 Scheduler 完成——循环运行在 asyncio.Task 中。
-    注：当 Planner 生成 Plan 失败时，会降级到 AgentLoopScheduler（串行 think→act→observe）。
+    注：当 Planner 生成 Plan 失败时，Run 直接诚实判失败（不再降级到串行轨道）。
     """
     run_id = str(uuid.uuid4())[:8]
     _log.info("Creating run — intent: %.120s", body.intent)
@@ -346,7 +348,7 @@ async def create_run(body: CreateRunRequest, api: HarnessAPI = Depends(get_hapi)
     else:
         await api.store.append_event(
             run_id,
-            EventType.RUN_STARTED,
+            EventType.RUN,
             run_started_payload,
             workspace_id=workspace.workspace_id,
         )
@@ -357,7 +359,7 @@ async def create_run(body: CreateRunRequest, api: HarnessAPI = Depends(get_hapi)
     if body.conversation_id:
         await api.store.append_event(
             body.conversation_id,
-            EventType.CONVERSATION_MESSAGE,
+            EventType.CONVERSATION,
             ConversationMessagePayload(
                 conversation_id=body.conversation_id,
                 run_id=run_id,
@@ -508,7 +510,7 @@ async def confirm_run(run_id: str, body: ConfirmRequest, api: HarnessAPI = Depen
     events = await api.store.get_events(run_id)
     if not events:
         raise HTTPException(status_code=404, detail="Run not found")
-    existing = [e for e in events if e.event_type == EventType.CONFIRMATION_RECEIVED]
+    existing = [e for e in events if e.event_type == EventType.CONFIRMATION and e.phase == "received"]
     for e in existing:
         p = ConfirmationReceivedPayload(**e.payload)
         if p.confirmation_id == body.confirmation_id:
@@ -526,7 +528,7 @@ async def confirm_run(run_id: str, body: ConfirmRequest, api: HarnessAPI = Depen
 
     requested = None
     for e in events:
-        if e.event_type == EventType.CONFIRMATION_REQUESTED:
+        if e.event_type == EventType.CONFIRMATION and e.phase == "requested":
             candidate = ConfirmationRequestedPayload(**e.payload)
             if candidate.confirmation_id == body.confirmation_id:
                 requested = candidate
@@ -544,7 +546,7 @@ async def confirm_run(run_id: str, body: ConfirmRequest, api: HarnessAPI = Depen
 
     await api.store.append_event(
         run_id,
-        EventType.CONFIRMATION_RECEIVED,
+        EventType.CONFIRMATION,
         ConfirmationReceivedPayload(
             confirmation_id=body.confirmation_id,
             confirmed=body.confirmed,
@@ -563,7 +565,7 @@ async def confirm_run(run_id: str, body: ConfirmRequest, api: HarnessAPI = Depen
 
 class OperatorFeedbackRequest(BaseModel):
     text: str = Field(..., max_length=500)
-    priority: str = Field(default="medium", pattern="^(high|medium|low)$")
+    priority: Literal["high", "medium", "low"] = "medium"
     suggestion: str | None = Field(None, max_length=300)
     expires_in_seqs: int | None = Field(None, ge=1, le=500)
 
@@ -646,7 +648,7 @@ async def delete_run(run_id: str, api: HarnessAPI = Depends(get_hapi)):
 
     await api.store.append_event(
         run_id,
-        EventType.RUN_FAILED,
+        EventType.RUN,
         RunFailedPayload(final_error="Run deleted by user", event_count=len(events)).model_dump(),
     )
 
@@ -670,7 +672,7 @@ async def create_conversation(
     await api.store.upsert_conversation(conv_id, title)
     await api.store.append_event(
         conv_id,
-        EventType.CONVERSATION_STARTED,
+        EventType.CONVERSATION,
         ConversationStartedPayload(
             conversation_id=conv_id,
             title=title,
@@ -716,7 +718,7 @@ async def get_conversation(
     events = await api.store.get_events_for_conversation(conversation_id)
     messages: list[ConversationMessageItem] = []
     for e in events:
-        if e.event_type == EventType.CONVERSATION_MESSAGE:
+        if e.event_type == EventType.CONVERSATION and e.phase == "message":
             p = e.payload
             messages.append(
                 ConversationMessageItem(
@@ -767,7 +769,9 @@ async def send_message(
         conversation_id=conversation_id,
         client_request_id=body.client_request_id,
         workspace_id=workspace.workspace_id,
-        required_operations=[operation.model_dump() for operation in body.required_operations]
+        required_operations=[
+            RequiredOperationInput(**operation.model_dump()) for operation in body.required_operations
+        ]
         if body.required_operations is not None
         else None,
     )
@@ -798,7 +802,7 @@ async def send_message(
                 (
                     event
                     for event in existing
-                    if event.event_type == EventType.CONVERSATION_MESSAGE
+                    if event.event_type == EventType.CONVERSATION and event.phase == "message"
                     and event.payload.get("client_request_id") == body.client_request_id
                 ),
                 None,
@@ -812,7 +816,7 @@ async def send_message(
     else:
         await api.store.append_event(
             run_id,
-            EventType.RUN_STARTED,
+            EventType.RUN,
             run_started_payload,
             workspace_id=workspace.workspace_id,
         )
@@ -821,7 +825,7 @@ async def send_message(
 
     await api.store.append_event(
         conversation_id,
-        EventType.CONVERSATION_MESSAGE,
+        EventType.CONVERSATION,
         ConversationMessagePayload(
             conversation_id=conversation_id,
             run_id=run_id,

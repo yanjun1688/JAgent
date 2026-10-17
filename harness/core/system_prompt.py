@@ -8,6 +8,7 @@ all prompts at once.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 from harness.core.logger import agent_logger
 from harness.models.tools import ToolDefinition
@@ -20,11 +21,12 @@ class AgentPhase(Enum):
     PLAN = "plan"
     REVISE = "revise"
     ANSWER = "answer"
-    SERIAL_THINK = "serial_think"
     SERIAL_THINK_FN = "serial_think_fn"
     SERIAL_THINK_TEXT = "serial_think_text"
     SUMMARIZE = "summarize"
     LOCAL_REPAIR = "local_repair"
+    EXTRACT = "extract"
+    EXTRACT_RETRY = "extract_retry"
 
 
 # ── Prompt Templates ───────────────────────────────────────────────
@@ -99,9 +101,13 @@ _PLAN_PROMPT = (
     "When a step depends on another, reference its output using $step_id.field.\n"
     "- Syntax: $s1.result, $s1.body, $s1.summary, $s1.content, etc.\n"
     "- The executor resolves $ references using upstream step outputs before execution.\n"
+    "- In the tool list below, a parameter tagged [ref: allowed] accepts $ references; "
+    "one tagged [ref: forbidden] (e.g. file_op.path, http_request.url) must be a literal value.\n"
     "- NEVER hardcode values that should come from a previous step.\n\n"
     "## Available Tools\n"
     "{tool_descriptions}\n\n"
+    "{context_section}"
+    "{feedback_section}"
     "## User Intent\n"
     "{intent}\n"
 )
@@ -204,40 +210,6 @@ _ANSWER_PROMPT = (
     "that no operation was executed.\n"
 )
 
-_SERIAL_THINK_PROMPT = (
-    "You are an autonomous agent executing a task.\n\n"
-    "## Your Task\n"
-    "{intent}\n\n"
-    "## Available Tools\n"
-    "{tool_list}\n\n"
-    "## Instructions\n"
-    "1. Think step by step about what to do next.\n"
-    "2. Choose ONE action from the three options below:\n"
-    "   (A) Call a tool — if you need external information or want to perform an action.\n"
-    "   (B) ANSWER directly — if the question is conversational or answerable from your own knowledge.\n"
-    "   (C) Output <STOP> — if the task is complete or cannot be completed.\n"
-    "3. Output your response in one of these three formats:\n\n"
-    "**Option A — Call a tool:**\n"
-    "THOUGHT: <your reasoning>\n"
-    "TOOL: <tool_name>\n"
-    "ARGS: <JSON arguments>\n\n"
-    "**Option B — Answer directly:**\n"
-    "ANSWER: <your direct response to the user>\n\n"
-    "**Option C — Stop:**\n"
-    "THOUGHT: <summary of what was accomplished>\n"
-    "<STOP>\n\n"
-    "## Rules\n"
-    "- Use tools to interact with the world. Do not simulate results.\n"
-    "- If the task requires external data (reading files, fetching URLs, "
-    "searching, calling APIs), you MUST call a tool to get it first. Do NOT "
-    "output <STOP> or ANSWER while such data is still missing.\n"
-    "- Only output <STOP> when every part of the task has genuinely been "
-    "completed with real tool results, or the task is truly impossible.\n"
-    "- Do not repeat failed tool calls without adjusting your approach.\n"
-    "- If you encounter an error you cannot recover from, output <STOP> with a failure reason.\n"
-    "- For simple conversational queries, use **Option B** — answer directly without calling a tool.\n"
-)
-
 _SERIAL_THINK_FN_PROMPT = (
     "You are an autonomous agent executing a task using function-calling.\n\n"
     "## Your Task\n"
@@ -325,18 +297,86 @@ _LOCAL_REPAIR_PROMPT = (
     "{tool_descriptions}"
 )
 
+# Contract extraction (S07 D-02) — prompts previously lived in
+# contract_extractor.py; migrated into the registry (T-R8b-5). Both take
+# runtime vars: {tool_names} (+ {intent} / {error}).
+_EXTRACT_PROMPT = """\
+Extract the REQUIRED hard-delivery operations from the user's request as JSON.
+
+A required operation is something the user EXPLICITLY asked to be performed —
+creating/writing/deleting/reading files, fetching URLs, navigating browsers,
+querying external services. Do NOT extract soft suggestions or hypothetical
+operations ("if it fails", "maybe", "optional").
+
+Return ONLY valid JSON with this exact shape:
+{{"required_operations": [{{"tool": "<tool_name>", "input": {{<key>: <value>}}}}]}}
+
+Rules:
+- tool must be one of: {tool_names}
+- input must include the discriminating key for that tool:
+    file_op      → "operation" (one of read/write/append/delete/list) + "path"
+    http_request → "method" (GET/POST/PUT/PATCH/DELETE/HEAD) + "url"
+    browser      → "action" (navigate/click/type/extract/screenshot)
+    mcp_call     → "tool_name"
+- include "content" for file_op write/append if the user specified it
+- include "path" exactly as the user wrote it — never rewrite it
+- if there are no hard delivery requirements, return {{"required_operations": []}}
+
+User request:
+{intent}
+"""
+
+_EXTRACT_RETRY_PROMPT = (
+    "Your previous extraction response had a format or validation error:\n{error}\n\n"
+    "Re-respond with ONLY valid JSON of this exact shape: "
+    '{{"required_operations": [{{"tool": "<tool_name>", "input": {{<key>: <value>}}}}]}}\n'
+    "Available tools: {tool_names}\n"
+    "If the request truly has no hard delivery requirement, "
+    'return {{"required_operations": []}}.'
+)
+
 _SUMMARIZE_PROMPT = (
-    "You are a context compression system. Summarize the following agent activity log. "
-    "Output your response as a JSON object with these exact fields:\n"
-    '- "title": string — a concise one-line title for this episode '
-    '(e.g., "User authentication module implementation")\n'
-    '- "summary": string — a 3-5 sentence narrative summary of what happened\n'
-    '- "key_decisions": list of strings — the key decisions the agent made\n'
-    '- "tools_used": list of strings — which tools were called\n'
-    '- "key_findings": list of strings — important information discovered\n'
-    '- "errors_encountered": list of strings — any errors or warnings\n'
-    '- "current_plan": string or null — the plan at this point (if any)\n'
-    "Be factual and concise. Return ONLY valid JSON, no markdown or explanation."
+    "You are the episodic memory writer for an autonomous task-execution agent. "
+    "Your sole responsibility is to convert one finished episode of the agent's "
+    "activity log into a faithful, self-contained memory record that will REPLACE "
+    "the raw events in the agent's working context.\n\n"
+    "## Input\n"
+    "You receive the raw activity log of one episode — the agent's thoughts and its "
+    "tool-call results, in chronological order. Earlier episodes may already exist "
+    "in the context; later activity will follow.\n\n"
+    "## Objective\n"
+    "Produce a structured record such that an agent reading ONLY this record, with no "
+    "access to the raw events, can:\n"
+    "1. understand what was attempted and why;\n"
+    "2. continue the task without repeating failed actions or rediscovering known facts;\n"
+    "3. answer questions about the concrete results obtained in this episode.\n\n"
+    "## Output contract\n"
+    "Respond with a single JSON object and no other text, containing exactly:\n"
+    '- "title": string — one specific line stating what this episode accomplished or '
+    'investigated (not a generic label)\n'
+    '- "summary": string — 3–6 sentences: objective, actions, outcome, and current status\n'
+    '- "key_decisions": list of strings — choices made, with rationale; include rejected '
+    "alternatives when significant\n"
+    '- "tools_used": list of strings — distinct names of tools actually called\n'
+    '- "key_findings": list of strings — concrete facts learned (values, identifiers, '
+    "paths, names), each tied to its source\n"
+    '- "errors_encountered": list of strings — each failure with its cause and what was '
+    "attempted in response\n"
+    '- "current_plan": string or null — outstanding work or next steps at the end of the '
+    "episode; null if none\n\n"
+    "## Fidelity rules (mandatory)\n"
+    "- Ground every statement in the activity log. Do not infer, extrapolate, or add "
+    "information that is not present.\n"
+    "- Preserve verbatim, with exact spelling and casing: file paths, identifiers, names, "
+    "URLs, commands, numeric values, and error messages.\n"
+    "- Record errors and failed attempts explicitly; never omit or soften them — the next "
+    "episode must not repeat them.\n"
+    "- Distinguish what was attempted from what succeeded; mark uncertain or unverified "
+    "outcomes as such.\n"
+    "- Do not describe tool calls that are not present in the log.\n\n"
+    "## Format rules\n"
+    "- Return ONLY valid JSON. No markdown, code fences, comments, or prose.\n"
+    "- All strings must be properly escaped."
 )
 
 _PHASE_PROMPTS: dict[AgentPhase, str] = {
@@ -344,11 +384,12 @@ _PHASE_PROMPTS: dict[AgentPhase, str] = {
     AgentPhase.PLAN: _PLAN_PROMPT,
     AgentPhase.REVISE: _REVISE_PROMPT,
     AgentPhase.ANSWER: _ANSWER_PROMPT,
-    AgentPhase.SERIAL_THINK: _SERIAL_THINK_PROMPT,
     AgentPhase.SERIAL_THINK_FN: _SERIAL_THINK_FN_PROMPT,
     AgentPhase.SERIAL_THINK_TEXT: _SERIAL_THINK_TEXT_PROMPT,
     AgentPhase.SUMMARIZE: _SUMMARIZE_PROMPT,
     AgentPhase.LOCAL_REPAIR: _LOCAL_REPAIR_PROMPT,
+    AgentPhase.EXTRACT: _EXTRACT_PROMPT,
+    AgentPhase.EXTRACT_RETRY: _EXTRACT_RETRY_PROMPT,
 }
 
 
@@ -363,6 +404,19 @@ def get_prompt(phase: AgentPhase, **kwargs) -> str:
     return result
 
 
+def _strip_vendor_keys(value: Any) -> Any:
+    """Drop ``x-*`` JSON-Schema vendor extensions (e.g. ``x-role``).
+
+    Roles are a harness-internal contract; providers may reject unknown keys,
+    so the function-calling schema sent to the LLM is sanitized.
+    """
+    if isinstance(value, dict):
+        return {k: _strip_vendor_keys(v) for k, v in value.items() if not str(k).startswith("x-")}
+    if isinstance(value, list):
+        return [_strip_vendor_keys(v) for v in value]
+    return value
+
+
 def build_tool_schemas(tool_defs: list[ToolDefinition]) -> list[dict]:
     """Build OpenAI function-calling schemas from tool definitions."""
     return [
@@ -371,7 +425,7 @@ def build_tool_schemas(tool_defs: list[ToolDefinition]) -> list[dict]:
             "function": {
                 "name": td.name,
                 "description": td.description,
-                "parameters": td.input_schema,
+                "parameters": _strip_vendor_keys(td.input_schema),
             },
         }
         for td in tool_defs

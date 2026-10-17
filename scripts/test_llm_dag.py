@@ -120,13 +120,13 @@ def _init_registry() -> ToolRegistry:
 def _event_label(e) -> str:
     """Color-code event types for readability."""
     t = e.event_type
-    if t in (EventType.PLAN_CREATED, EventType.PLAN_COMPLETED, EventType.PLAN_REVISED, EventType.PLAN_FAILED):
+    if t in (EventType.PLAN, EventType.PLAN, EventType.PLAN, EventType.PLAN):
         return f"\033[36m{t.value}\033[0m"
-    if t in (EventType.DAG_STEP_STARTED, EventType.DAG_STEP_COMPLETED, EventType.DAG_STEP_FAILED):
+    if t in (EventType.STEP, EventType.STEP, EventType.STEP):
         return f"\033[33m{t.value}\033[0m"
-    if t in (EventType.TOOL_CALLED, EventType.TOOL_COMPLETED, EventType.TOOL_FAILED):
+    if t in (EventType.TOOL, EventType.TOOL, EventType.TOOL):
         return f"\033[35m{t.value}\033[0m"
-    if t in (EventType.RUN_STARTED, EventType.RUN_COMPLETED, EventType.RUN_FAILED):
+    if t in (EventType.RUN, EventType.RUN, EventType.RUN):
         return f"\033[32m{t.value}\033[0m"
     if t == EventType.AGENT_THOUGHT:
         return f"\033[34m{t.value}\033[0m"
@@ -140,10 +140,10 @@ def dump_events(label: str, events: list, elapsed: float) -> None:
         for e in events
         if e.event_type
         in (
-            EventType.PLAN_CREATED,
-            EventType.PLAN_COMPLETED,
-            EventType.PLAN_REVISED,
-            EventType.PLAN_FAILED,
+            EventType.PLAN,
+            EventType.PLAN,
+            EventType.PLAN,
+            EventType.PLAN,
         )
     ]
     dag_events = [
@@ -151,9 +151,9 @@ def dump_events(label: str, events: list, elapsed: float) -> None:
         for e in events
         if e.event_type
         in (
-            EventType.DAG_STEP_STARTED,
-            EventType.DAG_STEP_COMPLETED,
-            EventType.DAG_STEP_FAILED,
+            EventType.STEP,
+            EventType.STEP,
+            EventType.STEP,
         )
     ]
     tool_events = [
@@ -161,12 +161,12 @@ def dump_events(label: str, events: list, elapsed: float) -> None:
         for e in events
         if e.event_type
         in (
-            EventType.TOOL_CALLED,
-            EventType.TOOL_COMPLETED,
-            EventType.TOOL_FAILED,
+            EventType.TOOL,
+            EventType.TOOL,
+            EventType.TOOL,
         )
     ]
-    completed_steps = [e for e in dag_events if e.event_type == EventType.DAG_STEP_COMPLETED]
+    completed_steps = [e for e in dag_events if e.event_type == EventType.STEP]
 
     print(f"\n  {'=' * 56}")
     print(f"  {label}")
@@ -186,19 +186,19 @@ def dump_events(label: str, events: list, elapsed: float) -> None:
     if plan_events:
         print("\n  ── DAG Structure ──")
         for e in events:
-            if e.event_type == EventType.PLAN_CREATED:
+            if e.event_type == EventType.PLAN:
                 pe = e.payload
                 print(f"  Plan: {pe.get('intent', '')[:60]}")
                 print(f"  Layers: {pe.get('layer_count', '?')}, {pe.get('steps_summary', '')}")
-            if e.event_type == EventType.DAG_STEP_STARTED:
+            if e.event_type == EventType.STEP:
                 pe = e.payload
                 deps = pe.get("depends_on", [])
                 dep_str = f" ← {', '.join(deps)}" if deps else " (root)"
                 print(f"    -> {pe.get('step_id', '?')}: {pe.get('tool_name', '?')}{dep_str}")
-            if e.event_type == EventType.DAG_STEP_COMPLETED:
+            if e.event_type == EventType.STEP:
                 pe = e.payload
                 print(f"    OK {pe.get('step_id', '?')}: {pe.get('output_summary', '')[:60]}")
-            if e.event_type == EventType.DAG_STEP_FAILED:
+            if e.event_type == EventType.STEP:
                 pe = e.payload
                 print(f"    FAIL {pe.get('step_id', '?')}: {pe.get('error', '')[:60]}")
 
@@ -234,7 +234,7 @@ async def run_scenario(name: str, intent: str, api_key: str, model: str, base_ur
         dag_executor=dag,
         tool_defs=ALL_DEFS,
         tool_fns=ALL_FNS,
-        config=SchedulerConfig(max_iterations=10),
+        config=SchedulerConfig(run_attempt_budget=10),
         context_manager=cm,
     )
 
@@ -247,9 +247,9 @@ async def run_scenario(name: str, intent: str, api_key: str, model: str, base_ur
     dump_events(f"DAG: {name}", events, elapsed)
 
     # Verify
-    has_plan_created = any(e.event_type == EventType.PLAN_CREATED for e in events)
+    has_plan_created = any(e.event_type == EventType.PLAN for e in events)
     has_run_completed = state.status == RunStatus.COMPLETED
-    parallel_steps = any(e.event_type == EventType.DAG_STEP_STARTED and not e.payload.get("depends_on") for e in events)
+    parallel_steps = any(e.event_type == EventType.STEP and not e.payload.get("depends_on") for e in events)
 
     print("  Verification:")
     print(f"    PlanCreated:     {'PASS' if has_plan_created else 'FAIL'}")

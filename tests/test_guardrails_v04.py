@@ -196,7 +196,7 @@ class TestDestructiveOpGuardrail:
 class TestDependencyGuardrail:
     @pytest.mark.asyncio
     async def test_missing_required_events_blocks(self, store):
-        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}})
+        await store.append_event("run-1", EventType.RUN, {"intent": "test", "context_snapshot": {}})
         g = DependencyGuardrail(store=store)
         td = _make_tool(name="some_tool")
         config = {"required_events": ["RunStarted", "AgentThought"]}
@@ -206,8 +206,8 @@ class TestDependencyGuardrail:
 
     @pytest.mark.asyncio
     async def test_all_required_events_exist_passes(self, store):
-        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}})
-        await store.append_event("run-1", EventType.AGENT_THOUGHT, {"thought": "ok", "token_count": 0})
+        await store.append_event("run-1", EventType.RUN, {"intent": "test", "context_snapshot": {}})
+        await store.append_event("run-1", EventType.AGENT_THOUGHT, {"thought": "ok"})
         g = DependencyGuardrail(store=store)
         td = _make_tool(name="some_tool")
         config = {"required_events": ["RunStarted", "AgentThought"]}
@@ -239,7 +239,7 @@ class TestDependencyGuardrail:
 
     @pytest.mark.asyncio
     async def test_depends_on_missing_event_blocks(self, store):
-        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}})
+        await store.append_event("run-1", EventType.RUN, {"intent": "test", "context_snapshot": {}})
         g = DependencyGuardrail(store=store)
         td = _make_tool(
             name="plan_tool",
@@ -251,7 +251,7 @@ class TestDependencyGuardrail:
 
     @pytest.mark.asyncio
     async def test_depends_on_all_exist_passes(self, store):
-        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "test", "context_snapshot": {}})
+        await store.append_event("run-1", EventType.RUN, {"intent": "test", "context_snapshot": {}})
         g = DependencyGuardrail(store=store)
         td = _make_tool(
             name="plan_tool",
@@ -263,7 +263,7 @@ class TestDependencyGuardrail:
     @pytest.mark.asyncio
     async def test_depends_on_payload_filter(self, store):
         await store.append_event(
-            "run-1", EventType.DAG_STEP_COMPLETED, {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"}
+            "run-1", EventType.STEP, {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"}
         )
         g = DependencyGuardrail(store=store)
         td = _make_tool(
@@ -282,7 +282,7 @@ class TestDependencyGuardrail:
     @pytest.mark.asyncio
     async def test_depends_on_payload_filter_mismatch_blocks(self, store):
         await store.append_event(
-            "run-1", EventType.DAG_STEP_COMPLETED, {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"}
+            "run-1", EventType.STEP, {"plan_id": "p-1", "step_id": "s1", "output_summary": "ok"}
         )
         g = DependencyGuardrail(store=store)
         td = _make_tool(
@@ -342,7 +342,7 @@ class TestGuardrailRunnerV04:
 
     @pytest.mark.asyncio
     async def test_async_guardrail_with_run_id(self, store):
-        await store.append_event("run-1", EventType.RUN_STARTED, {"intent": "x", "context_snapshot": {}})
+        await store.append_event("run-1", EventType.RUN, {"intent": "x", "context_snapshot": {}})
         td = _make_tool(
             name="dep_test",
             guardrails=[Guardrail(guardrail_type="dependency", config={"required_events": ["RunStarted"]})],
@@ -391,8 +391,8 @@ class TestExecutorDestructiveOpTrigger:
         assert result.confirmation_id is not None
 
         events = await store.get_events("run-1")
-        assert any(e.event_type == EventType.CONFIRMATION_REQUESTED for e in events)
-        assert not any(e.event_type == EventType.TOOL_CALLED for e in events)
+        assert any((e.event_type == EventType.CONFIRMATION and e.phase == "requested") for e in events)
+        assert not any((e.event_type == EventType.TOOL and e.phase == "called") for e in events)
 
     @pytest.mark.asyncio
     async def test_destructive_op_guardrail_confirmed_then_executes(self, store):
@@ -425,7 +425,7 @@ class TestExecutorDestructiveOpTrigger:
 
         await store.append_event(
             "run-1",
-            EventType.CONFIRMATION_RECEIVED,
+            EventType.CONFIRMATION,
             ConfirmationReceivedPayload(
                 confirmation_id=r1.confirmation_id, confirmed=True, operator_id="op-1"
             ).model_dump(),

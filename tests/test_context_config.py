@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from harness.core.context_manager import DEFAULT_CONTEXT_TOKEN_LIMIT, resolve_context_token_limit
+from harness.core.context_manager import ContextManager, DEFAULT_CONTEXT_TOKEN_LIMIT, resolve_context_token_limit
 
 
 class TestTokenLimitConfig:
@@ -31,3 +31,24 @@ class TestTokenLimitConfig:
     def test_non_positive_falls_back_to_default(self, monkeypatch):
         monkeypatch.setenv("HARNESS_CONTEXT_TOKEN_LIMIT", "0")
         assert resolve_context_token_limit(None) == DEFAULT_CONTEXT_TOKEN_LIMIT
+
+
+class TestDefaultCompressionConstants:
+    def test_default_token_limit(self, monkeypatch):
+        monkeypatch.delenv("HARNESS_CONTEXT_TOKEN_LIMIT", raising=False)
+        cm = ContextManager(store=None)
+        assert cm.token_limit == 160_000
+
+    def test_default_absolute_thresholds(self, monkeypatch):
+        monkeypatch.delenv("HARNESS_CONTEXT_TOKEN_LIMIT", raising=False)
+        cm = ContextManager(store=None)
+        assert cm.lazy_clear_threshold == 96_000
+        assert cm.compression_threshold == 128_000
+        assert cm.emergency_threshold == 152_000
+
+    def test_default_ratios(self, monkeypatch):
+        monkeypatch.delenv("HARNESS_CONTEXT_TOKEN_LIMIT", raising=False)
+        cm = ContextManager(store=None)
+        assert cm.lazy_clear_ratio == 0.6
+        assert cm.compression_threshold_ratio == 0.8
+        assert cm.emergency_threshold_ratio == 0.95

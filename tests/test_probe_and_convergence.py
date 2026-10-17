@@ -244,7 +244,7 @@ async def test_degenerate_self_heal_fails_run():
             dag,
             [],
             {},
-            config=SchedulerConfig(max_consecutive_failures=3, max_iterations=20, max_revise_retries=2),
+            config=SchedulerConfig(run_attempt_budget=20, max_revise_retries=2),
         )
 
         # LLM 每次 revise 都返回同一失败步骤（永不修复）→ 触发签名比对守卫

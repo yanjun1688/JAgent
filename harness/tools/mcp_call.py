@@ -20,15 +20,18 @@ MCP_CALL_DEF = ToolDefinition(
             "server_name": {
                 "type": "string",
                 "description": "Name of the MCP server (omit to use the first connected server)",
+                "x-role": "authority",
             },
             "tool_name": {
                 "type": "string",
                 "description": "Name of the MCP tool to call",
+                "x-role": "authority",
             },
             "arguments": {
                 "type": "object",
                 "description": "Arguments to pass to the MCP tool",
                 "default": {},
+                "x-role": "data",
             },
         },
         "required": ["tool_name"],
@@ -202,7 +205,18 @@ class McpDynamicTool(BaseTool):
 
     由 ``MCPServerManager._register_tools`` 为每个 MCP 暴露的工具构造；
     ``run`` 委托给 ``mcp_call_fn``（携带 server_name / tool_name / arguments）。
+
+    Per-instance metadata overrides the ClassVar declarations of BaseTool:
+    each dynamic tool has its own name/schema (mypy: instance vars shadow
+    class vars; to_definition reads these instance values).
     """
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    idempotency_key_fields: list[str]
+    server_name: str
 
     side_effects = [SideEffect.EXTERNAL]
     guardrails = [Guardrail(guardrail_type="scope", config={})]
@@ -221,7 +235,7 @@ class McpDynamicTool(BaseTool):
         self.input_schema = input_schema
         self.output_schema = {}
         self.server_name = server_name
-        self.idempotency_key_fields: list[str] = []
+        self.idempotency_key_fields = []
 
     async def run(self, input: dict) -> dict:
         return await mcp_call_fn(

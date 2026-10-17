@@ -19,10 +19,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
 from typing import Any
 
 from harness.execution.base import ExecutionBackend
+from harness.models.events import OutputBlobStoredPayload
 
 # Managed namespace inside the workspace root (LocalDirectoryBackend enforces
 # containment; this path is always under the sandbox root).
@@ -35,19 +35,6 @@ SUMMARY_MAX_CHARS = 120
 # A blob ref is exactly a 64-char lowercase hex sha256 with a .json suffix and
 # no path separators — this is the entire allow-list for fetch validation.
 _REF_RE = re.compile(r"^[0-9a-f]{64}\.json$")
-
-
-@dataclass(frozen=True)
-class StoredBlob:
-    ref: str
-    sha256: str
-    bytes: int
-    summary: str
-    truncated: bool = True
-    tool_call_id: str = ""
-    tool_name: str = ""
-    step_id: str | None = None
-    workspace_id: str | None = None
 
 
 def is_valid_blob_ref(ref: str) -> bool:
@@ -71,7 +58,7 @@ def _serialize(output: Any) -> str:
     return json.dumps(output, ensure_ascii=False, default=str, sort_keys=True)
 
 
-def build_ref_placeholder(blob: StoredBlob, summary_max: int = 300) -> dict[str, Any]:
+def build_ref_placeholder(blob: OutputBlobStoredPayload, summary_max: int = 300) -> dict[str, Any]:
     """Compact, self-describing placeholder that replaces the full output in events."""
     return {
         "truncated": blob.truncated,
@@ -98,7 +85,7 @@ class OutputBlobStore:
         tool_name: str,
         step_id: str | None = None,
         workspace_id: str | None = None,
-    ) -> StoredBlob | None:
+    ) -> OutputBlobStoredPayload | None:
         """Offload ``output`` if it exceeds the inline budget; else return None.
 
         Returns None when there is no backend (caller keeps the inline output) or
@@ -114,14 +101,14 @@ class OutputBlobStore:
         path = f"{BLOB_NAMESPACE}/{ref}"
         # Idempotent content-addressed write: same content → same path (dedupes).
         await self._backend.write(path, serialized)
-        return StoredBlob(
+        return OutputBlobStoredPayload(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
             ref=ref,
             sha256=digest,
             bytes=len(serialized.encode("utf-8")),
             summary=summarize_output(output, min(self.inline_max_chars, SUMMARY_MAX_CHARS)),
             truncated=True,
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
             step_id=step_id,
             workspace_id=workspace_id,
         )

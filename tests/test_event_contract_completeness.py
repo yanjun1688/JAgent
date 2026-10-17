@@ -39,7 +39,7 @@ def test_payload_model_map_covers_every_event_type_exactly_once():
     extra = map_keys - enum_members
     assert not extra, f"PAYLOAD_MODEL_MAP has keys that are not EventType members: {sorted(extra)}"
 
-    assert len(PAYLOAD_MODEL_MAP) == len(EventType) == 41
+    assert len(PAYLOAD_MODEL_MAP) == len(EventType) == 13
 
 
 def test_fold_handles_every_event_type_explicitly():

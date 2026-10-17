@@ -170,7 +170,7 @@ async def test_http_request() -> dict:
         LLMAgentKernel(make_client()),
         registry.list_tool_defs(),
         registry.list_tool_fns(),
-        SchedulerConfig(max_iterations=8),
+        SchedulerConfig(run_attempt_budget=8),
         monitor=mon,
         context_manager=cm,
     )
@@ -193,7 +193,7 @@ async def test_http_request_error() -> dict:
         LLMAgentKernel(make_client()),
         registry.list_tool_defs(),
         registry.list_tool_fns(),
-        SchedulerConfig(max_iterations=8),
+        SchedulerConfig(run_attempt_budget=8),
         monitor=mon,
         context_manager=cm,
     )
@@ -218,7 +218,7 @@ async def test_file_op() -> dict:
         LLMAgentKernel(make_client()),
         registry.list_tool_defs(),
         registry.list_tool_fns(),
-        SchedulerConfig(max_iterations=8),
+        SchedulerConfig(run_attempt_budget=8),
         monitor=mon,
         context_manager=cm,
         backend=FILE_BACKEND,
@@ -244,7 +244,7 @@ async def test_file_op_error() -> dict:
         LLMAgentKernel(make_client()),
         registry.list_tool_defs(),
         registry.list_tool_fns(),
-        SchedulerConfig(max_iterations=8),
+        SchedulerConfig(run_attempt_budget=8),
         monitor=mon,
         context_manager=cm,
         backend=FILE_BACKEND,
@@ -291,7 +291,7 @@ async def test_browser() -> dict:
         LLMAgentKernel(make_client()),
         registry.list_tool_defs(),
         registry.list_tool_fns(),
-        SchedulerConfig(max_iterations=10),
+        SchedulerConfig(run_attempt_budget=10),
         monitor=mon,
         context_manager=cm,
     )
@@ -324,7 +324,7 @@ async def test_browser_error() -> dict:
         LLMAgentKernel(make_client()),
         registry.list_tool_defs(),
         registry.list_tool_fns(),
-        SchedulerConfig(max_iterations=10),
+        SchedulerConfig(run_attempt_budget=10),
         monitor=mon,
         context_manager=cm,
     )
@@ -356,7 +356,7 @@ async def _mcp_test(run_id: str, intent: str, label: str) -> dict:
             LLMAgentKernel(make_client()),
             registry.list_tool_defs(),
             registry.list_tool_fns(),
-            SchedulerConfig(max_iterations=8),
+            SchedulerConfig(run_attempt_budget=8),
             monitor=mon,
             context_manager=cm,
         )

@@ -46,7 +46,7 @@ async def api_and_client():
 
 async def _run_started_event(store, run_id):
     events = await store.get_events(run_id)
-    return next(e for e in events if e.event_type == EventType.RUN_STARTED)
+    return next(e for e in events if (e.event_type == EventType.RUN and e.phase == "started"))
 
 
 async def _wait_for_resolved_event(store, run_id, timeout=5.0):
@@ -268,7 +268,7 @@ async def test_idempotent_replay_reuses_first_contracts(api_and_client):
     assert replay.json()["run_id"] == first_run_id
 
     events = await store.get_events(first_run_id)
-    started = next(e for e in events if e.event_type == EventType.RUN_STARTED)
+    started = next(e for e in events if (e.event_type == EventType.RUN and e.phase == "started"))
     contracts = started.payload["contracts"]
     assert contracts[0]["input"]["path"] == "x.txt"
 

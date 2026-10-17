@@ -91,9 +91,10 @@ def parse_output_refs(
       - referenced step exists in current plan ∪ completed ∪ available;
       - pure references: field exists in the source step's operation
         ``output_schema`` (shallow, lenient) AND the target input field is
-        ``ref_allowed=True`` (unlisted fields default to False → reject);
+        ``x-role: data`` (default AUTHORITY → reject);
       - inline references: step existence only (field validation lenient);
-      - ``file_op.path`` / ``file_op.content`` never allow references.
+      - AUTHORITY fields (``file_op.path``, ``http_request.url``, ...) never
+        allow references.
 
     Invalid plans are rejected by the trusted PlanGuardrail before the Executor,
     so a ``$`` string can never reach a tool as a raw literal path.
@@ -107,10 +108,7 @@ def parse_output_refs(
     for step in plan.steps:
         if not isinstance(step.input, dict):
             continue
-        target_op = None
         target_def = registry.get_tool_def(step.tool)
-        if target_def is not None:
-            target_op = target_def.resolve_operation(step.input)
 
         for top_field, ref, is_pure in _collect_refs(step.input):
             if ref.step_id not in valid_steps:
@@ -120,8 +118,9 @@ def parse_output_refs(
                 )
                 continue
 
-            # C-04: target field must allow references (unlisted → False).
-            if target_op is not None and not target_op.ref_allowed(top_field):
+            # D-01/C-04: target field must declare ``x-role: data`` (default
+            # AUTHORITY → reject), derived from the tool's input_schema.
+            if target_def is not None and not target_def.ref_allowed(top_field):
                 errors.append(
                     f"Step '{step.id}': input field '{top_field}' does not allow "
                     f"$step.output references (ref_allowed=False)"

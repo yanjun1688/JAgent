@@ -21,55 +21,28 @@ from harness.core.token_counter import (
     TokenCounter,
     create_token_counter,
 )
-from harness.models.events import (
-    PAYLOAD_MODEL_MAP,
-    AgentThoughtPayload,
-    ConfirmationReceivedPayload,
-    ConfirmationRequestedPayload,
-    ContextCheckpointedPayload,
-    ContextCompressedPayload,
-    ContextPrunedPayload,
-    Episode,
-    EpisodeArchivedPayload,
-    Event,
-    EventType,
-    FeedbackCategory,
-    FeedbackInjectedPayload,
-    FeedbackSource,
-    GuardrailTriggeredPayload,
-    RunCompletedPayload,
-    RunFailedPayload,
-    RunOrphanedPayload,
-    RunPausedPayload,
-    RunResumedPayload,
-    RunStartedPayload,
-    ToolCalledPayload,
-    ToolCompletedPayload,
-    ToolFailedPayload,
-    ToolResultType,
-    ToolTimeoutPayload,
-)
-from harness.models.plan import DagPlan, DagStep
-from harness.models.tools import (
-    Guardrail,
-    RetryPolicy,
-    SideEffect,
-    SuccessIndicator,
-    ToolDefinition,
-)
+
+# Single source for every model export: harness.models.__all__ (event payloads,
+# enums, plan/tool/workspace models). Adding a model touches only that layer.
+from harness.models import *  # noqa: F401,F403
+from harness.models import __all__ as _model_exports
 from harness.monitoring.run_monitor import RunMonitor
 from harness.storage.event_store import EventStore, SequenceConflictError
 from harness.tools import (
     HTTP_REQUEST_DEF,
     MCP_CALL_DEF,
+    DependencyGuardrail,
+    DestructiveOpGuardrail,
     ExecutionStatus,
     GuardrailResult,
     GuardrailRunner,
     IdempotencyKeyGenerator,
+    RateLimitGuardrail,
     RetryRunner,
     Sandbox,
     SandboxResult,
     SchemaGuardrail,
+    ScopeGuardrail,
     Skill,
     ToolExecutionResult,
     ToolExecutor,
@@ -82,39 +55,6 @@ from harness.tools import (
 )
 
 __all__ = [
-    # Event models
-    "Event",
-    "EventType",
-    "PAYLOAD_MODEL_MAP",
-    "RunStartedPayload",
-    "AgentThoughtPayload",
-    "ToolCalledPayload",
-    "ToolCompletedPayload",
-    "ToolFailedPayload",
-    "ToolResultType",
-    "ToolTimeoutPayload",
-    "GuardrailTriggeredPayload",
-    "ConfirmationRequestedPayload",
-    "ConfirmationReceivedPayload",
-    "ContextCompressedPayload",
-    "ContextCheckpointedPayload",
-    "Episode",
-    "EpisodeArchivedPayload",
-    "ContextPrunedPayload",
-    "FeedbackCategory",
-    "FeedbackInjectedPayload",
-    "FeedbackSource",
-    "RunPausedPayload",
-    "RunResumedPayload",
-    "RunCompletedPayload",
-    "RunFailedPayload",
-    "RunOrphanedPayload",
-    # Tool models
-    "ToolDefinition",
-    "SideEffect",
-    "SuccessIndicator",
-    "Guardrail",
-    "RetryPolicy",
     # Tool layer
     "ToolExecutor",
     "ToolExecutionResult",
@@ -173,8 +113,6 @@ __all__ = [
     "StepResult",
     "ExecState",
     "TaskState",
-    "DagPlan",
-    "DagStep",
     # V0.9
     "mark_orphans",
     # V3.0 Phase 1
@@ -183,7 +121,6 @@ __all__ = [
     "HeuristicTokenCounter",
     "ProviderTokenCounter",
     "create_token_counter",
-    "Episode",
-    "EpisodeArchivedPayload",
-    "ContextPrunedPayload",
+    # Models (derived — do not restate here)
+    *_model_exports,
 ]

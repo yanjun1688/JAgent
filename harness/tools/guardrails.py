@@ -19,6 +19,7 @@ import jsonschema
 
 from harness.core.logger import guard_logger
 from harness.execution.base import ExecutionBackend
+from harness.models.events import event_matches
 from harness.models.tools import DependencyConstraint, SideEffect, ToolDefinition
 from harness.models.workspace import WorkspaceScope
 
@@ -342,7 +343,7 @@ class DependencyGuardrail:
 
         for constraint in constraints:
             matched = any(
-                e.event_type.value == constraint.event_type
+                event_matches(e.event_type, e.payload, constraint.event_type)
                 and self._matches_payload(e.payload, constraint.payload_filter)
                 for e in events
             )

@@ -31,11 +31,15 @@ _log_monitor = guard_logger("context.monitor")
 _log_compress = guard_logger("context.compress")
 _log_checkpoint = guard_logger("context.checkpoint")
 
-# v3.4 (F-3): 模型上下文窗口基准与安全系数。token_limit 不再硬编码（曾在 serve.py
-# 被写死为 3000，导致压缩/紧急阈值被压到 2100/2700 而频繁误触发，见 run e05087b6）。
-_CONTEXT_WINDOW_TOKENS = 128_000
-_CONTEXT_SAFETY_FACTOR = 0.7
+# v3.5 (R4): 模型上下文窗口基准 200K、安全系数 0.8 → 默认限额 160K。
+# token_limit 不再硬编码（更早曾在 serve.py 被写死为 3000，导致压缩/紧急阈值被压到
+# 2100/2700 而频繁误触发，见 run e05087b6）。
+_CONTEXT_WINDOW_TOKENS = 200_000
+_CONTEXT_SAFETY_FACTOR = 0.8
 DEFAULT_CONTEXT_TOKEN_LIMIT = int(_CONTEXT_WINDOW_TOKENS * _CONTEXT_SAFETY_FACTOR)
+
+# Episode 摘要生成的输出上限：保真契约要求字段内容完整，过短会截断导致 JSON 解析失败。
+EPISODE_MAX_TOKENS = 4096
 
 
 def resolve_context_token_limit(explicit: int | None) -> int:
@@ -64,7 +68,8 @@ class ContextManager:
 
     Plugs into AgentLoopScheduler — called each iteration before think.
     Uses TokenCounter for accurate token estimation with auto-fallback.
-    3-tier compression: lazy_clear (>50%) → episode_archive (>70%) → emergency (>90%).
+    3-tier compression (boundaries from constructor ratios): lazy_clear →
+    episode_archive → emergency_compact.
     """
 
     def __init__(
@@ -75,9 +80,9 @@ class ContextManager:
         token_limit: int | None = None,
         checkpoint_interval: int = 10,
         compression_cooldown_iterations: int = 10,
-        compression_threshold_ratio: float = 0.7,
-        emergency_threshold_ratio: float = 0.9,
-        lazy_clear_ratio: float = 0.5,
+        compression_threshold_ratio: float = 0.8,
+        emergency_threshold_ratio: float = 0.95,
+        lazy_clear_ratio: float = 0.6,
         importance_preserve_threshold: float = 0.6,
         preserved_excerpt_max_items: int = 6,
         preserved_excerpt_max_chars: int = 600,
@@ -92,6 +97,15 @@ class ContextManager:
         self.compression_threshold_ratio = compression_threshold_ratio
         self.emergency_threshold_ratio = emergency_threshold_ratio
         self.lazy_clear_ratio = lazy_clear_ratio
+        # R3: ratios are the single source of tier boundaries — fail closed on
+        # misordered/invalid config instead of silently re-deriving a wrong tier.
+        if not (0.0 < lazy_clear_ratio <= compression_threshold_ratio <= emergency_threshold_ratio <= 1.0):
+            raise ValueError(
+                "invalid compression threshold ratios: require "
+                "0 < lazy_clear_ratio <= compression_threshold_ratio <= emergency_threshold_ratio <= 1, got "
+                f"lazy_clear_ratio={lazy_clear_ratio}, compression_threshold_ratio={compression_threshold_ratio}, "
+                f"emergency_threshold_ratio={emergency_threshold_ratio}"
+            )
         # ⑤: episode_archive/emergency_compact 档的高重要性原文保留参数
         self.importance_preserve_threshold = importance_preserve_threshold
         self.preserved_excerpt_max_items = preserved_excerpt_max_items
@@ -102,7 +116,13 @@ class ContextManager:
         self._last_compressed_iteration: dict[str, int] = {}
 
     async def _async_estimate_context_tokens(self, state: RunState) -> int:
-        """Async TokenCounter-based estimation."""
+        """Token-counter-based working-context estimation.
+
+        Covers thoughts, tool results and the archived summary currently in
+        context (the latest Episode rendered via ``to_context_text()`` — the
+        same text the planner/kernel inject), so the trigger cannot miss the
+        tokens carried by a prior compression.
+        """
         total = 0
         for t in state.thought_history:
             total += await self.token_counter.count(t.thought)
@@ -111,6 +131,11 @@ class ContextManager:
                 total += await self.token_counter.count(str(tr.output))
             if tr.error:
                 total += await self.token_counter.count(tr.error)
+        if state.summary is not None:
+            summary_text = (
+                state.summary.to_context_text() if isinstance(state.summary, Episode) else str(state.summary)
+            )
+            total += await self.token_counter.count(summary_text)
         return max(1, total)
 
     async def _async_estimate_text_tokens(self, text: str) -> int:
@@ -120,10 +145,13 @@ class ContextManager:
     async def maybe_compress(self, run_id: str, iteration: int, state: RunState) -> None:
         """3-tier compression strategy unified entry point.
 
-        < 50%: no action
-        50-70%: lazy_clear — remove low-importance processed events
-        70-90%: episode_archive — generate structured Episode, write event
-        > 90%: emergency_compact — aggressive compression, keep recent 3
+        Tier boundaries are the constructor ratios (single source), applied as
+        absolute token thresholds against the current estimate:
+
+        <= lazy_clear_threshold: no action
+        <= compression_threshold: lazy_clear — remove low-importance processed events
+        <= emergency_threshold: episode_archive — generate structured Episode, write event
+        > emergency_threshold: emergency_compact — aggressive compression, keep recent 3
         """
         if state.plan_boundary_seqs and state.seq < state.plan_boundary_seqs[-1]:
             return
@@ -146,8 +174,8 @@ class ContextManager:
             ),
         )
 
-        if ratio <= 0.5:
-            _log_monitor.debug("COMPRESSION_SKIP %s", fmtkv(run_id=run_id, reason="below_50%"))
+        if estimate <= self.lazy_clear_threshold:
+            _log_monitor.debug("COMPRESSION_SKIP %s", fmtkv(run_id=run_id, reason="below_lazy_clear_threshold"))
             return
 
         last = self._last_compressed_iteration.get(run_id, 0)
@@ -160,12 +188,12 @@ class ContextManager:
             return
         self._last_compressed_iteration[run_id] = iteration
 
-        if ratio > 0.9:
+        if estimate > self.emergency_threshold:
             _log_compress.info(
                 "COMPRESSION_DECIDE %s", fmtkv(run_id=run_id, strategy="emergency_compact", ratio=f"{ratio:.2%}")
             )
             await self._emergency_compact(run_id, state, estimate)
-        elif ratio > 0.7:
+        elif estimate > self.compression_threshold:
             _log_compress.info(
                 "COMPRESSION_DECIDE %s", fmtkv(run_id=run_id, strategy="episode_archive", ratio=f"{ratio:.2%}")
             )
@@ -178,7 +206,7 @@ class ContextManager:
 
     async def _lazy_clear(self, run_id: str, state: RunState, token_count: int) -> None:
         """Remove low-importance processed events from RunState (via event)."""
-        pruned_refs, pruned_tokens = await self._select_low_importance_events(state)
+        pruned_refs = await self._select_low_importance_events(state)
         if not pruned_refs:
             _log_monitor.info(
                 "LAZY_CLEAR_SKIP %s",
@@ -191,7 +219,6 @@ class ContextManager:
             fmtkv(
                 run_id=run_id,
                 pruned_event_count=len(pruned_refs),
-                pruned_token_estimate=pruned_tokens,
                 pruned_seqs=pruned_refs[:10],
                 original_tokens=token_count,
             ),
@@ -200,10 +227,9 @@ class ContextManager:
         if self.store:
             await self.store.append_event(
                 run_id,
-                EventType.CONTEXT_PRUNED,
+                EventType.CONTEXT,
                 ContextPrunedPayload(
                     pruned_event_refs=pruned_refs,
-                    pruned_token_count=pruned_tokens,
                     pruned_seq_count=len(pruned_refs),
                     reason="lazy_clear",
                 ).model_dump(),
@@ -259,7 +285,6 @@ class ContextManager:
             state,
             episode_range=episode_range,
             original_event_refs=archived_refs,
-            original_tokens=token_count,
             compress_thoughts=compress_thoughts,
             compress_results=compress_results,
             run_id=run_id,
@@ -285,10 +310,8 @@ class ContextManager:
         if self.store:
             await self.store.append_event(
                 run_id,
-                EventType.EPISODE_ARCHIVED,
+                EventType.CONTEXT,
                 EpisodeArchivedPayload(
-                    original_tokens=token_count,
-                    compressed_tokens=summary_tokens,
                     episode=episode,
                     keep_recent_count=keep,
                     archived_event_refs=archived_refs,
@@ -330,7 +353,7 @@ class ContextManager:
                 archived_event_count=len(archived_refs),
                 episode_range=f"{episode_range[0]}-{episode_range[1]}",
                 keep_recent=keep_count,
-                reason="above_90%_threshold",
+                reason="above_emergency_threshold",
             ),
         )
 
@@ -339,7 +362,6 @@ class ContextManager:
             state,
             episode_range=episode_range,
             original_event_refs=archived_refs,
-            original_tokens=token_count,
             compress_thoughts=compress_thoughts,
             compress_results=compress_results,
             emergency=True,
@@ -361,10 +383,8 @@ class ContextManager:
         if self.store:
             await self.store.append_event(
                 run_id,
-                EventType.EPISODE_ARCHIVED,
+                EventType.CONTEXT,
                 EpisodeArchivedPayload(
-                    original_tokens=token_count,
-                    compressed_tokens=summary_tokens,
                     episode=episode,
                     keep_recent_count=keep_count,
                     archived_event_refs=archived_refs,
@@ -434,11 +454,11 @@ class ContextManager:
         max_chars = self.preserved_excerpt_max_chars
         return [text[:max_chars] for _, _, text in candidates[:limit]]
 
-    async def _select_low_importance_events(self, state: RunState) -> tuple[list[int], int]:
+    async def _select_low_importance_events(self, state: RunState) -> list[int]:
         """Select low-importance events for lazy_clear pruning.
 
-        Returns (pruned_seq_refs, estimated_pruned_tokens).
-        Only prunes events with importance <= 0.2 that are not in the recent window.
+        Returns pruned_seq_refs. Only prunes events with importance <= 0.2
+        that are not in the recent window.
         """
         keep_recent = max(state.keep_recent_count, 2)
         recent_thought_seqs = (
@@ -451,7 +471,6 @@ class ContextManager:
         )
 
         pruned_refs = []
-        pruned_tokens = 0
 
         old_thoughts = state.thought_history[:-keep_recent] if len(state.thought_history) > keep_recent else []
         for t in old_thoughts:
@@ -460,7 +479,6 @@ class ContextManager:
             score = self._score_event_importance(t)
             if score <= 0.2:
                 pruned_refs.append(t.seq)
-                pruned_tokens += await self.token_counter.count(t.thought)
 
         old_results = state.tool_results[:-keep_recent] if len(state.tool_results) > keep_recent else []
         for tr in old_results:
@@ -469,16 +487,14 @@ class ContextManager:
             score = self._score_event_importance(tr)
             if score <= 0.2:
                 pruned_refs.append(tr.event_seq)
-                pruned_tokens += await self.token_counter.count(str(tr.output or ""))
 
-        return pruned_refs, pruned_tokens
+        return pruned_refs
 
     async def _generate_episode(
         self,
         state: RunState,
         episode_range: tuple[int, int] = (0, 0),
         original_event_refs: list[int] | None = None,
-        original_tokens: int = 0,
         compress_thoughts: list | None = None,
         compress_results: list | None = None,
         emergency: bool = False,
@@ -541,8 +557,6 @@ class ContextManager:
             )
             return Episode(
                 episode_range=episode_range,
-                original_tokens=original_tokens,
-                compressed_tokens=compressed_tokens,
                 key_decisions=[],
                 tools_used=tools_used,
                 key_findings=[],
@@ -579,7 +593,7 @@ class ContextManager:
                     {"role": "user", "content": activity_text},
                 ],
                 temperature=0.0,
-                max_tokens=2048,
+                max_tokens=EPISODE_MAX_TOKENS,
                 run_id=run_id,
             )
             response = chat_resp.content
@@ -627,8 +641,6 @@ class ContextManager:
         if data is None:
             return Episode(
                 episode_range=episode_range,
-                original_tokens=original_tokens,
-                compressed_tokens=compressed_tokens,
                 key_decisions=[],
                 tools_used=tools_used,
                 key_findings=[],
@@ -650,8 +662,6 @@ class ContextManager:
 
         return Episode(
             episode_range=episode_range,
-            original_tokens=original_tokens,
-            compressed_tokens=compressed_tokens,
             key_decisions=key_decisions,
             tools_used=data.get("tools_used", tools_used),
             key_findings=data.get("key_findings", []),
@@ -681,26 +691,22 @@ class ContextManager:
         if iteration <= 0 or iteration % self.checkpoint_interval != 0:
             return
 
-        token_count = await self._async_estimate_context_tokens(state)
-
         _log_checkpoint.info(
             "CHECKPOINT_WRITE %s",
             fmtkv(
                 run_id=run_id,
                 iteration=iteration,
                 seq=state.seq,
-                token_count=token_count,
                 thoughts=len(state.thought_history),
                 results=len(state.tool_results),
             ),
         )
         await self.store.append_event(
             run_id,
-            EventType.CONTEXT_CHECKPOINTED,
+            EventType.CONTEXT,
             ContextCheckpointedPayload(
                 checkpoint_seq=state.seq,
                 snapshot_ref=f"checkpoint_iter_{iteration}",
-                token_count=token_count,
             ).model_dump(),
         )
 
@@ -712,7 +718,7 @@ class ContextManager:
         """
         last = 0
         for e in events:
-            if e.event_type == EventType.CONTEXT_CHECKPOINTED:
+            if e.event_type == EventType.CONTEXT and e.phase == "checkpointed":
                 p = ContextCheckpointedPayload(**e.payload)
                 if p.checkpoint_seq > last:
                     last = p.checkpoint_seq

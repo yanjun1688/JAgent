@@ -94,6 +94,18 @@ mypy 在阶段零之前**从未进入任何门禁**。清掉 `.mypy_cache` 冷�
 - 两处行内豁免均以 `mypy --warn-unused-ignores` 单独验证：无 "unused ignore"，
   证明错误真实存在且豁免必要（非多余压制）。
 
+### 3.4 全部豁免清零（2026-10-02）
+
+owner 裁决后逐个摘除 `pyproject.toml` 中的全部 overrides，修复真实类型错误而非重新静默：
+
+- `dag_executor`：gather 结果按 `BaseException` 分诊（非 Exception 重抛）；`confirmation_id` 判空代替 `needs_confirmation`。
+- `tools.executor` / `run_monitor` / `routes`：payload 变量声明联合类型；`priority` 改 `Literal`；`max(key=...)` 改 lambda。
+- `mcp_manager`：命令/URL 空值守衡；registry 缺失 fail-closed。
+- 三个 Mixin（classify/local_repair/revision_guard）：以 `TYPE_CHECKING` 下的属性/方法 stub 声明宿主提供的成员，mypy 现真实检查 mixin 内调用。
+- `BaseTool` 的 `name/description/input_schema/output_schema/idempotency_key_fields/side_effects/requires_confirmation/timeout_ms` 由 `ClassVar` 改为普通注解，以支持动态工具（McpDynamicTool/BrowserMcpTool/Skill）的实例级覆盖。
+- `recovery.unresolved_known_bad_steps` 的 `original_inputs` 改 `Mapping`（协变）。
+- 验证：`uv run mypy harness` 无任何错误（93 files）；后端 1433 passed；前端 build + 70 passed；OpenAPI 已重新生成。**当前无任何 mypy override 或行内豁免新增。**
+
 
 ## 4. 内核契约基线（本次工作禁止改动的锚点）
 

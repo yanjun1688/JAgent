@@ -83,27 +83,21 @@ def test_no_operations_declared_returns_none():
     assert resolve_operation_contract(MCP_CALL_DEF, {"tool_name": "anything"}) is None
 
 
-# ── ref_allowed_fields（C-04）─────────────────────────────────────
+# ── field role → ref policy（C-04 收敛：单一真相源）────────────────
 
 
-def test_file_op_path_and_content_never_referenceable():
-    op = resolve_operation_contract(FILE_OP_DEF, {"operation": "write", "path": "x.txt"})
-    assert op is not None
-    assert op.ref_allowed("path") is False
-    assert op.ref_allowed("content") is False
+def test_file_op_path_authority_content_data():
+    assert FILE_OP_DEF.ref_allowed("path") is False
+    assert FILE_OP_DEF.ref_allowed("content") is True
 
 
-def test_http_request_url_not_referenceable_body_is():
-    op = resolve_operation_contract(HTTP_REQUEST_DEF, {"url": "http://a", "method": "POST"})
-    assert op is not None
-    assert op.ref_allowed("url") is False
-    assert op.ref_allowed("body") is True
+def test_http_request_url_authority_body_data():
+    assert HTTP_REQUEST_DEF.ref_allowed("url") is False
+    assert HTTP_REQUEST_DEF.ref_allowed("body") is True
 
 
-def test_unlisted_field_defaults_false():
-    op = resolve_operation_contract(HTTP_REQUEST_DEF, {"url": "http://a", "method": "POST"})
-    assert op is not None
-    assert op.ref_allowed("timeout_ms") is False
+def test_unlisted_field_defaults_authority():
+    assert HTTP_REQUEST_DEF.ref_allowed("timeout_ms") is False
 
 
 # ── Pydantic / 向后兼容 ──────────────────────────────────────────

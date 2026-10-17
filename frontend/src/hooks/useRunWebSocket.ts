@@ -9,17 +9,18 @@ const MAX_BACKOFF_MS = 30_000
 const BASE_BACKOFF_MS = 1_000
 const PING_INTERVAL_MS = 25_000
 
-function mapEventTypeToStatus(eventType: string): RunStatus | null {
-  switch (eventType) {
-    case 'RunCompleted':
+function mapEventToStatus(eventType: string, phase: string | null): RunStatus | null {
+  if (eventType !== 'Run') return null
+  switch (phase) {
+    case 'completed':
       return 'completed'
-    case 'RunFailed':
+    case 'failed':
+    case 'orphaned':
       return 'failed'
-    case 'RunPaused':
+    case 'paused':
       return 'paused'
-    case 'RunResumed':
-      return 'running'
-    case 'RunStarted':
+    case 'resumed':
+    case 'started':
       return 'running'
     default:
       return null
@@ -176,7 +177,7 @@ export function useRunWebSocket(runId: string | null): UseRunWebSocketResult {
 
           addEvent(event)
 
-          const nextStatus = mapEventTypeToStatus(raw.event_type)
+          const nextStatus = mapEventToStatus(raw.event_type, raw.payload?.phase ?? null)
           if (nextStatus) {
             runStatusRef.current = nextStatus
             setRunStatus(nextStatus)

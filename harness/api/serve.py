@@ -30,7 +30,7 @@ from harness.api.app import app  # noqa: F401
 from harness.api.deps import HarnessAPI, configure_hapi
 from harness.api.loop import configure_event_loop_policy
 from harness.core.context_manager import ContextManager
-from harness.core.llm_client import MockLLMClient, OpenAILLMClient
+from harness.core.llm_client import LLMClient, MockLLMClient, OpenAILLMClient
 from harness.core.logger import guard_logger
 from harness.core.scheduler import SchedulerConfig
 from harness.models.tools import SideEffect
@@ -158,25 +158,23 @@ api = HarnessAPI(store=store, executor=executor)
 
 if USE_REAL_LLM:
     _logger.info("Real LLM mode: using %s", os.environ.get("LLM_MODEL_NAME", "?"))
+    client: LLMClient
     client = OpenAILLMClient(
         api_key=os.environ["LLM_API_KEY"],
         model=os.environ.get("LLM_MODEL_NAME", "qwen3.7-max-preview"),
         base_url=os.environ.get("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
     )
     api.scheduler_config = SchedulerConfig(
-        max_iterations=20,
+        run_attempt_budget=20,
         # Q-07 全局 run 预算（唯一 deadline）。默认 0=禁用会令 revise/plan 阶段的
         # LLM 调用无任何超时兜底（qwen3.7-max 高延迟下单次响应可达 100s+，3 次
         # revise 可无界拖长，见 P1-13 15.8）。默认 10min，watchdog 到期强制
         # RunFailed("run_timed_out")，避免 run 无限等待 LLM。
         run_timeout_ms=int(os.environ.get("HARNESS_RUN_TIMEOUT_MS", "600000")),
-        # F-6 (v3.4)：步骤级本地修复开关。默认关；经 env 开启（.env:
-        # HARNESS_LOCAL_REPAIR=1, HARNESS_LOCAL_REPAIR_TOOLS=http_request）。
-        # 只作用于非交付契约绑定、非瞬态、白名单内只读步骤。
-        local_repair_enabled=os.environ.get("HARNESS_LOCAL_REPAIR", "0") == "1",
-        local_repair_allowed_tools=tuple(
-            s for s in os.environ.get("HARNESS_LOCAL_REPAIR_TOOLS", "").split(",") if s
-        ),
+        # F-6 (v3.4)：步骤级本地修复默认开启（候选工具集由已注册工具派生，
+        # 只读强制在 validate_local_repair 按 action 判定）。只作用于非交付契约
+        # 绑定、非瞬态、只读的失败步骤。
+        local_repair_enabled=True,
     )
     monitor = RunMonitor(store)
     monitor.attach()
@@ -197,7 +195,7 @@ else:
             json.dumps({"steps": []}),
         ]
     )
-    api.scheduler_config = SchedulerConfig(max_iterations=150)
+    api.scheduler_config = SchedulerConfig(run_attempt_budget=150)
 
 # 注册工具到 ToolRegistry（ADR-010 D-07：register_tool 为唯一公开入口）。
 # real 模式 4 个工具 + mock 模式 echo 均为 BaseTool，统一经 register_tool 注册，

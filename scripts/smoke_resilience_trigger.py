@@ -22,10 +22,9 @@ Case f6 (F-6 step-local repair, best-effort with real LLM):
   whitelisted), so it is usually "retry the same GET" but not guaranteed.
 
 Prereqs:
-  - F-6 must be enabled in serve.py SchedulerConfig via env hooks, and .env must set:
-      HARNESS_LOCAL_REPAIR=1
-      HARNESS_LOCAL_REPAIR_TOOLS=http_request
-    (F-5 needs no config — it is default Tool Layer behaviour.)
+  - F-6 is default-on in serve.py SchedulerConfig (candidate tools derived from
+    the tool registry; per-action read-only enforcement in validate_local_repair).
+    No env hook required. (F-5 needs no config — it is default Tool Layer behaviour.)
   - smoke_resilience_server.py running, and the service running in real-LLM mode.
   - Run id / verdict is read back over the service HTTP API only (no DB access).
 """

@@ -17,6 +17,10 @@ from abc import ABC, abstractmethod
 
 _logger = logging.getLogger("harness.token_counter")
 
+# Heuristic chars→token ratio (single source). Used by the heuristic fallback
+# here and by run_monitor's token estimate.
+HEURISTIC_CHARS_PER_TOKEN = 0.25
+
 
 class TokenCounter(ABC):
     """Abstract token counter with auto-fallback chain."""
@@ -47,7 +51,7 @@ class HeuristicTokenCounter(TokenCounter):
     """Fallback when tiktoken is unavailable: char_count * 0.25."""
 
     async def count(self, text: str) -> int:
-        return max(1, int(len(text or "") * 0.25))
+        return max(1, int(len(text or "") * HEURISTIC_CHARS_PER_TOKEN))
 
 
 class ProviderTokenCounter(TokenCounter):
@@ -95,7 +99,7 @@ class ProviderTokenCounter(TokenCounter):
     async def _fallback_count(self, text: str) -> int:
         if self._fallback:
             return await self._fallback.count(text)
-        return max(1, int(len(text or "") * 0.25))
+        return max(1, int(len(text or "") * HEURISTIC_CHARS_PER_TOKEN))
 
     async def _call_api(self, text: str) -> int:
         import httpx

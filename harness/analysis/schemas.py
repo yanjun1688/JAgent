@@ -71,7 +71,6 @@ class DashboardOverview(BaseModel):
     total_tool_calls: int = 0
     total_tool_failures: int = 0
     total_guardrail_triggers: int = 0
-    total_tokens_consumed: int = 0
     avg_tool_success_rate: float = 0.0
 
 
@@ -118,7 +117,6 @@ class RunAnalysisSummary(BaseModel):
     intent: str = ""
     status: str = "running"
     event_count: int = 0
-    total_tokens: int = 0
     total_duration_ms: int = 0
     created_at: float | None = None
     completed_at: float | None = None

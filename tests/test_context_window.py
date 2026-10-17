@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from harness.core.context_manager import ContextManager
 from harness.core.fold import RunState, ThoughtEntry, ToolResult
+from harness.core.token_counter import HeuristicTokenCounter
 from harness.models.events import (
     EventType,
     ContextCheckpointedPayload,
@@ -86,23 +87,32 @@ class TestCompressionWindow:
         state.thought_history = [ThoughtEntry(seq=1, thought="short", tool_choice="echo")]
         await cm.maybe_compress("r1", iteration=1, state=state)
         events = await store.get_events("r1")
-        archived = [e for e in events if e.event_type == EventType.EPISODE_ARCHIVED]
-        pruned = [e for e in events if e.event_type == EventType.CONTEXT_PRUNED]
+        archived = [e for e in events if (e.event_type == EventType.CONTEXT and e.phase == "archived")]
+        pruned = [e for e in events if (e.event_type == EventType.CONTEXT and e.phase == "pruned")]
         assert len(archived) == 0
         assert len(pruned) == 0
 
     async def test_normal_compression_window_archives_episode(self, store):
-        cm = ContextManager(store=store, token_limit=1000, compression_threshold_ratio=0.8)
+        # Deterministic estimate: (9 thoughts + 8 results) × 50 = 850 tokens at
+        # token_limit 1000 → ratio 0.85, inside the archive tier (>0.8, <=0.9).
+        # The configured compression_threshold_ratio=0.8 is what puts it there.
+        cm = ContextManager(
+            store=store,
+            token_counter=HeuristicTokenCounter(),
+            token_limit=1000,
+            compression_threshold_ratio=0.8,
+        )
         state = RunState(run_id="r1")
-        state.thought_history = [ThoughtEntry(seq=i, thought="A" * 200, tool_choice="echo") for i in range(10)]
+        state.thought_history = [ThoughtEntry(seq=i, thought="A" * 200, tool_choice="echo") for i in range(9)]
         state.tool_results = [
             ToolResult(tool_call_id=f"tc{i}", tool_name="echo", status="completed", output="B" * 200, event_seq=i + 10)
-            for i in range(10)
+            for i in range(8)
         ]
         await cm.maybe_compress("r1", iteration=1, state=state)
         events = await store.get_events("r1")
-        archived = [e for e in events if e.event_type == EventType.EPISODE_ARCHIVED]
-        assert len(archived) >= 1
+        archived = [e for e in events if (e.event_type == EventType.CONTEXT and e.phase == "archived")]
+        assert len(archived) == 1
+        assert archived[0].payload["keep_recent_count"] == 2  # archive tier, not emergency
 
     async def test_emergency_compression_window_triggers_episode_archive(self, store):
         cm = ContextManager(
@@ -119,7 +129,7 @@ class TestCompressionWindow:
         ]
         await cm.maybe_compress("r1", iteration=1, state=state)
         events = await store.get_events("r1")
-        archived = [e for e in events if e.event_type == EventType.EPISODE_ARCHIVED]
+        archived = [e for e in events if (e.event_type == EventType.CONTEXT and e.phase == "archived")]
         assert len(archived) >= 1
 
     async def test_compression_below_threshold_returns_none(self, store):
@@ -128,8 +138,8 @@ class TestCompressionWindow:
         state.thought_history = [ThoughtEntry(seq=1, thought="short", tool_choice="echo")]
         await cm.maybe_compress("r1", iteration=1, state=state)
         events = await store.get_events("r1")
-        archived = [e for e in events if e.event_type == EventType.EPISODE_ARCHIVED]
-        pruned = [e for e in events if e.event_type == EventType.CONTEXT_PRUNED]
+        archived = [e for e in events if (e.event_type == EventType.CONTEXT and e.phase == "archived")]
+        pruned = [e for e in events if (e.event_type == EventType.CONTEXT and e.phase == "pruned")]
         assert len(archived) == 0
         assert len(pruned) == 0
 
@@ -145,7 +155,7 @@ class TestToolOutputTruncation:
         long_content = "A" * 1000
         await store.append_event(
             "conv-1",
-            EventType.CONVERSATION_MESSAGE,
+            EventType.CONVERSATION,
             {"conversation_id": "conv-1", "run_id": "r1", "role": "user", "content": long_content},
         )
         ctx = await _build_conversation_context(store, "conv-1")
@@ -163,7 +173,6 @@ class TestToolOutputTruncation:
         episode = await cm._generate_episode(
             state,
             episode_range=(1, 1),
-            original_tokens=1000,
         )
         assert episode is not None
         assert episode.current_plan is not None
@@ -178,7 +187,6 @@ class TestToolOutputTruncation:
         episode = await cm._generate_episode(
             state,
             episode_range=(1, 1),
-            original_tokens=1000,
         )
         assert episode is not None
 
@@ -188,23 +196,35 @@ class TestContextManagerIntegration:
 
     async def test_maybe_compress_writes_event(self, store):
         """CW-C1: When over threshold, EPISODE_ARCHIVED event is written."""
-        cm = ContextManager(store=store, token_limit=500, compression_cooldown_iterations=100)
+        cm = ContextManager(
+            store=store,
+            token_limit=500,
+            compression_threshold_ratio=0.6,
+            emergency_threshold_ratio=0.85,
+            compression_cooldown_iterations=100,
+        )
         state = RunState(run_id="r1")
         state.thought_history = [ThoughtEntry(seq=i, thought="A" * 200, tool_choice="echo") for i in range(1, 16)]
         await cm.maybe_compress("r1", iteration=1, state=state)
         events = await store.get_events("r1")
-        archived = [e for e in events if e.event_type == EventType.EPISODE_ARCHIVED]
+        archived = [e for e in events if (e.event_type == EventType.CONTEXT and e.phase == "archived")]
         assert len(archived) >= 1
 
     async def test_maybe_compress_cooldown(self, store):
         """CW-C2: Cooldown prevents repeated compression."""
-        cm = ContextManager(store=store, token_limit=500, compression_cooldown_iterations=5)
+        cm = ContextManager(
+            store=store,
+            token_limit=500,
+            compression_threshold_ratio=0.6,
+            emergency_threshold_ratio=0.85,
+            compression_cooldown_iterations=5,
+        )
         state = RunState(run_id="r1")
         state.thought_history = [ThoughtEntry(seq=i, thought="A" * 200, tool_choice="echo") for i in range(1, 16)]
         await cm.maybe_compress("r1", iteration=1, state=state)
         await cm.maybe_compress("r1", iteration=2, state=state)
         events = await store.get_events("r1")
-        archived = [e for e in events if e.event_type == EventType.EPISODE_ARCHIVED]
+        archived = [e for e in events if (e.event_type == EventType.CONTEXT and e.phase == "archived")]
         assert len(archived) == 1
 
     async def test_checkpoint_written_at_interval(self, store):
@@ -214,7 +234,7 @@ class TestContextManagerIntegration:
         state.seq = 10
         await cm.try_checkpoint("r1", iteration=5, state=state)
         events = await store.get_events("r1")
-        checkpoints = [e for e in events if e.event_type == EventType.CONTEXT_CHECKPOINTED]
+        checkpoints = [e for e in events if (e.event_type == EventType.CONTEXT and e.phase == "checkpointed")]
         assert len(checkpoints) == 1
 
     async def test_checkpoint_not_written_off_interval(self, store):
@@ -223,25 +243,25 @@ class TestContextManagerIntegration:
         state.seq = 10
         await cm.try_checkpoint("r1", iteration=3, state=state)
         events = await store.get_events("r1")
-        checkpoints = [e for e in events if e.event_type == EventType.CONTEXT_CHECKPOINTED]
+        checkpoints = [e for e in events if (e.event_type == EventType.CONTEXT and e.phase == "checkpointed")]
         assert len(checkpoints) == 0
 
     async def test_find_resume_seq(self, store):
         """CW-C5: find_resume_seq returns latest checkpoint seq."""
         events = [
-            Event(run_id="r1", seq=1, event_type=EventType.RUN_STARTED, payload={"intent": "test"}, created_at=1.0),
+            Event(run_id="r1", seq=1, event_type=EventType.RUN, payload={"intent": "test"}, created_at=1.0),
             Event(
                 run_id="r1",
                 seq=5,
-                event_type=EventType.CONTEXT_CHECKPOINTED,
-                payload=ContextCheckpointedPayload(checkpoint_seq=5, snapshot_ref="cp1", token_count=100).model_dump(),
+                event_type=EventType.CONTEXT,
+                payload=ContextCheckpointedPayload(checkpoint_seq=5, snapshot_ref="cp1").model_dump(),
                 created_at=5.0,
             ),
             Event(
                 run_id="r1",
                 seq=10,
-                event_type=EventType.CONTEXT_CHECKPOINTED,
-                payload=ContextCheckpointedPayload(checkpoint_seq=10, snapshot_ref="cp2", token_count=200).model_dump(),
+                event_type=EventType.CONTEXT,
+                payload=ContextCheckpointedPayload(checkpoint_seq=10, snapshot_ref="cp2").model_dump(),
                 created_at=10.0,
             ),
         ]
@@ -250,7 +270,7 @@ class TestContextManagerIntegration:
 
     async def test_find_resume_seq_no_checkpoint(self, store):
         events = [
-            Event(run_id="r1", seq=1, event_type=EventType.RUN_STARTED, payload={"intent": "test"}, created_at=1.0),
+            Event(run_id="r1", seq=1, event_type=EventType.RUN, payload={"intent": "test"}, created_at=1.0),
         ]
         seq = ContextManager.find_resume_seq(events)
         assert seq == 0

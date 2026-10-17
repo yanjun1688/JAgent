@@ -9,6 +9,34 @@ from pydantic import BaseModel, Field
 
 JSONSchema: TypeAlias = dict[str, Any]
 
+# Field-role single source (D-01 / C-04 revision, see
+# review_20260912_field_role_contract_diff.md): the only per-field declaration a
+# tool author makes. Ref policy and planner visibility are DERIVED from it, so
+# there is no parallel ``ref_allowed_fields`` list to keep in sync.
+FIELD_ROLE_KEY = "x-role"
+
+
+class FieldRole(str, Enum):
+    """Data-flow role of a tool input field."""
+
+    DATA = "data"  # data sink: a $ref (non-trusted-derived value) may flow in
+    AUTHORITY = "authority"  # authority/selector sink (path/url/tool_name/...): literal only
+
+
+def field_role(input_schema: JSONSchema | None, field: str) -> FieldRole:
+    """Derive a field's role from its ``input_schema`` property annotation.
+
+    The policy is fail-closed: a field is AUTHORITY unless its schema property
+    explicitly declares ``x-role: data``. Only DATA fields accept ``$ref``.
+    """
+    props = (input_schema or {}).get("properties") if isinstance(input_schema, dict) else None
+    if not isinstance(props, dict):
+        return FieldRole.AUTHORITY
+    prop = props.get(field)
+    if isinstance(prop, dict) and prop.get(FIELD_ROLE_KEY) == FieldRole.DATA.value:
+        return FieldRole.DATA
+    return FieldRole.AUTHORITY
+
 
 class SuccessIndicator(BaseModel):
     """Declares how to determine if a tool's output is semantically successful.
@@ -77,7 +105,22 @@ class RetryPolicy(BaseModel):
     retryable_errors: list[str] = Field(default_factory=list)
 
 
-class OperationContract(BaseModel):
+class OperationAttributes(BaseModel):
+    """工具级与 operation 级共享的契约属性（消除两份字段声明）。
+
+    ``ToolDefinition`` 与 ``OperationContract`` 都继承本类；per-operation 值如何
+    覆盖 tool-level 由 ``ToolDefinition.effective_*`` 注入器单点定义。
+    """
+
+    input_schema: JSONSchema = Field(default_factory=dict)
+    output_schema: JSONSchema = Field(default_factory=dict)
+    side_effects: list[SideEffect] = Field(default_factory=list)
+    requires_confirmation: bool = False
+    idempotency_key_fields: list[str] | None = None
+    retry_policy: RetryPolicy | None = None
+
+
+class OperationContract(OperationAttributes):
     """Per-operation tool contract (S02, 问题五 / C-04 / D-01).
 
     The Tool Layer previously treated a tool as an atomic unit: side effects,
@@ -87,26 +130,17 @@ class OperationContract(BaseModel):
     model declares those attributes *per operation* so a read-only operation
     can be probed safely while mutating operations stay guarded.
 
-    ``ref_allowed_fields`` (C-04): input field name → whether a ``$step.output``
-    reference is allowed in that field.  Unlisted fields default to False —
-    references are denied unless explicitly allowed (``file_op.path`` and
-    ``file_op.content`` are never allowed, D-01).
+    ``ref_allowed`` (D-01/C-04): whether a ``$step.output`` reference is allowed
+    in an input field is DERIVED from that field's role in the tool-level
+    ``input_schema`` (``field_role``): only ``x-role: data`` fields accept a
+    reference; everything else is AUTHORITY (fail-closed). There is no
+    per-operation ``ref_allowed_fields`` list to maintain.
     """
 
     operation: str = ""
-    input_schema: JSONSchema = Field(default_factory=dict)
-    output_schema: JSONSchema = Field(default_factory=dict)
-    side_effects: list[SideEffect] = Field(default_factory=list)
-    requires_confirmation: bool = False
-    idempotency_key_fields: list[str] | None = None
     probe_allowed: bool = False
-    retry_policy: RetryPolicy | None = None
-    ref_allowed_fields: dict[str, bool] = Field(default_factory=dict)
     # ADR-010 D-02: 条件必填键 —— 命中该 operation 时补充校验 input 必填字段。
     required_input: list[str] = Field(default_factory=list)
-
-    def ref_allowed(self, field: str) -> bool:
-        return bool(self.ref_allowed_fields.get(field, False))
 
 
 def resolve_operation_contract(tool_def: ToolDefinition, input: dict) -> OperationContract | None:
@@ -133,17 +167,14 @@ def resolve_operation_contract(tool_def: ToolDefinition, input: dict) -> Operati
     return None
 
 
-class ToolDefinition(BaseModel):
+class ToolDefinition(OperationAttributes):
     name: str
     description: str
-    input_schema: JSONSchema = Field(default_factory=dict)
-    output_schema: JSONSchema = Field(default_factory=dict)
-    idempotency_key_fields: list[str] | None = None
+    # 工具级必填副作用；per-operation 覆盖由 effective_side_effects 决定。
     side_effects: list[SideEffect]
-    timeout_ms: int = 30000
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
+    timeout_ms: int = 30000
     guardrails: list[Guardrail] | None = None
-    requires_confirmation: bool = False
     depends_on: list[DependencyConstraint] = []
     dangerous_with: list[str] = []
     max_parallel: int = 10
@@ -160,3 +191,24 @@ class ToolDefinition(BaseModel):
 
     def resolve_operation(self, input: dict) -> OperationContract | None:
         return resolve_operation_contract(self, input)
+
+    def effective_side_effects(self, input: dict) -> list[SideEffect]:
+        """命中 operation 即用其声明（含空），否则回退工具级 —— 单一优先级。"""
+        op = self.resolve_operation(input)
+        return op.side_effects if op is not None else self.side_effects
+
+    def effective_requires_confirmation(self, input: dict) -> bool:
+        """命中 operation 即用其声明，否则回退工具级。"""
+        op = self.resolve_operation(input)
+        return op.requires_confirmation if op is not None else self.requires_confirmation
+
+    def effective_idempotency_key_fields(self, input: dict) -> list[str] | None:
+        """operation 显式声明了键则用之，否则回退工具级（None = 继承）。"""
+        op = self.resolve_operation(input)
+        if op is not None and op.idempotency_key_fields is not None:
+            return op.idempotency_key_fields
+        return self.idempotency_key_fields
+
+    def ref_allowed(self, field: str) -> bool:
+        """A ``$ref`` may flow into ``field`` only when it is ``x-role: data``."""
+        return field_role(self.input_schema, field) is FieldRole.DATA

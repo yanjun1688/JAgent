@@ -85,12 +85,12 @@ async def _build_conversation_context(store, conversation_id: str, max_rounds: i
     events = await store.get_events_for_conversation(conversation_id)
     messages: list[str] = []
     for e in events:
-        if e.event_type == EventType.CONVERSATION_MESSAGE:
+        if e.event_type == EventType.CONVERSATION and e.phase == "message":
             p = e.payload
             role = p.get("role", "unknown")
             content = p.get("content", "")
             messages.append(f"[{role}] {content[:500]}")
-        elif e.event_type == EventType.CONVERSATION_STARTED:
+        elif e.event_type == EventType.CONVERSATION and e.phase == "started":
             pass
 
     max_messages = max_rounds * 2

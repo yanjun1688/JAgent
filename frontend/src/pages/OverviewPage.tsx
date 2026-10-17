@@ -215,7 +215,7 @@ export default function OverviewPage() {
 
         {overview && (
           <p className="text-center text-[10px] text-text-muted">
-            事件总数 {overview.total_events} · token 累计 {overview.total_tokens_consumed}
+            事件总数 {overview.total_events}
           </p>
         )}
       </motion.div>

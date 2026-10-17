@@ -207,6 +207,237 @@
 
 ---
 
+## 5.1 处置状态核验（2026-09-12）
+
+> 本节由后续会话按当前 `main` 代码逐条核验回填，非原审计内容。原 §5 表保持不变（审计基线）。
+
+| # | 处置状态 | 证据 / 说明 |
+|---|---|---|
+| R1 | **已解决（删路径）** | 生产 fallback 删除后 serial 弱完成路径在生产不可达（`plan.py` `_get_or_fallback` 已移除）；`AgentLoopScheduler` 仅评测/脚本显式使用，属非生产技术债 |
+| R2 | **已解决** | `plan.py` 删除 `new AgentLoopScheduler` 兜底，planner 失败直接结构化 `RunFailed`；`api/routes.py` docstring 同步 |
+| R3 | **已完成（2026-09-12）** | `context_manager.py` `maybe_compress` 改读 `lazy_clear_threshold / compression_threshold / emergency_threshold`；`__init__` 增加比例有序性 fail-closed 校验；回归 `tests/test_context_manager.py::TestCompressionThresholdsAreConfigurable`（4 例） |
+| R4 | **已关闭（2026-10-04，删除记账）** | owner 裁决删除全部 token 记账（Run 级记账 + 压缩内部遥测 + run_monitor 检测块），仅保留驱动压缩的估算器；阈值提至 200K×0.8=160K（比例 0.6/0.8/0.95）；估算补算 summary；SUMMARIZE 提示词范式重写。详见 PRD §处置注记 与 `tests/test_token_accounting_removed.py` |
+| R5 | **已完成（2026-10-02）** | 第三层复检移入生产接缝：`plan.py` layer 循环前强制 `guardrail.validate(plan)`（首次/修订/local-repair 重入均覆盖）；生产不调用的 `DagExecutor.execute()` 第二份编排已删除。回归 `tests/test_execution_entry_revalidation.py` |
+| R6 | **已完成（2026-10-02）** | 受信拒绝统一落 `Diagnostic/plan_rejected`（`PlanRejectedPayload`: stage/attempt/reasons/recovered）；接入 plan/revise/degenerate/invariant/merge 五处接缝；回归 `tests/test_plan_rejection_events.py`（8 例）+ 真实 LLM BDD `scripts/bdd_plan_rejection_real_llm.py` |
+| R7 | **已完成（2026-09-12）** | 存在性判定统一走 `ToolRegistry.tool_def_or_error` / `require_tool_def` + `unknown_tool_message`；#1 注册安全 / #5 workspace 白名单按设计保留（语义不同）；serial `_find_tool_def` 为无 registry 的列表例外 |
+| R8 | **基本完成** | 共享 `parse_lenient_json`；`timed_chat`（T-R8b-4）；contract extractor/episode 补 `run_id`（T-R8b-1）；local_repair 回喂 `last_error`（T-R8b-3）；prompt 注册表收敛（T-R8b-5）；serial think 纳入 deadline（T-R8b-2 部分） |
+| R9 | **已完成（2026-09-12，裁剪）** | owner 裁决前端零消费的 `/api/v1/query` 直接删除（`api/query.py` 640 行 + 路由 + 死 `SchedulerConfig.to_public_dict`）；重复的第二份 run 读模型随删除消失 |
+| R10 | **部分** | 事件整合（§5.7）新增 `tests/test_event_contract_completeness.py` 强制 13 种事件 + `PAYLOAD_CLASS_TO_TYPE` 齐备，并把前端 7 处硬编码表收敛到 `api/types.ts` 的 `eventPhase/isEvent/isTerminalRunEvent` 单一接缝；但 `scripts/generate_openapi.py` 仍只取 `app.openapi()`，Event 模型未暴露，前端类型仍是 `event_type: string` |
+| R11 | **已完成** | `context_manager.py:604` 已改用 `parse_lenient_json`（R8-a） |
+| R12 | **已完成（2026-10-02）** | `pyproject.toml` 全部 overrides 清零，修复真实类型错误；Mixin 以 TYPE_CHECKING stub 受检；BaseTool 动态覆盖。详见 BASELINE.md §3.4 与本文 §5.11 |
+
+**汇总（2026-10-04 更新）**：R1/R2 经"删除生产 fallback"解决；已完成 9（R3、R4、R5、R6、R7、R8 基本、R9、R11、R12）；部分 1（R10）；未做 0。
+
+**追踪文档**：R8-b / R1 / R2 的方案与任务描述见 [`PLAN_20260910_R8b_R1_R2_LLM封装收敛与调度器接缝方案.md`](../plans/PLAN_20260910_R8b_R1_R2_LLM封装收敛与调度器接缝方案.md)。R1/R2 待 owner 裁决后按 AGENTS.md §3.4 推进。
+
+---
+
+## 5.2 Tier 0 死代码清理（2026-09-12）
+
+> 纯减法，零行为变化。不引入新抽象，仅删除确证不可达/无副作用的代码。验证：后端 `ruff`/`mypy`/`pytest`（1522 passed, 2 skipped）/`generate_openapi.py --check`；前端 `tsc && vite build`/`vitest`（70 passed）。
+
+**前端删除（无路由可达、无存活模块 import）**
+- 孤儿页 10：`Dashboard`、`RunAnalysis`、`OpsDashboard`、`OpsSystem`、`OpsRunDetail`、`OpsChatView`、`GuardrailPanel`、`ToolsPanel`、`RunDetail`、`RunList`。
+- 旧 chat/运维组件 11：`ChatDrawer`、`ConversationDrawer`、`ConversationView`、`MessageBubble`、`ThinkingPanel`(root)、`ToolCallCard`、`ConfirmationCard`、`FinalAnswer`、`PendingIndicator`、`OpsRealTimePanel`、`TraceTree`。
+- `/query` 查询门面 `api/ops-client.ts`（唯一消费者为死页）。
+- 零调用导出：`client.ts` 的 `getRun`/`getRunEvents`/`createRun`/`deleteRun`/`connectEventStream` 及 `RunDetail`/`HarnessEvent` 别名；`types.ts` 的 `WsConnectionStatus`。
+- 随附废弃测试 6：`ChatDrawer`/`MessageBubble`/`ToolCallCard`/`ConfirmationCard`/`FinalAnswer`/`PendingIndicator`。
+
+**Bug 修复（活代码）**
+- `components/chat/ThinkingPanel.tsx` 的 `summarize()` 原先 switch 六个**后端不存在**的事件名（`ThinkStarted`/`ThinkCompleted`/`ActStarted`/`ObserveStarted`/`ObserveCompleted`/`ContextCompacted`），导致线上思考面板恒为"等待事件…"。改为规范 `EventType`：`AgentThought`/`ToolCalled`/`ToolCompleted`/`ToolFailed`/`ToolTimeout`/`GuardrailTriggered`/`ConfirmationRequested`/`ConfirmationReceived`/`ContextCompressed`/`PlanCreated`/`PlanRevised`；测试同步改为真实事件并断言标签。
+
+**后端删除**
+- `harness/__init__.py`：`__all__` 列出却未导入的 4 个 guardrail（`ScopeGuardrail`/`RateLimitGuardrail`/`DestructiveOpGuardrail`/`DependencyGuardrail`）补齐导入（消除 `from harness import *` 的 `AttributeError`）。
+- `monitoring/run_monitor.py`：删除无副作用的裸表达式 `err_map[dominant_error]`（`dominant_error` 赋值保留，仍被下游使用）。
+- 本地 `.env`：移除已无读取方的 `HARNESS_LOCAL_REPAIR*`。
+
+**明确未做（后续层级）**：`SchedulerConfig` 投影单一来源、`/query` 端点裁剪、读模型/Tool 契约合并、字段级语义去重（`deliverable_met` 等）——均属 Tier 1–3，待 owner 决策。
+
+---
+
+## 5.3 重复字段 / 未抽象类型收敛（2026-09-12，第二批）
+
+> 目标：一个概念只有一处定义、一处优先级、一处投影。已合并项**输出等价**，后端 `ruff`/`mypy`/`pytest`(1522 passed, 2 skipped)/`generate_openapi.py --check`/`check_dead_code.py`、前端 `tsc && vite build`/`vitest`(70) 全绿。
+
+**已合并（去重）**
+- Run 终态集合 → `models.events.TERMINAL_EVENT_TYPES`（analysis/replay/query 派生；`browser_pool` 保留 `∪{RUN_ORPHANED}` 的"不再被驱动"语义）。
+- 字符→token 启发式系数 `0.25` → `token_counter.HEURISTIC_CHARS_PER_TOKEN`（token_counter/run_monitor 共用）。
+- DB 行→事件 `_row_to_event` 3 份 → `storage.event_store.event_from_row`（容错 payload 字符串/缺列），query/analysis 复用。
+- `api.schemas.RequiredOperationInput` 去除对父类 `tool`/`input` 的重复声明。
+- `step_normal` 谓词两份（`fold.StepEvidence` / `dag_types.StepResult`）→ `dag_types.exec_state_is_normal` 单一纯函数。
+- `SchedulerConfig` API 投影 → `to_public_dict()`，`/query?type=schedulers|system` 共用（消除 4 字段手抄）。
+- `api/query.py` 工具状态分桶两份 → `_tool_status_buckets`；`pending_confirmations` 复用 `api.schemas.PendingConfirmationItem`。
+- `ToolDefinition`/`OperationContract` → 公共基类 `OperationAttributes` + `effective_side_effects / effective_requires_confirmation / effective_idempotency_key_fields` 单点优先级（`DestructiveOpGuardrail`/`DependencyGuardrail` 的独立语义**保持不变**）。
+- 大输出 blob：`OutputBlobStoredPayload` 为唯一模型，删 `StoredBlob` 与 executor 逐字段拷贝。
+- 事件再导出单一来源：`harness.models.__all__` 补全全部 41 个 payload，顶层 `harness.__all__` 由其派生（消除两层 `__init__` 发散）。
+- `RunCompletedPayload.deliverable_met` 删除（由 `deliverable_status` 派生；`CompletionVerdict.deliverable_met` 改 property，`completion_evidence` 少一个派生键）。
+
+**明确保留（非重复；强行合并会改语义）**
+- 状态枚举 `RunStatus` / `ExecState` / `TaskState` / `ToolResultStatus` / `ExecutionStatus`：**正交状态机**（v2.1 起刻意分层），不合并。
+- `RunFailedPayload.final_error` / `result_summary` / `user_facing_message`：内部原因 / 摘要 / 用户面三受众。
+- `RunStartedPayload.intent` / `intent_raw` / `current_request`：处理后 / 原始 / 当前请求，语义不同。
+- `Event.payload`、`RunState.latest_plan/plan_history/step_tasks/completion_evidence`、`QueryResponse.data` 的动态 dict：读路径/纯函数折叠的刻意设计；写入侧已由 `PAYLOAD_MODEL_MAP` 校验。payload 内 `steps: list[dict]` 的 `step_id/tool_name` 与 `DagStep.id/tool` 键名不一致属**已知隐患**，改动涉及事件 schema 与 fold，列为后续独立项。
+- 前端 event color/label/terminal 多表：服务 badge/category/status 等不同视觉语义。
+
+---
+
+## 5.4 R3 压缩阈值真配置化（2026-09-12，第三批）
+
+> 目标：消除"构造参数算了不用"的假配置。`ContextManager.__init__` 由三个 ratio 派生绝对阈值，但 `maybe_compress` 曾用硬编码 `0.5/0.7/0.9` 字面量判档，外部 ratio 只进日志。
+
+- `maybe_compress` 三档判定改用 `lazy_clear_threshold` / `compression_threshold` / `emergency_threshold`（`estimate` 直接比较，`ratio` 仅留日志）。
+- `__init__` 增加 fail-closed 校验：`0 < lazy_clear_ratio <= compression_threshold_ratio <= emergency_threshold_ratio <= 1`，乱序/越界直接 `ValueError`，不再静默错档。
+- 回归：`tests/test_context_manager.py::TestCompressionThresholdsAreConfigurable` 钉住三个 ratio 各自驱动对应边界（skip/lazy_clear、archive、emergency keep_recent=3）+ 非法比例抛错。
+- `tests/test_context_window.py::test_normal_compression_window_archives_episode` 原依赖硬编码 0.7（传 0.8 却假绿），修正为注入 `HeuristicTokenCounter` 并落在配置指定的 archive 档——**BEHAVIOR CHANGE**（非默认 ratio 下分档边界确实随配置移动）。
+- 验证：`ruff` / `mypy` 全绿；`pytest -q` **1526 passed / 2 skipped**。
+
+**明确未做**：importance 打分启发式（C2）与 token 三口径记账（R4）仍属独立项。
+
+---
+
+## 5.5 R7 工具存在性判定收敛（2026-09-12，第四批）
+
+> 目标：让"工具是否存在/是否允许"只有一处底部真源与一处文案，同时保留各接缝不同的默认方向与时序。
+
+- 底部原语（R7 分支已建，本次补齐剩余调用点）：`ToolRegistry.tool_def_or_error`（非抛异常元组查询）/ `require_tool_def`（fail-fast 包装）+ `unknown_tool_message`（零依赖 `models/tools.py`，唯一文案源）。
+- 剩余调用点收编：
+  - `core/contract_extractor.py` `_validate`：原 `get_tool_def(...) is None` + 手写片段 + 二次 `get_tool_def`，改为单次 `tool_def_or_error` 并把同一 `tool_def` 传给 `validate_delivery_contract_input`。
+  - `core/planner/revision_invariants.py` `step_is_mutating`：改用 `tool_def_or_error`（未知仍 fail-closed → True，方向不变）。
+  - `core/scheduler/base.py`：`[act]` 日志删掉最后一处手写 `Unknown tool: '%s'`，改用 `unknown_tool_message`（`_fail` 语义原本已用共享片段）。
+- **按设计保留、不合并**：`#1` 注册契约自洽（`validate_registration_safety`，必须先于可见性）、`#5` `ToolWhitelistGuardrail`（"是否允许"而非"是否存在"，fail-open workspace 存量语义）；serial `_find_tool_def` 为无 `ToolRegistry` 的列表查询（片段仍取共享源）。以上任何默认方向不得被顺手反转。
+- 回归 `tests/test_tool_existence_convergence.py`（5 例）：contract extractor 未知工具片段 = 共享源、已注册工具放行；`step_is_mutating` 未知 fail-closed / 已注册只读放行；**AST 源码守卫**——除 `models/tools.py`（定义）与 `tools/mcp_call.py`（MCP server 概念）外，`harness/` 内不得再出现手写 `unknown tool'`/`Unknown tool:` 字面量。
+- 验证：`ruff` / `mypy` 全绿；`pytest -q` **1531 passed / 2 skipped**。
+
+---
+
+## 5.6 R9 读模型重复的收敛（2026-09-12，第五批：裁剪 `/api/v1/query`）
+
+> owner 裁决：`/api/v1/query` 查询门面（18 种 type）在前端零消费者（Tier0 删掉的 `ops-client.ts` + 孤儿运维页是其唯一调用方），直接**删除**而非收敛保留。属公开 API 契约变更，非纯清理。
+
+- 删除 `harness/api/query.py`（640 行）、`app.py` 路由装配、`tests/test_query.py`；移除仅 `/query` 使用的死代码 `SchedulerConfig.to_public_dict()`（连同 `asdict` import）。
+- 同步清理引用：`tests/test_api_contract_robustness.py`（query 分页/未知 type/run_id/信封 4 用例与 OpenAPI 路径断言）、`tests/test_backend_integration.py`（18-type 分发用例）、`tests/test_unknown_event_type.py`（`api.query` 断言）。
+- 重新生成 `frontend/public/openapi.json` + `frontend/src/api/schema.ts`（移除 `/api/v1/query` 路径与 `QueryResponse`/`QueryMeta` schema）；README 移除 Unified Query 章节/目录项/技术栈标注。
+- R9 原始的"两套 run 读模型 + 字段漂移"随第二份读模型（query.py）删除而消失；REST `routes.py` 成为唯一 run 读模型来源。§5.3 记录的 `SchedulerConfig.to_public_dict()` 亦随本批移除。
+- 未受影响的既有收敛保留：`_row_to_event` 单源（`storage.event_store.event_from_row`，analysis 仍复用）、`PendingConfirmationItem` 单源、tool 状态分桶（原 query 内重复）。
+- 验证：`ruff` / `mypy`（92 files）/ `check_dead_code.py`（112 files）/ `generate_openapi.py --check` 全绿；后端 `pytest -q` **1451 passed**（删除了 query 相关 82 例）；前端 `tsc && vite build` 通过、`vitest` **70 passed**。
+
+---
+
+## 5.7 事件整合 41 → 13（2026-09-12，第六批：契约面变更）
+
+> 本批属本审计之外独立发起的重构，涉及事件流 schema 契约面变更，单列一节记录。目标：把"每个跃迁一个 `EventType`"的 41 项枚举收敛为"每个聚合生命周期一个 `EventType` + `payload.phase`"的 13 项，使契合同源与前端消费的触点数量级下降。
+
+**新分类（`harness/models/events.py` 唯一真源）**
+
+| EventType | phases |
+|---|---|
+| `Run` | started / paused / resumed / completed / failed / orphaned |
+| `Plan` | created / revised / completed / failed |
+| `Step` | started / completed / failed / skipped |
+| `StepRepair` | started / completed |
+| `Tool` | called / completed / failed / timeout / blocked / output_stored |
+| `Confirmation` | requested / received |
+| `Context` | checkpointed / archived / pruned |
+| `Conversation` | started / message |
+| `Workspace` | created / updated / deleted |
+| `Diagnostic` | phase_timeout / cleanup_timeout / late_event_rejected |
+| `AgentThought` / `FeedbackInjected` / `DeliveryContractsResolved` | 单例 |
+
+**实现要点**
+- 每 phase 独立强类型 payload（含 `phase: Literal[...]`），聚合 `Union[...]` + Pydantic smart order（普通 Union，**非** discriminated union）；基类 `EventPayload(extra="forbid")` 保证缺省 phase 时 Union 解析无歧义并拒绝畸形写入。
+- `Event.phase` 属性 + `_normalize_payload_phase` validator；helper `parse_event_payload()`、`PAYLOAD_CLASS_TO_TYPE`、`is_terminal_event()`、`is_run_stopped()`、`event_matches()`、`_LEGACY_PHASE_NAMES`（兼容工具依赖配置里旧粒度的声明式事件名）。
+- `fold.py` 与 scheduler / context / dag / executor / analysis / monitoring / api / replay / tools 全部改为按 `event_type` + `phase` 分派。
+- 删除死事件 `ContextCompressed` / `ConversationEnded` / `RunCommand` 及整条 command 控制链；`event_store._validate_payload` 现返回归一化 dict 供写入使用。
+
+**对审计项的推进**
+- **R10**：`tests/test_event_contract_completeness.py` 现断言 13 种事件齐备 + `PAYLOAD_CLASS_TO_TYPE` 反查完整（补齐了原缺失的"完整性强制"一部分）；前端 7 处硬编码表迁移为 `event_type` + `payload.phase`，并以 `api/types.ts` 的 `eventPhase` / `isEvent` / `isTerminalRunEvent` 作为唯一接缝。但 Event 模型仍未进 OpenAPI（`generate_openapi.py` 仍只取 `app.openapi()`），前端类型仍是 `event_type: string`——**R10 仅部分推进，未关闭**。
+- §5.3 记录的 `TERMINAL_EVENT_TYPES` 已被 `is_terminal_event(event_type, payload)` 取代：聚合后终态无法再用事件名集合表达，终态判定改为 `Run` + phase ∈ {completed, failed}（"不再被驱动"再叠加 orphaned 的 `is_run_stopped`）。
+- README 事件计数由 41（原实际枚举）修正为 13，并给出聚合/phase 表。
+
+**验证**：`ruff` / `mypy harness`（92 files）/ `check_dead_code.py` / `generate_openapi.py --check` 全绿；后端 `pytest -q` **1423 passed**；前端 `tsc && vite build` 通过、`vitest` **70 passed**。
+
+---
+
+## 5.8 R6 计划层拒绝可观测（2026-10-02，第七批）
+
+> 目标：让"计划被受信组件拒绝"成为结构化事件，补齐工具层护栏已有而计划层缺失的可观测闭环。
+
+- **事件**：新增 `PlanRejectedPayload`，作为 `Diagnostic` 聚合新 phase `plan_rejected`（EventType 仍 13 种）。字段：
+  - `stage`: 拒绝接缝 — `plan` / `revise` / `merge` / `degenerate` / `invariant`；
+  - `attempt`: 本次调用内的尝试序号；
+  - `reasons`: 受信裁决原文（即回喂 LLM 的同一份）；
+  - `recovered`: True=系统继续驱动（还有尝试），False=随即 RunFailed。
+- **单一写入接缝**：`harness/core/planner/rejections.py::record_plan_rejection`；store/run_id 缺失时降级日志不抛异常，受信校验不被观测设施阻塞。
+- **五处接入**：planner plan/revise 的 PlanGuardrail 拒绝；`revision_guard` 的退化守卫 / 交付不变量拒绝；`plan.py` 两处合并后复检（merge，恒 recovered=False）。解析失败不记录：prompt 已固定 JSON 契约，且其语义不是"受信拒绝"。
+- fold 无变化：Diagnostic 为审计 pass-through。
+- **验证（TDD+BDD）**：`tests/test_plan_rejection_events.py`（8 例，含 payload round-trip、五处接缝、attempt 单调、末次 recovered=False、安全降级）；真实 LLM BDD `scripts/bdd_plan_rejection_real_llm.py`（场景 D 实测 `seq=8 stage=degenerate attempt=1 recovered=True`，随后模型诚实失败）。全量后端 **1431 passed**；前端 70 passed / build 通过。
+
+---
+
+## 5.9 trace 追踪通道 + local repair 拒绝原样重复（2026-10-02，第八批）
+
+> 由 §5.8 的真实 LLM BDD 延伸：为实证排障建立独立 trace 通道，并用 trace 日志发现并堵死 local repair 的原样重复缺陷。
+
+**trace 通道（实现任务，豁免 TDD）**
+- `harness/core/logger.py`：`trace_event` / `trace_logger`，懒加载读 `HARNESS_TRACE`（env 晚于 logging 配置），内容不截断；输出文件由 `HARNESS_TRACE_FILE` 指定。
+- 追踪点：`llm_client.timed_chat` 发 LLM-IN / LLM-OUT（完整 prompt 与响应）；全部自愈节点（planner 拒绝、local repair 判定）发 HEAL* 事件。
+- BDD 产物：`data/logs/trace_bdd.log`（943 行）；用法 `$env:HARNESS_TRACE="1"`。
+
+**缺陷实证（trace 日志）**
+- 场景 A（read 缺失文件）：同一动作 `file_op read missing_data.csv` 经 local repair 被接受 2 次（round 1/2），空耗 63s、约 5500 completion tokens。
+- 根因：退化签名守卫（`revision_guard`）只在全局 revise 生效；step 级 local repair 的受信校验 `validate_local_repair` 没有"同一动作"判定。
+
+**修复（受信接缝机械堵死）**
+- `recovery.validate_local_repair` 新增 keyword-only 参数 `original_signature: tuple[str, str]`；提案签名与失败步骤签名相等即拒：`"repair repeats the failed step's identical action — escalate"`。
+- 签名复用 `dag_types.action_signature(tool, input)`——与退化守卫 / F-5 共享同一份"同一动作"定义（derive, don't duplicate；§6.5 规则 1）。
+- 唯一生产调用点 `scheduler/local_repair.py` 传入失败步骤签名；同 tool 改 input 的合法新尝试仍放行。
+- 回归：`tests/test_recovery_core.py` 更新 5 处调用 + 新增 2 例（原样重复被拒 / 同 tool 改 input 放行）；`tests/test_local_repair_wiring.py` 新增 L3 接缝测试（强制相同提案 → `outcome=rejected`、reason 含 identical、不产生 patch）。
+- 真实 LLM 复测（`data/logs/trace_scenario_A_repeat_fix.log`）：本次模型非确定性地在第 1 轮即改提 `file_op list .`（不同动作，受信层正确放行），随后诚实报告目录为空、无法求和——原样重复未在线复现，守卫的在线行为由 L3 接缝测试确定性钉住。
+- **验证**：`ruff` / `mypy harness` / `check_dead_code.py` / `generate_openapi.py --check` 全绿；全量后端 **1434 passed**。
+
+---
+
+## 5.10 R5 执行入口复检移入生产接缝（2026-10-02，第九批）
+
+> 目标：消除"第三层防线只存在于测试"的假象——生产调度器一直走 `execute_layer()`，从不调含整计划复检的 `DagExecutor.execute()`。
+
+**做法（方案：删旧入口 + 复检前移）**
+- **删除** `DagExecutor.execute()`（第二份整计划编排），连带只服务它的 `self._guardrail` 与 5 个专属 import（`uuid4`/`PlanGuardrail`/`PlanCreatedPayload`/`PlanCompletedPayload`/`PlanFailedPayload`）。
+- **复检前移到真实接缝**：`scheduler/plan.py::_execute_plan` 的 while 循环顶部、写 `Plan/created` 之前调 `self.planner.guardrail.validate(plan)`；失败 → `Plan/failed`（completed_steps=0/total_layers=0）+ `Run/failed` 终止。
+- 复检位于循环顶部，**每次进入 layer 循环都强制**——首次计划、修订重入、local-repair 重入均覆盖；崩溃恢复重建/未来新的 step 级自愈或暂停恢复入口同样受保护。
+- 复用同一个 `planner.guardrail` 实例与合并后复检（无第二份校验实现）。
+
+**TDD**
+- `tests/test_execution_entry_revalidation.py`（2 例）：非法计划在执行入口被拦（无 Plan/created、无 Step/Tool 事件；Plan/failed 零步零层；Run/failed）；合法计划通过复检正常完成。
+- 15 处旧 `dag.execute()` 调用：新增共享脚手架 `tests/dag_layer_runner.py`（layer 编排 + Plan 事件，单一实现）；删除 3 个只测 `execute()` 自身附加行为的用例（未知工具短路、plan_id 格式/唯一性，生产路径与新接缝测试已覆盖）；其余 12 处改走脚手架。
+- `scripts/test_v07_integration.py`：删除 4 个因 StepResult/selector 契约漂移已必抛异常的坏用例（旧 Test 4/5/6/13）；Test 10 改用 `_execute_step`；顺带为 delete 夹具补 destructive 护栏（注册安全校验拦截）。脚本仍有 5 个预先存在的红（http_smoke 需在线服务器；max_parallel/Dynamic Plan/Fallback/Revise Continuation 属 R2 后陈旧路径），列为独立清理项。
+- **验证**：`ruff` / `mypy harness` / `check_dead_code.py` / `generate_openapi.py --check` 全绿；全量后端 **1433 passed**。
+
+---
+
+## 5.11 R12 mypy 豁免全部清零（2026-10-02，第十批）
+
+> 目标：受信核心（dag_executor/tools.executor/scheduler.base 等 11+ 模块）长期对 6 类 mypy 错误闭眼，类型系统机器强制在最该把关处失效。全部摘除并修复真实错误。
+
+**修复要点**
+- `dag_executor`：gather `return_exceptions=True` 结果按 `BaseException` 分诊（非 Exception 类重抛，不再被当普通返回值）；确认态以 `confirmation_id is not None` 判定。
+- `tools.executor`：payload 变量标注 `ToolCompletedPayload | ToolFailedPayload | ToolTimeoutPayload` 联合类型。
+- `run_monitor` / `lifecycle`：`max(key=...)` 重载函数改 lambda；签名变量改名避免类型冲突。
+- `api.routes`：反馈 `priority` 改 `Literal["high","medium","low"]`；动态构造改 `RequiredOperationInput(**...)`。
+- `mcp_manager`：stdio 命令/SSE URL 空值守衡，registry 缺失 fail-closed。
+- 三个 Mixin（classify/local_repair/revision_guard）：在 `TYPE_CHECKING` 块声明宿主类提供的属性与方法 stub，mypy 现对 mixin 内全部调用真实检查（签名与 BaseScheduler 对齐）。
+- `BaseTool`：`name/description/input_schema/output_schema/idempotency_key_fields/side_effects/requires_confirmation/timeout_ms` 由 `ClassVar` 改为普通注解——静态工具行为不变，动态工具（McpDynamicTool/BrowserMcpTool/Skill）可实例级覆盖，消除 10+ 个 misc 错误。
+- `recovery.unresolved_known_bad_steps` 的 `original_inputs` 改 `Mapping`（dict 不变性问题）。
+- 受影响 store 接缝统一收 `EventStoreLike = EventStore | ScopedEventStore`（dag_executor/executor/scheduler/planner/replay/analysis）。
+
+**验证**
+- `uv run mypy harness`：零错误（93 files），无任何 override / 新增行内豁免。
+- `ruff` / `check_dead_code.py` 全绿；后端 `pytest` **1433 passed**。
+- OpenAPI 重新生成（顺带补入此前未再生成的 R2/R9 旧改动）；前端 `tsc && vite build` 通过、`vitest` **70 passed**。
+- 债务记录：BASELINE.md §3.4。
+
+---
+
 ## 6. 明确不在本文范围
 
 - 不给修复方案、不建议裁/并/拆任何功能或事件、不排优先级。

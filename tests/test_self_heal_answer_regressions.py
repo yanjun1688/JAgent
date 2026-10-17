@@ -131,15 +131,15 @@ def test_revision_removes_aliased_stale_result():
 async def test_final_answer_state_retains_pruned_tool_results(store):
     """Answer evidence must retain a completed tool result pruned from context."""
     run_id = "run-answer-digest"
-    await store.append_event(run_id, EventType.RUN_STARTED, {"intent": "test"})
+    await store.append_event(run_id, EventType.RUN, {"intent": "test"})
     await store.append_event(
         run_id,
-        EventType.TOOL_CALLED,
+        EventType.TOOL,
         ToolCalledPayload(tool_call_id="tc-a", tool_name="http_request", input={"url": "/delay/3"}).model_dump(),
     )
     completed_a = await store.append_event(
         run_id,
-        EventType.TOOL_COMPLETED,
+        EventType.TOOL,
         ToolCompletedPayload(
             tool_call_id="tc-a",
             tool_name="http_request",
@@ -149,12 +149,12 @@ async def test_final_answer_state_retains_pruned_tool_results(store):
     )
     await store.append_event(
         run_id,
-        EventType.TOOL_CALLED,
+        EventType.TOOL,
         ToolCalledPayload(tool_call_id="tc-b", tool_name="http_request", input={"url": "/uuid"}).model_dump(),
     )
     await store.append_event(
         run_id,
-        EventType.TOOL_COMPLETED,
+        EventType.TOOL,
         ToolCompletedPayload(
             tool_call_id="tc-b",
             tool_name="http_request",
@@ -164,10 +164,9 @@ async def test_final_answer_state_retains_pruned_tool_results(store):
     )
     await store.append_event(
         run_id,
-        EventType.CONTEXT_PRUNED,
+        EventType.CONTEXT,
         {
             "pruned_event_refs": [completed_a.seq],
-            "pruned_token_count": 20,
             "pruned_seq_count": 1,
         },
     )

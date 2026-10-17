@@ -20,6 +20,8 @@ from harness.tools.executor import ToolExecutor
 from harness.tools.http_request import HTTP_REQUEST_DEF
 from harness.tools.registry import ToolRegistry
 
+from tests.dag_layer_runner import run_plan_layers
+
 _ALL_TASK_STATES = [s for s in TaskState]
 
 _UNSUCCESSFUL_TOOL_FN = lambda i: {"status_code": 429, "headers": {}, "body": "", "elapsed_ms": 10}  # noqa: E731
@@ -94,8 +96,7 @@ async def _run_plan(plan: DagPlan, fn, store: EventStore) -> dict[str, StepResul
     registry = ToolRegistry()
     registry._register(HTTP_REQUEST_DEF, fn)
     dag = DagExecutor(executor=executor, store=store, registry=registry, max_parallel=1)
-    results = await dag.execute(run_id="run-gate", plan=plan)
-    return results
+    return await run_plan_layers(dag, "run-gate", plan)
 
 
 @pytest.mark.asyncio
@@ -115,10 +116,10 @@ async def test_gate_skips_downstream_when_dep_unsuccessful(gate_store):
     assert results["s2"].step_normal is False
 
     events = await gate_store.get_events("run-gate")
-    assert any(e.event_type == EventType.DAG_STEP_SKIPPED for e in events), (
+    assert any((e.event_type == EventType.STEP and e.phase == "skipped") for e in events), (
         "D9: gate-produced SKIPPED must be recorded as DagStepSkipped"
     )
-    skipped = next(e for e in events if e.event_type == EventType.DAG_STEP_SKIPPED)
+    skipped = next(e for e in events if (e.event_type == EventType.STEP and e.phase == "skipped"))
     assert skipped.payload["step_id"] == "s2"
     assert "dep 's1' not normal" in skipped.payload["reason"]
 
@@ -139,7 +140,7 @@ async def test_gate_skips_chain_of_dependents(gate_store):
     assert results["s3"].exec_state == ExecState.SKIPPED
 
     events = await gate_store.get_events("run-gate")
-    skipped_ids = [e.payload["step_id"] for e in events if e.event_type == EventType.DAG_STEP_SKIPPED]
+    skipped_ids = [e.payload["step_id"] for e in events if (e.event_type == EventType.STEP and e.phase == "skipped")]
     assert skipped_ids == ["s2", "s3"]
 
 
@@ -158,7 +159,7 @@ async def test_gate_does_not_skip_when_dep_normal(gate_store):
     assert results["s2"].exec_state == ExecState.COMPLETED
 
     events = await gate_store.get_events("run-gate")
-    assert not any(e.event_type == EventType.DAG_STEP_SKIPPED for e in events)
+    assert not any((e.event_type == EventType.STEP and e.phase == "skipped") for e in events)
 
 
 @pytest.mark.asyncio
@@ -180,7 +181,7 @@ async def test_gate_does_not_skip_when_dep_probe_unsuccessful(gate_store):
     assert results["s2"].exec_state == ExecState.UNSUCCESSFUL
 
     events = await gate_store.get_events("run-gate")
-    assert not any(e.event_type == EventType.DAG_STEP_SKIPPED for e in events)
+    assert not any((e.event_type == EventType.STEP and e.phase == "skipped") for e in events)
 
 
 @pytest.mark.asyncio
@@ -205,7 +206,7 @@ async def test_gate_completion_count_uses_step_normal(gate_store):
     assert normal_count == 1  # only s2 normal; s1 UNSUCCESSFUL not counted
 
     events = await gate_store.get_events("run-gate")
-    completed = next(e for e in events if e.event_type == EventType.PLAN_COMPLETED)
+    completed = next(e for e in events if (e.event_type == EventType.PLAN and e.phase == "completed"))
     assert completed.payload["completed_steps"] == 1
 
 

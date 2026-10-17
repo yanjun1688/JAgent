@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from harness.core.context_manager import ContextManager
 from harness.core.fold import RunState, RunStatus, fold_events
-from harness.core.logger import agent_logger, fmtkv, guard_logger
+from harness.core.logger import agent_logger, fmtkv, guard_logger, trace_event
 from harness.execution.base import ExecutionBackend
 from harness.models.events import (
     Event,
@@ -19,13 +19,13 @@ from harness.models.events import (
     FeedbackSource,
     LateEventRejectedPayload,
     PhaseTimedOutPayload,
-    RunCommandPayload,
     RunCompletedPayload,
     RunFailedPayload,
     RunPausedPayload,
     RunResumedPayload,
     RunStartedPayload,
     TaskCleanupTimeoutPayload,
+    is_terminal_event,
 )
 from harness.models.tools import ToolDefinition
 from harness.models.workspace import Workspace
@@ -34,7 +34,7 @@ from harness.monitoring.langfuse_tracer import (
     reset_trace_context,
     set_trace_context,
 )
-from harness.storage.event_store import EventStore
+from harness.storage import EventStoreLike
 from harness.tools.executor import ExecutionStatus, ToolExecutor
 from harness.tools.registry import unknown_tool_message
 
@@ -61,7 +61,6 @@ class ThinkResult:
     thought: str
     tool_name: str | None = None
     tool_input: dict[str, Any] | None = None
-    token_count: int = 0
     direct_answer: str | None = None
     tool_call_id: str | None = None
 
@@ -82,12 +81,18 @@ class AgentKernel(ABC):
 
 @dataclass
 class SchedulerConfig:
-    max_iterations: int = 50
-    max_consecutive_failures: int = 5
+    run_attempt_budget: int = 20
+    """单一"尝试预算"：外层 plan/execute/revise 轮次上限，同时作为连续失败熔断阈值。
+
+    合并自旧 ``max_iterations``（外层轮数）与 ``max_consecutive_failures``（连续失败）：
+    不再用两个数表达"试几次就停"。到限 → 结构化 RunFailed（诚实失败）。
+    """
     max_revise_retries: int = 2
     """v2.2 (E, U1): 退化修订守卫的重试上限 — 拒绝"重复已失败动作"的修订并重试的次数。"""
     pause_timeout_ms: int = 300_000
     confirm_timeout_ms: int = 0
+    """等待"操作员确认"的超时（独立于外部暂停；0 → 默认继承 ``pause_timeout_ms``）。
+    显式设置可让确认等待与手动暂停有不同时限（见 ``tests/test_scheduler.py``）。"""
     max_confirm_retries: int = 10
     """Max RE-TRIES after the initial confirmation attempt (total = 1 + N)."""
     run_timeout_ms: int = 0
@@ -102,14 +107,12 @@ class SchedulerConfig:
     宽限期后仍 pending → 写结构化 TASK_CLEANUP_TIMEOUT 并强制 cleanup，不无限等待。
     清理时间不计入 Run 执行预算。"""
 
-    # v3.4 (F-6, ADR-011): 步骤级 bounded 局部修复（默认关闭 — 仅显式启用的 run
-    # 生效，避免对现有 plan-execute 行为的回归面）。开启后，步骤失败且工具级 retry
-    # 用尽时，Scheduler 在受信预算内驱动针对该步骤的局部 think-act 循环。
-    local_repair_enabled: bool = False
+    # v3.4 (F-6, ADR-011): 步骤级 bounded 局部修复（默认开启）。步骤失败且工具级
+    # retry 用尽时，Scheduler 在受信预算内驱动针对该步骤的局部 think-act 循环。
+    # 候选工具集由已注册工具派生；只读强制在 validate_local_repair 按 action 判定。
+    local_repair_enabled: bool = True
     local_repair_max_rounds: int = 2
     """每步骤允许的局部修复轮次上限（受信预算 RecoveryBudget.max_repair_rounds）。"""
-    local_repair_allowed_tools: tuple[str, ...] = ()
-    """局部修复工具白名单（read-only 工具名；空 = 拒绝一切修复动作，fail-closed）。"""
 
     def __post_init__(self):
         if self.confirm_timeout_ms == 0:
@@ -121,7 +124,7 @@ class BaseScheduler(ABC):
 
     def __init__(
         self,
-        store: EventStore,
+        store: EventStoreLike,
         executor: ToolExecutor,
         tool_defs: list[ToolDefinition],
         tool_fns: dict[str, Callable[[dict[str, Any]], Any]],
@@ -155,10 +158,11 @@ class BaseScheduler(ABC):
         # Q-07: Run 全局 deadline（run_id -> time.monotonic() 绝对时刻）。None/缺省
         # 表示 run_timeout_ms=0（总预算禁用），各阶段无超时预算。
         self._deadlines: dict[str, float] = {}
-        # Trusted control-plane bookkeeping: RUN_COMMAND events are enforced by
-        # Scheduler infrastructure, never by Agent cooperation.  The value is
-        # the 1-based ordinal of the latest processed RUN_COMMAND within a run.
-        self._last_processed_command_seq: dict[str, int] = {}
+        # Trusted control-plane bookkeeping.  The legacy RUN_COMMAND channel was
+        # removed (no writer); pause/resume are driven by the REST endpoints.
+        self._trace_ctx: TraceContext | None = None
+        self._trace_tokens: tuple[Any, Any] | None = None
+        self._iter_tokens: tuple[Any, Any] | None = None
 
     @abstractmethod
     async def _run_loop(self, run_id: str, intent: str, conversation_context: str = "") -> RunState: ...
@@ -184,11 +188,12 @@ class BaseScheduler(ABC):
     async def _end_run_trace(self, run_id: str) -> None:
         """End the Run-level trace, writing final status, then flush async."""
         ctx = getattr(self, "_trace_ctx", None)
-        if ctx is None:
+        tracer = self.tracer
+        if ctx is None or tracer is None:
             return
         try:
             state = await self._refresh_state(run_id)
-            self.tracer.end_run(
+            tracer.end_run(
                 ctx,
                 state.status.value,
                 output=str(state.summary or ""),
@@ -200,7 +205,7 @@ class BaseScheduler(ABC):
             if tokens is not None:
                 reset_trace_context(tokens)
                 self._trace_tokens = None
-        await self.tracer.flush_async()
+        await tracer.flush_async()
 
     def _begin_iteration_trace(self, iteration: int) -> TraceContext | None:
         """Create an iteration span under the run trace and activate it."""
@@ -216,8 +221,9 @@ class BaseScheduler(ABC):
 
     def _end_iteration_trace(self, iter_ctx: TraceContext | None) -> None:
         """End the iteration span and restore the run-level context."""
-        if iter_ctx is not None:
-            self.tracer.end_iteration(iter_ctx)
+        tracer = self.tracer
+        if iter_ctx is not None and tracer is not None:
+            tracer.end_iteration(iter_ctx)
         tokens = getattr(self, "_iter_tokens", None)
         if tokens is not None:
             reset_trace_context(tokens)
@@ -311,7 +317,6 @@ class BaseScheduler(ABC):
             self._cancel_flags.pop(run_id, None)
             self._pause_events.pop(run_id, None)
             self._confirm_events.pop(run_id, None)
-            self._last_processed_command_seq.pop(run_id, None)
             self._deadlines.pop(run_id, None)
             if not task.done():
                 task.cancel()
@@ -489,7 +494,7 @@ class BaseScheduler(ABC):
         try:
             await self.store.append_event(
                 run_id,
-                EventType.LATE_EVENT_REJECTED,
+                EventType.DIAGNOSTIC,
                 LateEventRejectedPayload(seq=seq, event_type=event_type.value, reason=reason).model_dump(),
             )
         except Exception as exc:
@@ -500,8 +505,8 @@ class BaseScheduler(ABC):
         try:
             await self.store.append_event(
                 run_id,
-                EventType.PHASE_TIMED_OUT,
-                PhaseTimedOutPayload(phase=phase, budget_ms=budget_ms).model_dump(),
+                EventType.DIAGNOSTIC,
+                PhaseTimedOutPayload(timed_out_phase=phase, budget_ms=budget_ms).model_dump(),
             )
         except Exception as exc:
             _sched_breaker.warning("[breaker] PHASE_TIMED_OUT write failed for run=%s: %s", run_id, exc)
@@ -518,7 +523,7 @@ class BaseScheduler(ABC):
         try:
             await self.store.append_event(
                 run_id,
-                EventType.TASK_CLEANUP_TIMEOUT,
+                EventType.DIAGNOSTIC,
                 TaskCleanupTimeoutPayload(
                     pending_count=pending_count,
                     grace_ms=self.config.cancel_grace_ms,
@@ -614,7 +619,7 @@ class BaseScheduler(ABC):
         直写，不受此守卫影响。终态事件（RUN_COMPLETED/RUN_FAILED）由
         ``_complete``/``_fail`` 自身幂等守卫处理，不在此路径。
         """
-        if event_type in (EventType.RUN_COMPLETED, EventType.RUN_FAILED):
+        if is_terminal_event(event_type, payload):
             # 终态事件同样受守卫：已 terminal 则拒绝（幂等），避免经此路径写重复终态。
             if await self._is_run_terminal(run_id):
                 _sched_breaker.warning(
@@ -642,11 +647,7 @@ class BaseScheduler(ABC):
         never remove facts from the final user-facing execution summary.
         """
         events = await self.store.get_events(run_id)
-        compressed_types = {
-            EventType.CONTEXT_COMPRESSED,
-            EventType.CONTEXT_PRUNED,
-            EventType.EPISODE_ARCHIVED,
-        }
+        compressed_types = {EventType.CONTEXT}
         authoritative_events = [event for event in events if event.event_type not in compressed_types]
         state = fold_events(authoritative_events)
         current_state = fold_events(events)
@@ -681,14 +682,23 @@ class BaseScheduler(ABC):
                     }
                     for v in completion.deliverables
                 ]
+            trace_event(
+                run_id,
+                "HEAL-DONE",
+                all_normal=all_normal,
+                unmet="; ".join(unmet_step_ids or []),
+                deliverable_status=(
+                    getattr(completion, "deliverable_status", "unverified") if completion else "unverified"
+                ),
+                summary=summary,
+            )
             await self.store.append_event(
                 run_id,
-                EventType.RUN_COMPLETED,
+                EventType.RUN,
                 RunCompletedPayload(
                     result_summary=summary,
                     all_normal=all_normal,
                     unmet_step_ids=list(unmet_step_ids or []),
-                    deliverable_met=getattr(completion, "deliverable_met", None) if completion else None,
                     deliverable_status=(
                         getattr(completion, "deliverable_status", "unverified") if completion else "unverified"
                     ),
@@ -710,9 +720,9 @@ class BaseScheduler(ABC):
             state = fold_events(events)
             tc = len(state.thought_history)
             tr = len(state.tool_results)
-            is_dag = any(e.event_type == EventType.PLAN_CREATED for e in events)
+            is_dag = any(e.event_type == EventType.PLAN and e.phase == "created" for e in events)
             if is_dag:
-                completed = sum(1 for e in events if e.event_type == EventType.DAG_STEP_COMPLETED)
+                completed = sum(1 for e in events if e.event_type == EventType.STEP and e.phase == "completed")
                 summary = (
                     f"DAG execution: {completed}/{tr} step(s) completed, {tr} tool call(s). {error}. Task terminated."
                 )
@@ -727,9 +737,16 @@ class BaseScheduler(ABC):
                 user_message = "任务已取消。"
             elif "confirmation" in error.lower():
                 user_message = "任务因未获得必要确认而未能完成。"
+            trace_event(
+                run_id,
+                "HEAL-FAIL",
+                event_count=len(events),
+                error=error,
+                user_message=user_message,
+            )
             await self.store.append_event(
                 run_id,
-                EventType.RUN_FAILED,
+                EventType.RUN,
                 RunFailedPayload(
                     final_error=error,
                     event_count=len(events),
@@ -760,7 +777,7 @@ class BaseScheduler(ABC):
                 return False
             await self.store.append_event(
                 run_id,
-                EventType.RUN_PAUSED,
+                EventType.RUN,
                 RunPausedPayload(reason="user_requested").model_dump(),
             )
             _sched_ctrl.info(
@@ -782,93 +799,6 @@ class BaseScheduler(ABC):
         if cevent:
             cevent.set()
 
-    async def _check_pending_commands(self, run_id: str) -> str | None:
-        """Return the latest unprocessed RUN_COMMAND command for a run.
-
-        RUN_COMMAND is a trusted control-plane channel.  Commands are ordered by
-        their 1-based ordinal within the run's RUN_COMMAND stream (independent
-        of unrelated event types sharing the same run_id).  Store failures are
-        contained and reported as "no command" so a transient read error cannot
-        crash the scheduler loop.
-        """
-        try:
-            events = await self.store.get_events(run_id)
-        except Exception as exc:
-            _sched_ctrl.warning("[ctrl] command check failed for run=%s: %s", run_id, exc)
-            return None
-
-        last_processed = self._last_processed_command_seq.get(run_id, 0)
-        latest: tuple[int, RunCommandPayload] | None = None
-        command_seq = 0
-        for event in events:
-            if event.event_type != EventType.RUN_COMMAND:
-                continue
-            command_seq += 1
-            if command_seq <= last_processed:
-                continue
-            latest = (command_seq, RunCommandPayload(**event.payload))
-        return latest[1].command if latest else None
-
-    async def _process_command(self, run_id: str, command: str) -> bool:
-        """Enforce a RUN_COMMAND against scheduler lifecycle state.
-
-        Returns True when the command was recognized and handling completed.
-        Unknown commands are ignored and leave the run untouched.
-        """
-        handled = False
-        match command:
-            case "hard_abort" | "soft_abort":
-                _sched_ctrl.warning("[ctrl] %s received for run=%s — failing run", command, run_id)
-                await self._fail(run_id, f"Run aborted by command: {command}")
-                handled = True
-            case "pause":
-                handled = await self.pause(run_id)
-            case "resume":
-                handled = await self.resume(run_id)
-            case "skip_tool":
-                # Reserved for tool-level skipping; acknowledged here so the
-                # command is consumed rather than repeatedly reprocessed.
-                _sched_ctrl.info("[ctrl] skip_tool command acknowledged for run=%s", run_id)
-                handled = True
-            case _:
-                _sched_ctrl.warning("[ctrl] unknown command ignored for run=%s: %s", run_id, command)
-                handled = True
-
-        if handled:
-            command_seq = await self._latest_command_seq(run_id, command)
-            if command_seq > self._last_processed_command_seq.get(run_id, 0):
-                self._last_processed_command_seq[run_id] = command_seq
-        return handled
-
-    async def _latest_command_seq(self, run_id: str, command: str) -> int:
-        """Return the ordinal of the latest RUN_COMMAND matching ``command``."""
-        try:
-            events = await self.store.get_events(run_id)
-        except Exception:
-            return self._last_processed_command_seq.get(run_id, 0)
-        command_seq = 0
-        latest = 0
-        for event in events:
-            if event.event_type != EventType.RUN_COMMAND:
-                continue
-            command_seq += 1
-            if RunCommandPayload(**event.payload).command == command:
-                latest = command_seq
-        return latest
-
-    async def _handle_pending_commands(self, run_id: str) -> RunState | None:
-        """Process at most one pending command and return refreshed state.
-
-        Returning None means no command was pending; callers should continue
-        their normal loop.  Returning a state means a command was enforced and
-        the caller must re-evaluate terminal/paused status before proceeding.
-        """
-        command = await self._check_pending_commands(run_id)
-        if command is None:
-            return None
-        await self._process_command(run_id, command)
-        return await self._refresh_state(run_id)
-
     async def resume(self, run_id: str) -> bool:
         async with self._resume_lock:
             events = await self.store.get_events(run_id)
@@ -888,7 +818,7 @@ class BaseScheduler(ABC):
             seq = state.seq
             await self.store.append_event(
                 run_id,
-                EventType.RUN_RESUMED,
+                EventType.RUN,
                 RunResumedPayload(resume_from_seq=seq).model_dump(),
             )
             event = self._pause_events.get(run_id)
@@ -916,10 +846,10 @@ class BaseScheduler(ABC):
 
     async def _ensure_run_started(self, run_id: str, intent: str) -> None:
         events = await self.store.get_events(run_id)
-        if not events or events[0].event_type != EventType.RUN_STARTED:
+        if not events or events[0].event_type != EventType.RUN or events[0].phase != "started":
             await self.store.append_event(
                 run_id,
-                EventType.RUN_STARTED,
+                EventType.RUN,
                 RunStartedPayload(intent=intent, intent_raw=intent).model_dump(),
             )
         elif self.context_manager:
@@ -937,29 +867,33 @@ class BaseScheduler(ABC):
         _iteration: int,
         consecutive_failures: int,
     ) -> tuple[bool, int]:
-        tool_def = self._find_tool_def(think_result.tool_name)
+        tool_name = think_result.tool_name
+        if tool_name is None:
+            await self._fail(run_id, "serial act: action carried no tool name")
+            return True, consecutive_failures
+        tool_def = self._find_tool_def(tool_name)
         if tool_def is None:
-            _sched_act.error("[act] Unknown tool: '%s'", think_result.tool_name)
+            _sched_act.error("[act] %s", unknown_tool_message(tool_name))
             # R7 #8: serial path holds no ToolRegistry (tool_defs list / tool_fns
             # dict), so it keeps its list lookup but derives the terminal error's
             # core fragment from the shared pure function (fail-closed unchanged).
-            await self._fail(run_id, f"serial act: {unknown_tool_message(think_result.tool_name)}")
+            await self._fail(run_id, f"serial act: {unknown_tool_message(tool_name)}")
             return True, consecutive_failures
 
-        tool_fn = self.tool_fns.get(think_result.tool_name)
+        tool_fn = self.tool_fns.get(tool_name)
         if tool_fn is None:
-            _sched_act.error("[act] No handler registered for tool '%s'", think_result.tool_name)
-            await self._fail(run_id, f"Tool '{think_result.tool_name}' has no handler registered")
+            _sched_act.error("[act] No handler registered for tool '%s'", tool_name)
+            await self._fail(run_id, f"Tool '{tool_name}' has no handler registered")
             return True, consecutive_failures
 
-        _sched_act.info("[act] Executing tool '%s' with input=%s", think_result.tool_name, str(think_result.tool_input))
+        _sched_act.info("[act] Executing tool '%s' with input=%s", tool_name, str(think_result.tool_input))
         try:
             result = await self._phase_call(
                 run_id,
                 "tool",
                 self.executor.execute(
                     run_id,
-                    think_result.tool_name,
+                    tool_name,
                     think_result.tool_input or {},
                     tool_def,
                     tool_fn,
@@ -973,9 +907,9 @@ class BaseScheduler(ABC):
             _sched_breaker.error(
                 "[breaker] tool phase timed out for run=%s tool=%s — failing",
                 run_id,
-                think_result.tool_name,
+                tool_name,
             )
-            await self._fail(run_id, f"Tool phase timed out: {think_result.tool_name}")
+            await self._fail(run_id, f"Tool phase timed out: {tool_name}")
             return True, consecutive_failures
         except Exception as exc:
             _sched_act.error("[act] Unexpected exception: %s", exc)
@@ -984,17 +918,17 @@ class BaseScheduler(ABC):
                 "[breaker] run=%s iter=%d tool=%s failures=%d/%d event=exception",
                 run_id,
                 _iteration,
-                think_result.tool_name,
+                tool_name,
                 consecutive_failures,
-                self.config.max_consecutive_failures,
+                self.config.run_attempt_budget,
             )
             if await self._breaker_tripped(
-                run_id, consecutive_failures, _iteration, think_result.tool_name, "exception"
+                run_id, consecutive_failures, _iteration, tool_name, "exception"
             ):
                 return True, consecutive_failures
             return False, consecutive_failures
 
-        _sched_act.info("[act] Tool '%s' → %s", think_result.tool_name, result.status.value)
+        _sched_act.info("[act] Tool '%s' → %s", tool_name, result.status.value)
 
         match result.status:
             case ExecutionStatus.COMPLETED | ExecutionStatus.IDEMPOTENCY_HIT:
@@ -1020,7 +954,7 @@ class BaseScheduler(ABC):
                     )
                     await self.store.append_event(
                         run_id,
-                        EventType.RUN_PAUSED,
+                        EventType.RUN,
                         RunPausedPayload(reason="waiting_confirmation").model_dump(),
                     )
                     await self._wait_for_resume(run_id)
@@ -1035,7 +969,7 @@ class BaseScheduler(ABC):
                         "tool",
                         self.executor.execute(
                             run_id,
-                            think_result.tool_name,
+                            tool_name,
                             think_result.tool_input or {},
                             tool_def,
                             tool_fn,
@@ -1061,12 +995,12 @@ class BaseScheduler(ABC):
                         "[breaker] run=%s iter=%d tool=%s failures=%d/%d event=confirm_fail",
                         run_id,
                         _iteration,
-                        think_result.tool_name,
+                        tool_name,
                         consecutive_failures,
-                        self.config.max_consecutive_failures,
+                        self.config.run_attempt_budget,
                     )
                     if await self._breaker_tripped(
-                        run_id, consecutive_failures, _iteration, think_result.tool_name, "confirm_fail"
+                        run_id, consecutive_failures, _iteration, tool_name, "confirm_fail"
                     ):
                         return True, consecutive_failures
                     break
@@ -1077,13 +1011,13 @@ class BaseScheduler(ABC):
                     "[breaker] run=%s iter=%d tool=%s failures=%d/%d event=%s",
                     run_id,
                     _iteration,
-                    think_result.tool_name,
+                    tool_name,
                     consecutive_failures,
-                    self.config.max_consecutive_failures,
+                    self.config.run_attempt_budget,
                     result.status.value,
                 )
                 if await self._breaker_tripped(
-                    run_id, consecutive_failures, _iteration, think_result.tool_name, "failures_exceeded"
+                    run_id, consecutive_failures, _iteration, tool_name, "failures_exceeded"
                 ):
                     return True, consecutive_failures
 
@@ -1092,7 +1026,7 @@ class BaseScheduler(ABC):
     async def _breaker_tripped(
         self, run_id: str, consecutive_failures: int, _iteration: int, tool_name: str, reason: str
     ) -> bool:
-        if consecutive_failures >= self.config.max_consecutive_failures:
+        if consecutive_failures >= self.config.run_attempt_budget:
             _sched_breaker.error(
                 "[breaker] TRIP run=%s iter=%d tool=%s reason=%s count=%d",
                 run_id,

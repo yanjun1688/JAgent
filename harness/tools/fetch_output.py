@@ -35,6 +35,7 @@ class FetchOutputTool(BaseTool):
             "ref": {
                 "type": "string",
                 "description": "Content-addressed blob ref, e.g. '<sha256>.json'",
+                "x-role": "authority",
             },
         },
         "required": ["operation", "ref"],
@@ -47,7 +48,7 @@ class FetchOutputTool(BaseTool):
     timeout_ms = 15000
     needs_backend = True
 
-    @operation("fetch", probe_allowed=True, idempotency_key_fields=["ref"], ref_allowed_fields={"ref": False})
+    @operation("fetch", probe_allowed=True, idempotency_key_fields=["ref"])
     async def fetch(self, input):
         ref = str(input.get("ref") or "")
         if not is_valid_blob_ref(ref):

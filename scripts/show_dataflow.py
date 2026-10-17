@@ -73,7 +73,7 @@ async def main():
         kernel=kernel,
         tool_defs=[echo_def],
         tool_fns={"echo": echo_fn},
-        config=SchedulerConfig(max_iterations=10),
+        config=SchedulerConfig(run_attempt_budget=10),
         context_manager=cm,
         monitor=monitor,
     )

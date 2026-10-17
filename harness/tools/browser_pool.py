@@ -99,13 +99,9 @@ class BrowserPool:
         store.on_append(self._on_event)
 
     async def _on_event(self, event: Any) -> None:
-        from harness.models.events import EventType
+        from harness.models.events import is_run_stopped
 
-        if event.event_type in (
-            EventType.RUN_COMPLETED,
-            EventType.RUN_FAILED,
-            EventType.RUN_ORPHANED,
-        ):
+        if is_run_stopped(event.event_type, event.payload):
             await self.release(event.run_id)
 
     async def shutdown(self) -> None:

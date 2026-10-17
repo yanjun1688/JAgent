@@ -15,12 +15,9 @@ from harness.models.workspace import WorkspaceScope
 class RequiredOperationInput(DeliveryOperationInput):
     """S07 (D-02): 调用方显式声明的硬性交付操作（方案 A，source=caller）。
 
-    tool + input 与后端 DeliveryContract 对齐（同源契约）。未提供时由系统
-    抽取兜底（source=extracted）。
+    tool + input 由父类 ``DeliveryOperationInput`` 提供（同源契约），本文仅为
+    语义命名别名。提供时由系统抽取兜底（source=extracted）。
     """
-
-    tool: str
-    input: dict[str, Any] = Field(default_factory=dict)
 
 
 class CreateRunRequest(BaseModel):

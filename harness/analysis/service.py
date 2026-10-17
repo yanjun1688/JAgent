@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import time
 from typing import Any
 
@@ -28,24 +27,18 @@ from harness.models.events import (
     ToolCompletedPayload,
     ToolFailedPayload,
     ToolTimeoutPayload,
+    is_terminal_event,
 )
-from harness.storage.event_store import EventStore
+from harness.storage import EventStoreLike
+from harness.storage.event_store import event_from_row
 
 _log = guard_logger("analysis")
 
-_TYPE_TOOL_LIFECYCLE = {
-    EventType.TOOL_CALLED,
-    EventType.TOOL_COMPLETED,
-    EventType.TOOL_FAILED,
-    EventType.TOOL_TIMEOUT,
-    EventType.GUARDRAIL_TRIGGERED,
-}
-
-_TYPE_TERMINAL = {EventType.RUN_COMPLETED, EventType.RUN_FAILED}
+_TYPE_TOOL_LIFECYCLE = {EventType.TOOL}
 
 
 class AnalysisService:
-    def __init__(self, store: EventStore) -> None:
+    def __init__(self, store: EventStoreLike) -> None:
         self._store = store
 
     # ── Dashboard ────────────────────────────────────────────────
@@ -55,44 +48,41 @@ class AnalysisService:
         until = until or time.time()
         since = since or 0
 
-        # 2 queries instead of 4: type counts + merged (distinct_runs + token_sum)
+        # Two aggregate queries: event-type counts + distinct run count.
         type_rows = await self._store.execute_query(
-            "SELECT event_type, COUNT(*) as cnt FROM events WHERE created_at >= ? "
-            "AND created_at <= ? GROUP BY event_type",
+            "SELECT event_type, json_extract(payload, '$.phase') as phase, COUNT(*) as cnt FROM events "
+            "WHERE created_at >= ? AND created_at <= ? GROUP BY event_type, phase",
             (since, until),
         )
-        type_counts: dict[str, int] = {r["event_type"]: r["cnt"] for r in type_rows}
+        counts: dict[tuple[str, str | None], int] = {(r["event_type"], r["phase"]): r["cnt"] for r in type_rows}
+        type_counts: dict[str, int] = {}
+        for (etype, _phase), cnt in counts.items():
+            type_counts[etype] = type_counts.get(etype, 0) + cnt
 
         agg = await self._store.execute_query_one(
-            "SELECT COUNT(DISTINCT run_id) as run_count, "
-            "COALESCE(SUM(CASE WHEN event_type = ? THEN "
-            "json_extract(payload, '$.token_count') ELSE 0 END), 0) as token_sum "
+            "SELECT COUNT(DISTINCT run_id) as run_count "
             "FROM events WHERE created_at >= ? AND created_at <= ?",
-            (EventType.AGENT_THOUGHT.value, since, until),
+            (since, until),
         )
         total_runs = agg["run_count"] if agg else 0
-        total_tokens = agg["token_sum"] if agg else 0
 
         total_events = sum(type_counts.values())
-        total_tool_calls = type_counts.get(EventType.TOOL_CALLED.value, 0)
-        total_failures = type_counts.get(EventType.TOOL_FAILED.value, 0) + type_counts.get(
-            EventType.TOOL_TIMEOUT.value, 0
-        )
-        total_guardrails = type_counts.get(EventType.GUARDRAIL_TRIGGERED.value, 0)
-        completed = type_counts.get(EventType.RUN_COMPLETED.value, 0)
-        failed = type_counts.get(EventType.RUN_FAILED.value, 0)
+        tool = EventType.TOOL.value
+        run = EventType.RUN.value
+        total_tool_calls = counts.get((tool, "called"), 0)
+        total_failures = counts.get((tool, "failed"), 0) + counts.get((tool, "timeout"), 0)
+        total_guardrails = counts.get((tool, "blocked"), 0)
+        completed = counts.get((run, "completed"), 0)
+        failed = counts.get((run, "failed"), 0)
         running = max(0, total_runs - completed - failed)
-        paused = type_counts.get(EventType.RUN_PAUSED.value, 0)
+        paused = counts.get((run, "paused"), 0)
 
-        total_tool_results = type_counts.get(EventType.TOOL_COMPLETED.value, 0) + total_failures
-        avg_rate = (
-            round(type_counts.get(EventType.TOOL_COMPLETED.value, 0) / total_tool_results, 2)
-            if total_tool_results > 0
-            else 0.0
-        )
+        total_completed_tools = counts.get((tool, "completed"), 0)
+        total_tool_results = total_completed_tools + total_failures
+        avg_rate = round(total_completed_tools / total_tool_results, 2) if total_tool_results > 0 else 0.0
 
         _log.info(
-            "dashboard since=%.0f until=%.0f runs=%d events=%d tools=%d failures=%d guardrails=%d tokens=%d (%.0fms)",
+            "dashboard since=%.0f until=%.0f runs=%d events=%d tools=%d failures=%d guardrails=%d (%.0fms)",
             since,
             until,
             total_runs,
@@ -100,7 +90,6 @@ class AnalysisService:
             total_tool_calls,
             total_failures,
             total_guardrails,
-            total_tokens,
             (time.monotonic() - _t0) * 1000,
         )
 
@@ -115,7 +104,6 @@ class AnalysisService:
                 total_tool_calls=total_tool_calls,
                 total_tool_failures=total_failures,
                 total_guardrail_triggers=total_guardrails,
-                total_tokens_consumed=total_tokens,
                 avg_tool_success_rate=avg_rate,
             )
         )
@@ -128,7 +116,7 @@ class AnalysisService:
         since = since or 0
 
         rows = await self._fetch_events_by_types(_TYPE_TOOL_LIFECYCLE, since, until)
-        events = [e for e in (self._row_to_event(r) for r in rows) if e is not None]
+        events = [e for e in (event_from_row(r) for r in rows) if e is not None]
 
         stats: dict[str, dict] = {}
         for e in events:
@@ -144,19 +132,19 @@ class AnalysisService:
                     "result_count": 0,
                 }
 
-            if e.event_type == EventType.TOOL_CALLED:
+            if e.phase == "called":
                 stats[tn]["call_count"] += 1
-            elif e.event_type == EventType.TOOL_COMPLETED:
+            elif e.phase == "completed":
                 stats[tn]["result_count"] += 1
                 stats[tn]["success_count"] += 1
                 stats[tn]["total_duration"] += e.payload.get("duration_ms", 0)
-            elif e.event_type == EventType.TOOL_FAILED:
+            elif e.phase == "failed":
                 stats[tn]["result_count"] += 1
                 stats[tn]["failure_count"] += 1
-            elif e.event_type == EventType.TOOL_TIMEOUT:
+            elif e.phase == "timeout":
                 stats[tn]["result_count"] += 1
                 stats[tn]["timeout_count"] += 1
-            elif e.event_type == EventType.GUARDRAIL_TRIGGERED:
+            elif e.phase == "blocked":
                 stats[tn]["guardrail_count"] += 1
 
         items = []
@@ -193,11 +181,13 @@ class AnalysisService:
         until = until or time.time()
         since = since or 0
 
-        rows = await self._fetch_events_by_types({EventType.GUARDRAIL_TRIGGERED}, since, until)
-        events = [e for e in (self._row_to_event(r) for r in rows) if e is not None]
+        rows = await self._fetch_events_by_types({EventType.TOOL}, since, until)
+        events = [e for e in (event_from_row(r) for r in rows) if e is not None]
 
         stats: dict[str, dict] = {}
         for e in events:
+            if e.phase != "blocked":
+                continue
             p = GuardrailTriggeredPayload(**e.payload)
             if p.guardrail_id not in stats:
                 stats[p.guardrail_id] = {"count": 0, "tools": set(), "last_reason": None}
@@ -235,29 +225,27 @@ class AnalysisService:
 
         state = fold_events(events)
 
-        total_tokens = sum(e.payload.get("token_count", 0) for e in events if e.event_type == EventType.AGENT_THOUGHT)
         total_duration = sum(
-            e.payload.get("duration_ms", 0) for e in events if e.event_type == EventType.TOOL_COMPLETED
+            e.payload.get("duration_ms", 0) for e in events if e.event_type == EventType.TOOL and e.phase == "completed"
         )
 
-        tool_call_count = sum(1 for e in events if e.event_type == EventType.TOOL_CALLED)
-        guardrail_count = sum(1 for e in events if e.event_type == EventType.GUARDRAIL_TRIGGERED)
+        tool_call_count = sum(1 for e in events if e.event_type == EventType.TOOL and e.phase == "called")
+        guardrail_count = sum(1 for e in events if e.event_type == EventType.TOOL and e.phase == "blocked")
         feedback_count = sum(1 for e in events if e.event_type == EventType.FEEDBACK_INJECTED)
 
         created_at = events[0].created_at
         completed_at = None
         if state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
             for e in reversed(events):
-                if e.event_type in _TYPE_TERMINAL:
+                if is_terminal_event(e.event_type, e.payload):
                     completed_at = e.created_at
                     break
 
         _log.info(
-            "run_analysis run=%s status=%s events=%d tokens=%d (%.0fms)",
+            "run_analysis run=%s status=%s events=%d (%.0fms)",
             run_id,
             state.status.value,
             len(events),
-            total_tokens,
             (time.monotonic() - _t0) * 1000,
         )
 
@@ -266,7 +254,6 @@ class AnalysisService:
             intent=state.intent,
             status=state.status.value,
             event_count=len(events),
-            total_tokens=total_tokens,
             total_duration_ms=total_duration,
             created_at=created_at,
             completed_at=completed_at,
@@ -314,7 +301,7 @@ class AnalysisService:
         p: Any = None
 
         for e in events:
-            if e.event_type == EventType.TOOL_CALLED:
+            if e.event_type == EventType.TOOL and e.phase == "called":
                 p = ToolCalledPayload(**e.payload)
                 calls[p.tool_call_id] = {
                     "tool_call_id": p.tool_call_id,
@@ -325,18 +312,18 @@ class AnalysisService:
                     "status": "unknown",
                 }
 
-            elif e.event_type in (EventType.TOOL_COMPLETED, EventType.TOOL_FAILED, EventType.TOOL_TIMEOUT):
+            elif e.event_type == EventType.TOOL and e.phase in ("completed", "failed", "timeout"):
                 tid = e.payload.get("tool_call_id")
                 if tid not in calls:
                     continue
                 entry = calls[tid]
-                if e.event_type == EventType.TOOL_COMPLETED:
+                if e.phase == "completed":
                     p = ToolCompletedPayload(**e.payload)
                     entry.update(status="completed", completed_seq=e.seq, output=p.output, duration_ms=p.duration_ms)
-                elif e.event_type == EventType.TOOL_FAILED:
+                elif e.phase == "failed":
                     p = ToolFailedPayload(**e.payload)
                     entry.update(status="failed", completed_seq=e.seq, error=p.error)
-                elif e.event_type == EventType.TOOL_TIMEOUT:
+                elif e.phase == "timeout":
                     p = ToolTimeoutPayload(**e.payload)
                     entry.update(
                         status="timeout",
@@ -345,7 +332,7 @@ class AnalysisService:
                         duration_ms=p.timeout_ms,
                     )
 
-            elif e.event_type == EventType.GUARDRAIL_TRIGGERED:
+            elif e.event_type == EventType.TOOL and e.phase == "blocked":
                 p = GuardrailTriggeredPayload(**e.payload)
                 guardrails[p.tool_call_id] = {
                     "tool_call_id": p.tool_call_id,
@@ -437,21 +424,21 @@ class AnalysisService:
         )
 
         match event.event_type:
-            case EventType.TOOL_CALLED:
+            case EventType.TOOL:
                 detail.tool_call_id = p.get("tool_call_id")
                 detail.tool_name = p.get("tool_name")
                 detail.input = p.get("input")
                 detail.idempotency_key = p.get("idempotency_key")
                 detail.retryable = self._build_retryable("unknown")
 
-            case EventType.TOOL_COMPLETED:
+            case EventType.TOOL:
                 detail.tool_call_id = p.get("tool_call_id")
                 detail.tool_name = p.get("tool_name")
                 detail.idempotency_key = p.get("idempotency_key")
                 detail.duration_ms = p.get("duration_ms")
                 detail.retryable = self._build_retryable("completed")
 
-            case EventType.TOOL_FAILED:
+            case EventType.TOOL:
                 detail.tool_call_id = p.get("tool_call_id")
                 detail.tool_name = p.get("tool_name")
                 detail.input = p.get("input")
@@ -459,7 +446,7 @@ class AnalysisService:
                 detail.error = p.get("error")
                 detail.retryable = self._build_retryable("failed")
 
-            case EventType.TOOL_TIMEOUT:
+            case EventType.TOOL:
                 detail.tool_call_id = p.get("tool_call_id")
                 detail.tool_name = p.get("tool_name")
                 detail.input = p.get("input")
@@ -468,46 +455,19 @@ class AnalysisService:
                 detail.duration_ms = p.get("timeout_ms")
                 detail.retryable = self._build_retryable("timeout")
 
-            case EventType.GUARDRAIL_TRIGGERED:
+            case EventType.TOOL:
                 detail.tool_call_id = p.get("tool_call_id")
                 detail.tool_name = p.get("tool_name")
                 detail.error = f"{p.get('guardrail_id')}: {p.get('reason')}"
                 detail.retryable = self._build_retryable("guardrail_blocked")
 
-            case EventType.CONFIRMATION_REQUESTED:
+            case EventType.CONFIRMATION:
                 detail.confirmation_id = p.get("confirmation_id")
                 detail.tool_name = p.get("tool_name")
                 detail.input = p.get("input")
 
-            case EventType.CONFIRMATION_RECEIVED:
+            case EventType.CONFIRMATION:
                 detail.confirmation_id = p.get("confirmation_id")
 
         return detail
 
-    @staticmethod
-    def _row_to_event(row: dict) -> Event | None:
-        """Returns None for rows with a legacy/unknown event_type.
-
-        Tolerates event_type values removed from the enum in refactors
-        (e.g. QualityCheckCompleted from V0.8). Append-Only invariant
-        forbids DELETE, so historical rows persist and would otherwise
-        crash the analysis read path.
-        """
-        try:
-            et = EventType(row["event_type"])
-        except ValueError:
-            _log.warning(
-                "Skipping analysis row with unknown event_type=%r (run=%s seq=%s) — likely legacy event",
-                row["event_type"],
-                row.get("run_id"),
-                row.get("seq"),
-            )
-            return None
-        return Event(
-            run_id=row["run_id"],
-            seq=row["seq"],
-            event_type=et,
-            payload=json.loads(row["payload"]),
-            idempotency_key=row["idempotency_key"],
-            created_at=row["created_at"],
-        )

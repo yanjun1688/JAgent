@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { ChevronRight, CircleDot } from 'lucide-react'
 import { cn } from '../../design-system/utils/cn'
-import type { WsEvent } from '../../api/types'
+import { eventPhase, isTerminalRunEvent, type WsEvent } from '../../api/types'
 
 export interface EventItemProps {
   event: WsEvent
@@ -10,15 +10,14 @@ export interface EventItemProps {
   onToggle: () => void
 }
 
-const TERMINAL_TYPES = new Set(['RunCompleted', 'RunFailed'])
-
-function categoryColor(eventType: string): string {
-  if (eventType.startsWith('Tool')) return 'text-accent-primary'
-  if (eventType.startsWith('Run')) return 'text-accent-secondary'
-  if (eventType.startsWith('Confirm')) return 'text-status-warning'
-  if (eventType.startsWith('Guardrail')) return 'text-status-error'
-  if (eventType.startsWith('Think') || eventType.startsWith('Observe'))
-    return 'text-status-info'
+function categoryColor(event: WsEvent): string {
+  const phase = eventPhase(event)
+  if (event.event_type === 'Tool') {
+    return phase === 'blocked' ? 'text-status-error' : 'text-accent-primary'
+  }
+  if (event.event_type === 'Run') return 'text-accent-secondary'
+  if (event.event_type === 'Confirmation') return 'text-status-warning'
+  if (event.event_type === 'AgentThought') return 'text-status-info'
   return 'text-text-tertiary'
 }
 
@@ -26,7 +25,7 @@ export function EventItem({ event, isExpanded, onToggle }: EventItemProps) {
   const [ownExpanded, setOwnExpanded] = useState(false)
   const expanded = isExpanded || ownExpanded
   const hasPayload = Boolean(event.payload && Object.keys(event.payload).length > 0)
-  const isTerminal = TERMINAL_TYPES.has(event.event_type)
+  const isTerminal = isTerminalRunEvent(event)
 
   return (
     <div className="text-xs">
@@ -40,14 +39,15 @@ export function EventItem({ event, isExpanded, onToggle }: EventItemProps) {
         <span
           className={cn(
             'flex h-5 w-5 shrink-0 items-center justify-center',
-            categoryColor(event.event_type),
+            categoryColor(event),
           )}
         >
           <CircleDot size={10} />
         </span>
         <span className="text-text-muted">#{event.seq}</span>
-        <span className={cn('font-mono', categoryColor(event.event_type))}>
+        <span className={cn('font-mono', categoryColor(event))}>
           {event.event_type}
+          {eventPhase(event) ? `/${eventPhase(event)}` : ''}
         </span>
         {isTerminal && (
           <span className="rounded-full bg-surface-1 px-1.5 text-[10px] text-text-muted">终态</span>

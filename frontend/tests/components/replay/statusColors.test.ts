@@ -26,11 +26,11 @@ describe('replay statusColors helpers', () => {
     expect(statusLabel(null)).toBe('—')
   })
 
-  it('colours event types by prefix', () => {
-    expect(eventTypeColor('ToolCalled')).toBe('text-accent-primary')
-    expect(eventTypeColor('RunFailed')).toBe('text-accent-secondary')
-    expect(eventTypeColor('GuardrailTriggered')).toBe('text-status-error')
-    expect(eventTypeColor('DagStepStarted')).toBe('text-accent-quaternary')
+  it('colours consolidated event types and phases', () => {
+    expect(eventTypeColor('Tool', 'called')).toBe('text-accent-primary')
+    expect(eventTypeColor('Tool', 'blocked')).toBe('text-status-error')
+    expect(eventTypeColor('Run', 'failed')).toBe('text-accent-secondary')
+    expect(eventTypeColor('Step', 'started')).toBe('text-accent-quaternary')
     expect(eventTypeColor('SomethingElse')).toBe('text-text-tertiary')
   })
 

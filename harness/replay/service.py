@@ -27,7 +27,7 @@ from harness.replay.schemas import (
     RunStateView,
     StateDiff,
 )
-from harness.storage.event_store import EventStore
+from harness.storage import EventStoreLike
 
 
 class ReplayRunNotFoundError(LookupError):
@@ -45,7 +45,7 @@ TraceUrlProvider = Callable[[str], str | None]
 
 
 class ReplayInspectorService:
-    def __init__(self, store: EventStore, trace_url_provider: TraceUrlProvider | None = None) -> None:
+    def __init__(self, store: EventStoreLike, trace_url_provider: TraceUrlProvider | None = None) -> None:
         self._store = store
         self._trace_url = trace_url_provider
 

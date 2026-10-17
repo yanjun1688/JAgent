@@ -17,6 +17,8 @@ from harness.tools.executor import ToolExecutor
 from harness.tools.http_request import HTTP_REQUEST_DEF
 from harness.tools.registry import ToolRegistry
 
+from tests.dag_layer_runner import run_plan_layers
+
 _OK_TOOL_FN = lambda i: {"status_code": 200, "headers": {}, "body": '{"ok":1}', "elapsed_ms": 10}  # noqa: E731
 
 
@@ -33,8 +35,7 @@ async def _run_plan(plan: DagPlan, store: EventStore) -> dict[str, ExecState]:
     registry = ToolRegistry()
     registry._register(HTTP_REQUEST_DEF, _OK_TOOL_FN)
     dag = DagExecutor(executor=executor, store=store, registry=registry, max_parallel=1)
-    results = await dag.execute(run_id="run-trace", plan=plan)
-    return results
+    return await run_plan_layers(dag, "run-trace", plan)
 
 
 # ── 洞 1: step_id ↔ tool_call_id 双向 JOIN ────────────────────────
@@ -53,8 +54,8 @@ async def test_tool_events_carry_step_id(trace_store):
     await _run_plan(plan, trace_store)
     events = await trace_store.get_events("run-trace")
 
-    called = [e for e in events if e.event_type == EventType.TOOL_CALLED]
-    completed = [e for e in events if e.event_type == EventType.TOOL_COMPLETED]
+    called = [e for e in events if (e.event_type == EventType.TOOL and e.phase == "called")]
+    completed = [e for e in events if (e.event_type == EventType.TOOL and e.phase == "completed")]
     assert len(called) == 2 and len(completed) == 2
 
     step_ids = sorted(e.payload["step_id"] for e in called)
@@ -72,11 +73,11 @@ async def test_dag_step_events_carry_tool_call_id(trace_store):
     await _run_plan(plan, trace_store)
     events = await trace_store.get_events("run-trace")
 
-    dag_done = next(e for e in events if e.event_type == EventType.DAG_STEP_COMPLETED)
+    dag_done = next(e for e in events if (e.event_type == EventType.STEP and e.phase == "completed"))
     assert dag_done.payload["step_id"] == "s1"
     assert dag_done.payload["tool_call_id"], "DAG_STEP_COMPLETED 必须携带 tool_call_id"
 
-    called = next(e for e in events if e.event_type == EventType.TOOL_CALLED)
+    called = next(e for e in events if (e.event_type == EventType.TOOL and e.phase == "called"))
     # JOIN 关键：同一 step 的 DAG 事件与工具事件共享 tool_call_id
     assert dag_done.payload["tool_call_id"] == called.payload["tool_call_id"]
     assert called.payload["step_id"] == "s1"
@@ -92,11 +93,11 @@ async def test_join_step_to_tool_call_reconstructs_params(trace_store):
     await _run_plan(plan, trace_store)
     events = await trace_store.get_events("run-trace")
 
-    dag_done = next(e for e in events if e.event_type == EventType.DAG_STEP_COMPLETED)
+    dag_done = next(e for e in events if (e.event_type == EventType.STEP and e.phase == "completed"))
     tc_id = dag_done.payload["tool_call_id"]
-    called = next(e for e in events if e.event_type == EventType.TOOL_CALLED and e.payload["tool_call_id"] == tc_id)
+    called = next(e for e in events if (e.event_type == EventType.TOOL and e.phase == "called") and e.payload["tool_call_id"] == tc_id)
     completed = next(
-        e for e in events if e.event_type == EventType.TOOL_COMPLETED and e.payload["tool_call_id"] == tc_id
+        e for e in events if (e.event_type == EventType.TOOL and e.phase == "completed") and e.payload["tool_call_id"] == tc_id
     )
 
     assert called.payload["step_id"] == "s1"
@@ -120,7 +121,7 @@ async def test_plan_created_carries_full_steps_blueprint(trace_store):
     await _run_plan(plan, trace_store)
     events = await trace_store.get_events("run-trace")
 
-    created = next(e for e in events if e.event_type == EventType.PLAN_CREATED)
+    created = next(e for e in events if (e.event_type == EventType.PLAN and e.phase == "created"))
     steps = created.payload["steps"]
     assert len(steps) == 2
     assert steps[0]["step_id"] == "s1"

@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { ChevronDown, Brain, Loader2 } from 'lucide-react'
 import { cn } from '../../design-system/utils/cn'
-import type { WsEvent } from '../../api/types'
+import { eventPhase, type WsEvent } from '../../api/types'
 
 export interface ThinkingPanelProps {
   events: WsEvent[]
@@ -14,25 +14,36 @@ export interface ThinkingPanelProps {
 function summarize(events: WsEvent[]): string[] {
   const steps: string[] = []
   for (const e of events) {
-    switch (e.event_type) {
-      case 'ThinkStarted':
-        steps.push('开始推理…')
-        break
-      case 'ThinkCompleted':
-        steps.push('本轮推理完成')
-        break
-      case 'ActStarted':
-        steps.push('准备调用工具')
-        break
-      case 'ObserveStarted':
-        steps.push('观察工具结果')
-        break
-      case 'ObserveCompleted':
-        steps.push('生成观察摘要')
-        break
-      case 'ContextCompacted':
-        steps.push('上下文已压缩')
-        break
+    const phase = eventPhase(e)
+    if (e.event_type === 'AgentThought') {
+      const thought = String(e.payload.thought || '').trim()
+      steps.push(thought ? `推理：${thought.slice(0, 80)}` : '推理中…')
+    } else if (e.event_type === 'Tool') {
+      switch (phase) {
+        case 'called':
+          steps.push(`调用工具：${e.tool_name || 'unknown'}`)
+          break
+        case 'completed':
+          steps.push(`工具完成：${e.tool_name || 'unknown'}`)
+          break
+        case 'failed':
+          steps.push(`工具失败：${e.tool_name || 'unknown'}`)
+          break
+        case 'timeout':
+          steps.push(`工具超时：${e.tool_name || 'unknown'}`)
+          break
+        case 'blocked':
+          steps.push(`护栏拦截：${e.tool_name || 'unknown'}`)
+          break
+      }
+    } else if (e.event_type === 'Confirmation') {
+      if (phase === 'requested') steps.push(`等待确认：${e.tool_name || 'unknown'}`)
+      else if (phase === 'received') steps.push(e.payload.confirmed ? '操作已确认' : '操作已拒绝')
+    } else if (e.event_type === 'Context') {
+      if (phase === 'archived') steps.push('上下文已压缩')
+    } else if (e.event_type === 'Plan') {
+      if (phase === 'created') steps.push('已生成执行计划')
+      else if (phase === 'revised') steps.push('已修订执行计划')
     }
   }
   return steps

@@ -19,6 +19,8 @@ from harness.storage.event_store import EventStore
 from harness.core.fold import fold_events, ToolResultStatus
 from harness.core.dag_types import ExecState, StepResult
 
+from tests.dag_layer_runner import run_plan_layers
+
 
 # ── SuccessIndicator model tests ──────────────────────────────────
 
@@ -312,7 +314,7 @@ class TestExecutorSemanticEvaluation:
         assert result.output["status_code"] == 429
 
         events = await store.get_events(run_id)
-        completed = [e for e in events if e.event_type == EventType.TOOL_COMPLETED]
+        completed = [e for e in events if (e.event_type == EventType.TOOL and e.phase == "completed")]
         assert len(completed) == 1
         tp = ToolCompletedPayload.model_validate(completed[0].payload)
         assert tp.result_type == ToolResultType.UNSUCCESSFUL
@@ -347,7 +349,7 @@ class TestExecutorSemanticEvaluation:
         assert result.has_semantic_error is False
 
         events = await store.get_events(run_id)
-        completed = [e for e in events if e.event_type == EventType.TOOL_COMPLETED]
+        completed = [e for e in events if (e.event_type == EventType.TOOL and e.phase == "completed")]
         tp = ToolCompletedPayload.model_validate(completed[0].payload)
         assert tp.result_type == ToolResultType.SUCCESS
         assert tp.error is None
@@ -377,7 +379,7 @@ class TestExecutorSemanticEvaluation:
         assert "File not found" in result.error
 
         events = await store.get_events(run_id)
-        completed = [e for e in events if e.event_type == EventType.TOOL_COMPLETED]
+        completed = [e for e in events if (e.event_type == EventType.TOOL and e.phase == "completed")]
         assert len(completed) == 1
         tp = ToolCompletedPayload.model_validate(completed[0].payload)
         assert tp.result_type == ToolResultType.UNSUCCESSFUL
@@ -485,7 +487,7 @@ class TestExecutorSemanticEvaluation:
         assert result.has_semantic_error is False
 
         events = await store.get_events(run_id)
-        completed = [e for e in events if e.event_type == EventType.TOOL_COMPLETED]
+        completed = [e for e in events if (e.event_type == EventType.TOOL and e.phase == "completed")]
         tp = ToolCompletedPayload.model_validate(completed[0].payload)
         assert tp.result_type == ToolResultType.SUCCESS
 
@@ -523,21 +525,21 @@ class TestFoldUnsuccessful:
             Event(
                 run_id="r",
                 seq=1,
-                event_type=EventType.RUN_STARTED,
+                event_type=EventType.RUN,
                 payload={"intent": "test"},
                 created_at=1.0,
             ),
             Event(
                 run_id="r",
                 seq=2,
-                event_type=EventType.TOOL_CALLED,
+                event_type=EventType.TOOL,
                 payload={"tool_call_id": "a", "tool_name": "t", "input": {}},
                 created_at=2.0,
             ),
             Event(
                 run_id="r",
                 seq=3,
-                event_type=EventType.TOOL_COMPLETED,
+                event_type=EventType.TOOL,
                 payload={
                     "tool_call_id": "a",
                     "tool_name": "t",
@@ -561,21 +563,21 @@ class TestFoldUnsuccessful:
             Event(
                 run_id="r",
                 seq=1,
-                event_type=EventType.RUN_STARTED,
+                event_type=EventType.RUN,
                 payload={"intent": "test"},
                 created_at=1.0,
             ),
             Event(
                 run_id="r",
                 seq=2,
-                event_type=EventType.TOOL_CALLED,
+                event_type=EventType.TOOL,
                 payload={"tool_call_id": "a", "tool_name": "t", "input": {}},
                 created_at=2.0,
             ),
             Event(
                 run_id="r",
                 seq=3,
-                event_type=EventType.TOOL_COMPLETED,
+                event_type=EventType.TOOL,
                 payload={
                     "tool_call_id": "a",
                     "tool_name": "t",
@@ -596,21 +598,21 @@ class TestFoldUnsuccessful:
             Event(
                 run_id="r",
                 seq=1,
-                event_type=EventType.RUN_STARTED,
+                event_type=EventType.RUN,
                 payload={"intent": "test"},
                 created_at=1.0,
             ),
             Event(
                 run_id="r",
                 seq=2,
-                event_type=EventType.TOOL_CALLED,
+                event_type=EventType.TOOL,
                 payload={"tool_call_id": "a", "tool_name": "t", "input": {}},
                 created_at=2.0,
             ),
             Event(
                 run_id="r",
                 seq=3,
-                event_type=EventType.TOOL_COMPLETED,
+                event_type=EventType.TOOL,
                 payload={
                     "tool_call_id": "a",
                     "tool_name": "t",
@@ -658,7 +660,7 @@ class TestDagExecutorUnsuccessful:
         )
         dag = DagExecutor(executor=executor, store=store, registry=registry, max_parallel=1)
 
-        all_results = await dag.execute(run_id="run-dag-se", plan=plan)
+        all_results = await run_plan_layers(dag, "run-dag-se", plan)
         assert len(all_results) == 1
         sr = all_results["s1"]
         assert sr.exec_state == ExecState.UNSUCCESSFUL
@@ -686,7 +688,7 @@ class TestDagExecutorUnsuccessful:
         )
         dag = DagExecutor(executor=executor, store=store, registry=registry, max_parallel=1)
 
-        all_results = await dag.execute(run_id="run-dag-ok", plan=plan)
+        all_results = await run_plan_layers(dag, "run-dag-ok", plan)
         sr = all_results["s1"]
         assert sr.exec_state == ExecState.COMPLETED
         assert sr.is_unsuccessful is False
@@ -716,12 +718,12 @@ class TestRunMonitorUnsuccessful:
 
         await store.append_event(
             "r",
-            EventType.TOOL_CALLED,
+            EventType.TOOL,
             {"tool_call_id": "tc1", "tool_name": "http_request", "input": {"url": "http://x"}},
         )
         await store.append_event(
             "r",
-            EventType.TOOL_COMPLETED,
+            EventType.TOOL,
             {
                 "tool_call_id": "tc1",
                 "tool_name": "http_request",
@@ -744,12 +746,12 @@ class TestRunMonitorUnsuccessful:
 
         await store.append_event(
             "r",
-            EventType.TOOL_CALLED,
+            EventType.TOOL,
             {"tool_call_id": "tc1", "tool_name": "http_request", "input": {"url": "http://x"}},
         )
         await store.append_event(
             "r",
-            EventType.TOOL_COMPLETED,
+            EventType.TOOL,
             {
                 "tool_call_id": "tc1",
                 "tool_name": "http_request",
@@ -762,12 +764,12 @@ class TestRunMonitorUnsuccessful:
 
         await store.append_event(
             "r",
-            EventType.TOOL_CALLED,
+            EventType.TOOL,
             {"tool_call_id": "tc2", "tool_name": "http_request", "input": {"url": "http://y"}},
         )
         await store.append_event(
             "r",
-            EventType.TOOL_COMPLETED,
+            EventType.TOOL,
             {
                 "tool_call_id": "tc2",
                 "tool_name": "http_request",

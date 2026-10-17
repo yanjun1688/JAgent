@@ -18,7 +18,6 @@ import pytest
 
 from harness.analysis.service import AnalysisService
 from harness.models.events import (
-    AgentThoughtPayload,
     EventType,
     GuardrailTriggeredPayload,
     RunStartedPayload,
@@ -52,35 +51,28 @@ async def _seed_run(
     intent: str = "test",
     tool_results: list[tuple[str, str]] | None = None,
     guardrails: list[tuple[str, str, str]] | None = None,
-    token_counts: list[int] | None = None,
 ):
     """Helper: seed a complete run with events.
 
     tool_results: list of (tool_name, status) where status is one of
                   'completed', 'failed', 'timeout'
     """
-    await store.append_event(run_id, EventType.RUN_STARTED, RunStartedPayload(intent=intent).model_dump())
+    await store.append_event(run_id, EventType.RUN, RunStartedPayload(intent=intent).model_dump())
 
     tool_results = tool_results or []
     guardrails = guardrails or []
-    token_counts = token_counts or []
-
-    for i, tc in enumerate(token_counts):
-        await store.append_event(
-            run_id, EventType.AGENT_THOUGHT, AgentThoughtPayload(thought=f"t{i}", token_count=tc).model_dump()
-        )
 
     for idx, (tn, status) in enumerate(tool_results):
         tid = f"call_{idx}"
         await store.append_event(
             run_id,
-            EventType.TOOL_CALLED,
+            EventType.TOOL,
             ToolCalledPayload(tool_call_id=tid, tool_name=tn, input={"i": idx}).model_dump(),
         )
         if status == "completed":
             await store.append_event(
                 run_id,
-                EventType.TOOL_COMPLETED,
+                EventType.TOOL,
                 ToolCompletedPayload(
                     tool_call_id=tid, tool_name=tn, output={"ok": True}, duration_ms=100 * (idx + 1)
                 ).model_dump(),
@@ -88,29 +80,29 @@ async def _seed_run(
         elif status == "failed":
             await store.append_event(
                 run_id,
-                EventType.TOOL_FAILED,
+                EventType.TOOL,
                 ToolFailedPayload(tool_call_id=tid, tool_name=tn, error="err", retryable=True).model_dump(),
             )
         elif status == "timeout":
             await store.append_event(
                 run_id,
-                EventType.TOOL_TIMEOUT,
+                EventType.TOOL,
                 ToolTimeoutPayload(tool_call_id=tid, tool_name=tn, timeout_ms=5000).model_dump(),
             )
 
     for tn, gid, reason in guardrails:
         await store.append_event(
             run_id,
-            EventType.GUARDRAIL_TRIGGERED,
+            EventType.TOOL,
             GuardrailTriggeredPayload(
                 tool_call_id="call_0", tool_name=tn, guardrail_id=gid, reason=reason
             ).model_dump(),
         )
 
     if tool_results:
-        await store.append_event(run_id, EventType.RUN_COMPLETED, {"result_summary": "done"})
+        await store.append_event(run_id, EventType.RUN, {"result_summary": "done"})
     else:
-        await store.append_event(run_id, EventType.RUN_FAILED, {"final_error": "no tools", "event_count": 0})
+        await store.append_event(run_id, EventType.RUN, {"final_error": "no tools", "event_count": 0})
 
 
 # ── Dashboard ────────────────────────────────────────────────────────────
@@ -125,7 +117,6 @@ class TestDashboard:
         assert o.total_tool_calls == 0
         assert o.total_tool_failures == 0
         assert o.total_guardrail_triggers == 0
-        assert o.total_tokens_consumed == 0
         assert o.avg_tool_success_rate == 0.0
 
     async def test_single_completed_run(self, store: EventStore, svc: AnalysisService):
@@ -134,7 +125,6 @@ class TestDashboard:
             "r1",
             intent="test",
             tool_results=[("http", "completed"), ("http", "completed")],
-            token_counts=[100, 200],
         )
         d = await svc.get_dashboard()
         o = d.overview
@@ -143,14 +133,13 @@ class TestDashboard:
         assert o.running_runs == 0
         assert o.total_tool_calls == 2
         assert o.total_tool_failures == 0
-        assert o.total_tokens_consumed == 300
         assert o.avg_tool_success_rate == 1.0
 
     async def test_multi_run_aggregation(self, store: EventStore, svc: AnalysisService):
         await _seed_run(
-            store, "r1", intent="a", tool_results=[("http", "completed"), ("http", "failed")], token_counts=[50]
+            store, "r1", intent="a", tool_results=[("http", "completed"), ("http", "failed")]
         )
-        await _seed_run(store, "r2", intent="b", tool_results=[("file_op", "completed")], token_counts=[30])
+        await _seed_run(store, "r2", intent="b", tool_results=[("file_op", "completed")])
         await _seed_run(store, "r3", intent="c")  # failed (no tools)
 
         d = await svc.get_dashboard()
@@ -160,18 +149,16 @@ class TestDashboard:
         assert o.failed_runs == 1
         assert o.total_tool_calls == 3
         assert o.total_tool_failures == 1
-        assert o.total_tokens_consumed == 80
         assert o.avg_tool_success_rate == round(2 / 3, 2)
 
     async def test_time_window_excludes_old_events(self, store: EventStore, svc: AnalysisService):
         now = time.time()
         now - 100000
 
-        await _seed_run(store, "new", intent="new", tool_results=[("http", "completed")], token_counts=[20])
+        await _seed_run(store, "new", intent="new", tool_results=[("http", "completed")])
 
         d = await svc.get_dashboard(since=now - 86400)
         assert d.overview.total_runs == 1
-        assert d.overview.total_tokens_consumed == 20
 
         # Run with far-future window excludes all events
         d2 = await svc.get_dashboard(since=now + 86400, until=now + 172800)
@@ -321,10 +308,10 @@ class TestToolTraces:
         assert t.retryable.eligible is False
 
     async def test_partial_trace_no_result_event(self, store: EventStore, svc: AnalysisService):
-        await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="x").model_dump())
+        await store.append_event("r1", EventType.RUN, RunStartedPayload(intent="x").model_dump())
         await store.append_event(
             "r1",
-            EventType.TOOL_CALLED,
+            EventType.TOOL,
             ToolCalledPayload(tool_call_id="orphan", tool_name="http", input={}).model_dump(),
         )
         tt = await svc.get_run_tool_traces("r1")
@@ -388,7 +375,6 @@ class TestRunAnalysis:
             "r1",
             intent="hello",
             tool_results=[("http", "completed"), ("file_op", "failed")],
-            token_counts=[100, 200],
             guardrails=[("http", "rate_limit", "too fast")],
         )
         summary = await svc.get_run_analysis("r1")
@@ -396,8 +382,7 @@ class TestRunAnalysis:
         assert summary.run_id == "r1"
         assert summary.intent == "hello"
         assert summary.status in ("completed",)
-        assert summary.event_count == 9
-        assert summary.total_tokens == 300
+        assert summary.event_count == 7
         assert summary.total_duration_ms == 100  # only completed tools count
         assert summary.tool_trace_count == 2
         assert summary.guardrail_event_count == 1
@@ -411,8 +396,8 @@ class TestRunAnalysis:
 
 class TestEdgeCases:
     async def test_no_tool_events(self, store: EventStore, svc: AnalysisService):
-        await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="noop").model_dump())
-        await store.append_event("r1", EventType.RUN_FAILED, {"final_error": "x", "event_count": 1})
+        await store.append_event("r1", EventType.RUN, RunStartedPayload(intent="noop").model_dump())
+        await store.append_event("r1", EventType.RUN, {"final_error": "x", "event_count": 1})
 
         d = await svc.get_dashboard()
         assert d.overview.total_runs == 1

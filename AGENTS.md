@@ -201,7 +201,65 @@ Step 3: 开发实现
 - [ ] 工具契约的 `idempotency_key_fields` 是否明确且可计算？
 - [ ] 新增 API 端点是否更新了 OpenAPI 文档？
 - [ ] 异步函数是否全部标记了 `async`？
-- [ ] 错误路径是否都有对应的事件类型（如 `ToolFailed`、`GuardrailTriggered`）？
+- [ ] 错误路径是否都有对应的事件类型（聚合 `EventType` + payload `phase`，如 `Tool/failed`、`Tool/blocked`）？
+- [ ] 是否引入了枚举值 / phase 字面量副本？（必须改走真源谓词，见 §6.5 规则 1）
+- [ ] 新增 DTO / 响应模型是否有字段对等反射断言与 round-trip 测试？（§6.5 规则 4）
+- [ ] 收拢 / 删除代码前是否已补 replay 特征测试？（§6.5 规则 6）
+- [ ] 每条新增约束是否都有对应机器强制，而非仅写在文档中？
+
+### 6.4 项目校验命令（统一入口）
+
+**必须使用项目内解释器/工具链**，禁止用全局 `python -m ...`——全局环境缺少本项目依赖，
+mypy 会因无法命中项目类型信息而冷重建巨大的 cache，表现为长时间卡死（实测全局 mypy 1.x
+挂起 >5min，项目 venv 内 `mypy harness` 仅 ~1.2s）。
+
+| 用途 | 命令 |
+|------|------|
+| 静态检查 | `uv run ruff check harness tests scripts` |
+| 类型检查 | `uv run mypy harness` |
+| 死代码检测 | `uv run python scripts/check_dead_code.py harness evaluation scripts` |
+| OpenAPI 同步 | `uv run python scripts/generate_openapi.py --check` |
+| 测试 | `uv run pytest -q` |
+
+Windows 若未用 `uv run`，用项目 venv 显式调用: `.venv\Scripts\python.exe -m mypy harness`。
+以上命令已与 CI（`.github/workflows/ci.yml`）和 pre-commit（`.pre-commit-config.yaml`）对齐。
+
+### 6.5 单一真源约束（Derive, Don't Duplicate）
+
+本节为**提示级**规则（降低 AI/人主动制造重复的概率），每条**必须**有对应机器强制（拦截漏网）。
+仅在代码风格上遵守本节而无机器门禁，**不视为合规**——参照 §2.1：受信规则不得建立在
+"执行者读了且会配合"的假设上。
+
+**规则清单**:
+
+1. **禁止字面量副本**: 不得在真源模块之外重述枚举值 / phase 字面量（如 `"completed"`、`"failed"`）；
+   判定一律调用真源谓词（如 `harness.models.events.is_terminal_event` / `is_run_stopped`）。
+2. **禁止同语义第二份实现**: 宽容 JSON 解析、重试、超时、阶段计时、token 估算等必须复用既有
+   adapter（如 `planner/parsing.py`、`llm_client.timed_chat`、`token_counter.HEURISTIC_CHARS_PER_TOKEN`），
+   不得新写。
+3. **透传走类型系统**: 透传链函数必须收源模型类型（Pydantic / 前端 OpenAPI 生成类型），
+   **禁止收子集 dict**；新增字段由类型系统自动传播，漏传在 mypy / tsc 阶段报错。
+4. **DTO 对等可证**: 新增 DTO / API 响应模型时，必须以反射断言与源模型字段对等
+   （Pydantic `model_fields` 比对），并补 round-trip 测试
+   （`obj → 序列化 → 反序列化 → 深等`），任何中途丢弃的字段必须暴露。
+5. **集合相等与穷举**: 枚举与注册表必须保持集合相等断言（`EventType` ↔ `PAYLOAD_MODEL_MAP`，
+   见 `tests/test_event_contract_completeness.py`）；`match/case` 必须无 `default` 穷举消费。
+6. **重构先上特征测试**: 合并 / 删除 / 收拢代码前，必须先用 replay 历史事件写特征测试，
+   断言新旧投影逐字节一致后才可动手。
+
+**规则 ↔ 机器强制对照**（红灯必须来自可复现脚本，不依赖 LLM 判断）:
+
+| 规则 | 机器强制 |
+|------|----------|
+| 1 | AST/semgrep 字面量禁用规则进 CI；多实现裁决/文案对等的参数化测试 |
+| 2 | `check_dead_code.py` + import 边界检查；R8 系列收敛回归测试 |
+| 3 | `uv run mypy harness`；前端 `tsc` 严格模式 |
+| 4 | 字段反射断言 + round-trip 测试 |
+| 5 | `tests/test_event_contract_completeness.py` + fold 穷举测试 |
+| 6 | replay 特征测试（重构保护） |
+
+> AI 时代代码产出速度快于人工 review：**机器强制是主防线，本节文字是第一道廉价防线**；
+> 可用 LLM 生成对等性测试、做漂移审计，但最终阻断权归确定性工具。
 
 ---
 
@@ -266,7 +324,7 @@ Step 2: 启动相关代码审查→ 执行 3.4 的四步流程
 Step 3: 提供背景上下文 → 使用 7.2 的背景规范
 Step 4: 识别未决问题 → 使用 3.3 的提问模板
 Step 5: 提供实现指导 → 基于业界最佳实践，明确受信边界要求
-Step 6: 提醒校验与测试 → 引用 6.3 校验清单和 5. 测试规范
+Step 6: 提醒校验与测试 → 引用 6.3 校验清单、6.5 单一真源约束和 5. 测试规范
 ```
 
 ### 9.2 用户要求修改架构时的处理
@@ -286,6 +344,9 @@ Step 6: 提醒校验与测试 → 引用 6.3 校验清单和 5. 测试规范
 - **禁止**让 Agent Kernel 直接操作 Event Store 写入
 - **禁止**在 Tool Layer 之前做任何副作用操作
 - **禁止**前后端各自维护独立的数据结构定义
+- **禁止**在真源模块之外复制枚举值 / phase 字面量，或为同一语义新建第二份实现（见 §6.5）
+- **禁止**透传链收子集 dict 绕过类型系统（见 §6.5 规则 3）
+- **禁止**只在文档/提示中新增约束而不配置对应机器强制
 - **禁止**在不确定时猜测用户意图而不提问
 - **禁止**在回复中提供与当前层级无关的代码实现（防止上下文膨胀）
 
@@ -298,6 +359,8 @@ Step 6: 提醒校验与测试 → 引用 6.3 校验清单和 5. 测试规范
 - [ ] 前后端的数据结构是否通过统一 Schema 对齐？
 - [ ] 新增事件类型是否已定义并同步到前后端？
 - [ ] 是否已提醒用户必要的测试覆盖点？
+- [ ] 是否存在冗余字段、漏透传或同规则第二份实现？（对照 §6.5 规则清单）
+- [ ] 新增的每条规则是否都已配置对应机器强制（测试 / CI）？
 - [ ] 上下文是否已接近阈值，需要压缩？
 
 

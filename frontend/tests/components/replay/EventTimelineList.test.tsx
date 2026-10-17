@@ -4,22 +4,27 @@ import userEvent from '@testing-library/user-event'
 import { EventTimelineList } from '../../../src/components/replay/EventTimelineList'
 import type { ReplayTimelineEvent } from '../../../src/api/schema'
 
-function ev(seq: number, event_type: string, extra: Partial<ReplayTimelineEvent> = {}): ReplayTimelineEvent {
+function ev(
+  seq: number,
+  event_type: string,
+  phase: string,
+  extra: Partial<ReplayTimelineEvent> = {},
+): ReplayTimelineEvent {
   return {
     seq,
     event_type,
     created_at: 0,
-    payload: {},
+    payload: { phase },
     is_terminal: false,
     ...extra,
   }
 }
 
 const events: ReplayTimelineEvent[] = [
-  ev(1, 'RunStarted'),
-  ev(6, 'DagStepCompleted', { step_id: 's1' }),
-  ev(8, 'GuardrailTriggered', { tool_name: 'write' }),
-  ev(11, 'RunFailed', { is_terminal: true }),
+  ev(1, 'Run', 'started'),
+  ev(6, 'Step', 'completed', { step_id: 's1' }),
+  ev(8, 'Tool', 'blocked', { tool_name: 'write' }),
+  ev(11, 'Run', 'failed', { is_terminal: true }),
 ]
 
 describe('EventTimelineList', () => {

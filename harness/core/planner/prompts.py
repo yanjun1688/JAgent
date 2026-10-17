@@ -14,6 +14,7 @@ from harness.core.logger import agent_logger, fmtkv
 from harness.core.planner.schema_contract import build_step_schema_text
 from harness.core.system_prompt import AgentPhase, get_prompt
 from harness.models.events import Episode
+from harness.models.tools import FieldRole, field_role
 from harness.tools.registry import ToolRegistry
 
 _log = agent_logger("planner")
@@ -51,6 +52,11 @@ def build_tool_descriptions(registry: ToolRegistry) -> str:
                     desc = pinfo.get("description", "")
                     if desc:
                         parts.append(f"— {desc}")
+                    # D-01/C-04: project the field's ref capability so the
+                    # Planner can plan valid $ref usages instead of learning
+                    # only from guardrail rejections.
+                    role = field_role(td.input_schema, pname)
+                    parts.append("[ref: allowed]" if role is FieldRole.DATA else "[ref: forbidden]")
                     param_lines.append(" ".join(parts))
                 if param_lines:
                     line += "\n    Parameters:"
@@ -80,24 +86,23 @@ def build_plan_prompt(
     feedback: str | None = None,
     conversation_context: str = "",
 ) -> str:
-    text = get_prompt(
+    # T-R8b-5: sections are injected through explicit template placeholders
+    # (context_section / feedback_section) instead of a literal
+    # `.replace("## User Intent\n", ...)`, so renaming the template anchor can
+    # no longer silently drop the injection.
+    context_section = ""
+    if conversation_context:
+        # Conversation history is injected once for initial planning only.
+        # It never contaminates the event-sourced current request or revise prompts.
+        context_section = "## Conversation Context (reference only)\n" + conversation_context[:4000] + "\n\n"
+    return get_prompt(
         AgentPhase.PLAN,
         step_schema=build_step_schema_text(),
         tool_descriptions=build_tool_descriptions(registry),
         intent=intent,
+        context_section=context_section,
+        feedback_section=build_feedback_section(feedback),
     )
-    fb = build_feedback_section(feedback)
-    if conversation_context:
-        # Conversation history is injected once for initial planning only.
-        # It never contaminates the event-sourced current request or revise prompts.
-        context = conversation_context[:4000]
-        text = text.replace(
-            "## User Intent\n",
-            "## Conversation Context (reference only)\n" + context + "\n\n## User Intent\n",
-        )
-    if fb:
-        text = text.replace("## User Intent\n", fb + "## User Intent\n")
-    return text
 
 
 def build_answer_user_content(intent: str, state: RunState, conversation_context: str = "") -> str:

@@ -127,21 +127,21 @@ class TestConversationStore:
     async def test_get_events_for_conversation(self, store: EventStore):
         await store.append_event(
             "conv-1",
-            EventType.CONVERSATION_STARTED,
+            EventType.CONVERSATION,
             ConversationStartedPayload(conversation_id="conv-1", title="T").model_dump(),
         )
         await store.append_event(
             "conv-1",
-            EventType.CONVERSATION_MESSAGE,
+            EventType.CONVERSATION,
             ConversationMessagePayload(
                 conversation_id="conv-1", run_id="r1", role="user", content="hello"
             ).model_dump(),
         )
         events = await store.get_events_for_conversation("conv-1")
         assert len(events) == 2
-        types = [e.event_type for e in events]
-        assert EventType.CONVERSATION_STARTED in types
-        assert EventType.CONVERSATION_MESSAGE in types
+        phases = [e.phase for e in events if e.event_type == EventType.CONVERSATION]
+        assert "started" in phases
+        assert "message" in phases
 
     async def test_total_conversation_count(self, store: EventStore):
         await store.upsert_conversation("c1", "A")
@@ -160,19 +160,19 @@ class TestConversationContextBuilder:
         await store.upsert_conversation("conv-1", "Test")
         await store.append_event(
             "conv-1",
-            EventType.CONVERSATION_STARTED,
+            EventType.CONVERSATION,
             ConversationStartedPayload(conversation_id="conv-1", title="T").model_dump(),
         )
         await store.append_event(
             "conv-1",
-            EventType.CONVERSATION_MESSAGE,
+            EventType.CONVERSATION,
             ConversationMessagePayload(
                 conversation_id="conv-1", run_id="r1", role="user", content="Hello"
             ).model_dump(),
         )
         await store.append_event(
             "conv-1",
-            EventType.CONVERSATION_MESSAGE,
+            EventType.CONVERSATION,
             ConversationMessagePayload(
                 conversation_id="conv-1", run_id="r1", role="assistant", content="Hi there!"
             ).model_dump(),

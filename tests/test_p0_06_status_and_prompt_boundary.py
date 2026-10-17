@@ -67,7 +67,7 @@ async def test_follow_up_client_request_id_is_idempotent() -> None:
             )
         assert first.json()["run_id"] == second.json()["run_id"]
         messages = await store.get_events_for_conversation("conv-p0-idem")
-        assert len([e for e in messages if e.event_type == EventType.CONVERSATION_MESSAGE]) == 1
+        assert len([e for e in messages if (e.event_type == EventType.CONVERSATION and e.phase == "message")]) == 1
     finally:
         app.dependency_overrides.clear()
         await store.close()
@@ -92,7 +92,7 @@ async def test_follow_up_client_request_id_is_idempotent_concurrently() -> None:
         runs = await store.list_runs(limit=20, offset=0)
         assert len([run for run in runs if run["run_id"] == responses[0].json()["run_id"]]) == 1
         messages = await store.get_events_for_conversation("conv-p0-race")
-        assert len([e for e in messages if e.event_type == EventType.CONVERSATION_MESSAGE]) == 1
+        assert len([e for e in messages if (e.event_type == EventType.CONVERSATION and e.phase == "message")]) == 1
     finally:
         app.dependency_overrides.clear()
         await store.close()
@@ -104,17 +104,17 @@ async def test_failed_run_writes_safe_user_facing_message() -> None:
         await store.upsert_conversation("conv-p0-fail", "P0")
         await store.append_event(
             "conv-p0-fail",
-            EventType.CONVERSATION_STARTED,
+            EventType.CONVERSATION,
             ConversationStartedPayload(conversation_id="conv-p0-fail", title="P0").model_dump(),
         )
         await store.append_event(
             "run-p0-fail",
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="读取报告", conversation_id="conv-p0-fail").model_dump(),
         )
         await store.append_event(
             "run-p0-fail",
-            EventType.RUN_FAILED,
+            EventType.RUN,
             RunFailedPayload(
                 final_error="Steps failed: s1: missing file",
                 event_count=2,
@@ -123,7 +123,7 @@ async def test_failed_run_writes_safe_user_facing_message() -> None:
         )
         await api._write_assistant_message("run-p0-fail")
         messages = await store.get_events_for_conversation("conv-p0-fail")
-        assistant = next(e for e in messages if e.event_type == EventType.CONVERSATION_MESSAGE)
+        assistant = next(e for e in messages if (e.event_type == EventType.CONVERSATION and e.phase == "message"))
         content = assistant.payload["content"]
         assert content == "任务未能完成，请检查任务要求或稍后重试。"
         for leaked in ("DAG execution:", "Steps not achieved:", "Task terminated.", "tool call(s)", "s1"):
@@ -159,16 +159,16 @@ async def test_fail_maps_cancel_and_confirmation_user_messages() -> None:
         for run_id in ("run-cancel", "run-confirm", "run-other"):
             await store.append_event(
                 run_id,
-                EventType.RUN_STARTED,
+                EventType.RUN,
                 RunStartedPayload(intent="t").model_dump(),
             )
         await scheduler._fail("run-cancel", "Run cancelled by user request")
         await scheduler._fail("run-confirm", "Tool requires confirmation")
         await scheduler._fail("run-other", "LLM returned malformed output")
 
-        cancel_ev = next(e for e in await store.get_events("run-cancel") if e.event_type == EventType.RUN_FAILED)
-        confirm_ev = next(e for e in await store.get_events("run-confirm") if e.event_type == EventType.RUN_FAILED)
-        other_ev = next(e for e in await store.get_events("run-other") if e.event_type == EventType.RUN_FAILED)
+        cancel_ev = next(e for e in await store.get_events("run-cancel") if (e.event_type == EventType.RUN and e.phase == "failed"))
+        confirm_ev = next(e for e in await store.get_events("run-confirm") if (e.event_type == EventType.RUN and e.phase == "failed"))
+        other_ev = next(e for e in await store.get_events("run-other") if (e.event_type == EventType.RUN and e.phase == "failed"))
         assert cancel_ev.payload["user_facing_message"] == "任务已取消。"
         assert confirm_ev.payload["user_facing_message"] == "任务因未获得必要确认而未能完成。"
         assert other_ev.payload["user_facing_message"] == "任务未能完成，请检查任务要求或稍后重试。"

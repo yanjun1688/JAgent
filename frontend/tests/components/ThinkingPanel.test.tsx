@@ -4,12 +4,12 @@ import userEvent from '@testing-library/user-event'
 import { ThinkingPanel } from '../../src/components/chat/ThinkingPanel'
 import type { WsEvent } from '../../src/api/types'
 
-function mkEvent(event_type: string): WsEvent {
+function mkEvent(event_type: string, phase?: string): WsEvent {
   return {
     run_id: 'r1',
     seq: 1,
     event_type,
-    payload: {},
+    payload: phase ? { phase } : {},
     idempotency_key: null,
     created_at: 0,
     tool_call_id: null,
@@ -39,17 +39,15 @@ describe('ThinkingPanel', () => {
   it('counts recognized thinking steps', () => {
     render(
       <ThinkingPanel
-        events={[
-          mkEvent('ThinkStarted'),
-          mkEvent('ThinkCompleted'),
-          mkEvent('ActStarted'),
-        ]}
+        events={[mkEvent('AgentThought'), mkEvent('Tool', 'called'), mkEvent('Tool', 'completed')]}
         open
         loading={false}
         onToggle={() => undefined}
       />,
     )
     expect(screen.getByText('3 步')).toBeInTheDocument()
+    expect(screen.getByText(/推理/)).toBeInTheDocument()
+    expect(screen.getByText(/调用工具/)).toBeInTheDocument()
   })
 
   it('toggles on header click', async () => {

@@ -101,8 +101,7 @@ async def run_full_pipeline(
     llm_responses: list[str | ChatResponse],
     tool_defs: list[ToolDefinition],
     tool_fns: dict,
-    max_iterations: int = 5,
-    max_consecutive_failures: int = 3,
+    run_attempt_budget: int = 3,
 ) -> tuple[RunState, list[dict], EventStore]:
     store = EventStore(":memory:")
     await store.initialize()
@@ -116,8 +115,7 @@ async def run_full_pipeline(
     dag = DagExecutor(executor, store, registry)
     planner = Planner(llm_client=llm_client, registry=registry, store=store)
     config = SchedulerConfig(
-        max_iterations=max_iterations,
-        max_consecutive_failures=max_consecutive_failures,
+        run_attempt_budget=run_attempt_budget,
     )
     scheduler = PlanningExecutorScheduler(
         store,
@@ -199,7 +197,7 @@ async def scenario_a_all_tools_visible():
         print(f"{FAIL} Expected >=2 LLM calls, got {len(calls)}")
 
     events = await store.get_events(state.run_id)
-    tool_completed = [e for e in events if e.event_type == EventType.TOOL_COMPLETED]
+    tool_completed = [e for e in events if e.event_type == EventType.TOOL]
     print(f"  INFO: {len(tool_completed)} tools executed, {len(events)} total events")
 
     await store.close()
@@ -260,8 +258,8 @@ async def scenario_b_user_intent_persistence():
     events = await store.get_events(state.run_id)
 
     # Check PlanRevised event for user_intent
-    plan_revised_events = [e for e in events if e.event_type == EventType.PLAN_REVISED]
-    plan_created_events = [e for e in events if e.event_type == EventType.PLAN_CREATED]
+    plan_revised_events = [e for e in events if e.event_type == EventType.PLAN]
+    plan_created_events = [e for e in events if e.event_type == EventType.PLAN]
 
     print(
         f"  INFO: status={state.status.value}, events={len(events)}, "
@@ -550,8 +548,8 @@ async def scenario_g_task_state_pipeline():
     print(f"{PASS} Pipeline completed with self-heal recovery")
 
     events = await store.get_events(state.run_id)
-    plan_revised_events = [e for e in events if e.event_type == EventType.PLAN_REVISED]
-    plan_created_events = [e for e in events if e.event_type == EventType.PLAN_CREATED]
+    plan_revised_events = [e for e in events if e.event_type == EventType.PLAN]
+    plan_created_events = [e for e in events if e.event_type == EventType.PLAN]
     print(
         f"  INFO: status={state.status.value}, events={len(events)}, "
         f"PLAN_CREATED={len(plan_created_events)}, PLAN_REVISED={len(plan_revised_events)}"

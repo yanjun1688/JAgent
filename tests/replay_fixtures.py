@@ -71,9 +71,9 @@ async def seed_failed_plan_run(store: EventStore, run_id: str, tenant_id: str = 
 
 
 def _event_type(payload_model: type):
-    from harness.models.events import PAYLOAD_MODEL_MAP
+    from harness.models.events import PAYLOAD_CLASS_TO_TYPE
 
-    for et, model in PAYLOAD_MODEL_MAP.items():
-        if model is payload_model:
-            return et
-    raise ValueError(f"no event type mapped for {payload_model.__name__}")
+    try:
+        return PAYLOAD_CLASS_TO_TYPE[payload_model]
+    except KeyError as exc:
+        raise ValueError(f"no event type mapped for {payload_model.__name__}") from exc

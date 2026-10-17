@@ -357,9 +357,9 @@ class TestTerminalEventRelease:
     @pytest.mark.parametrize(
         ("event_type", "payload"),
         [
-            (EventType.RUN_COMPLETED, RunCompletedPayload(result_summary="done").model_dump()),
-            (EventType.RUN_FAILED, RunFailedPayload(final_error="boom", event_count=0).model_dump()),
-            (EventType.RUN_ORPHANED, RunOrphanedPayload().model_dump()),
+            (EventType.RUN, RunCompletedPayload(result_summary="done").model_dump()),
+            (EventType.RUN, RunFailedPayload(final_error="boom", event_count=0).model_dump()),
+            (EventType.RUN, RunOrphanedPayload().model_dump()),
         ],
         ids=["completed", "failed", "orphaned"],
     )
@@ -381,7 +381,7 @@ class TestTerminalEventRelease:
         await pool.acquire("run-mid", tenant_id="t", workspace_id="w")
         await store.append_event(
             "run-mid",
-            EventType.TOOL_CALLED,
+            EventType.TOOL,
             ToolCalledPayload(tool_call_id="tc", tool_name="browser_navigate", input={}).model_dump(),
         )
         assert pool.get("run-mid") is not None

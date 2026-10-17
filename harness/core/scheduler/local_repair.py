@@ -11,10 +11,14 @@ Failed repair or exhausted budget → escalate to the existing global revise.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from harness.core.dag_types import ExecState, StepResult
-from harness.core.logger import agent_logger, guard_logger
+if TYPE_CHECKING:
+    from harness.core.planner import Planner
+    from harness.core.scheduler import SchedulerConfig
+
+from harness.core.dag_types import ExecState, StepResult, action_signature
+from harness.core.logger import agent_logger, guard_logger, trace_event
 from harness.core.recovery import RecoveryBudget, classify_failure_tier, validate_local_repair
 from harness.models.events import (
     EventType,
@@ -87,16 +91,33 @@ def local_repair_candidates(
 
 
 class LocalRepairMixin:
-    """Bounded per-step local repair before global revise (trusted budget)."""
+    """Bounded per-step local repair before global revise (trusted budget).
+
+    Mixin: attributes below are provided by the combined scheduler class;
+    declared here (annotations/stubs only, no runtime effect) so mypy checks
+    the calls instead of treating the mixin as an opaque object.
+    """
+
+    if TYPE_CHECKING:
+        config: SchedulerConfig
+        tool_defs: list[ToolDefinition]
+        planner: Planner
+
+        async def _append_run_event(
+            self, run_id: str, event_type: Any, payload: dict[str, Any], **kwargs: Any
+        ) -> Any: ...
+
+        async def _phase_call(self, run_id: str, phase: str, coro: Any) -> Any: ...
 
     def _local_repair_budget(self) -> RecoveryBudget | None:
         cfg = self.config
         if not cfg.local_repair_enabled:
             return None
-        tools = [t for t in cfg.local_repair_allowed_tools if self._find_tool_def(t) is not None]
+        # 候选工具集由已注册工具派生（单一来源）；真正的只读强制在
+        # validate_local_repair → _is_read_only_action 按 action 判定（fail-closed）。
         return RecoveryBudget(
             max_repair_rounds=max(1, cfg.local_repair_max_rounds),
-            allowed_tools=frozenset(tools) if tools else frozenset(),
+            allowed_tools=frozenset(td.name for td in self.tool_defs),
         )
 
     def _local_repair_candidates(
@@ -134,7 +155,7 @@ class LocalRepairMixin:
             repair_rounds[step.id] = used + 1
             await self._append_run_event(
                 run_id,
-                EventType.STEP_LOCAL_REPAIR_STARTED,
+                EventType.STEP_REPAIR,
                 StepLocalRepairStartedPayload(
                     step_id=step.id,
                     plan_id=plan_id,
@@ -148,7 +169,7 @@ class LocalRepairMixin:
             if not budget.allowed_tools:
                 await self._append_run_event(
                     run_id,
-                    EventType.STEP_LOCAL_REPAIR_COMPLETED,
+                    EventType.STEP_REPAIR,
                     StepLocalRepairCompletedPayload(
                         step_id=step.id,
                         plan_id=plan_id,
@@ -173,11 +194,17 @@ class LocalRepairMixin:
                 )
             except Exception as exc:  # LLM/proposal failure → escalate, never fake-fix
                 _sched_breaker.warning("[local-repair] proposal failed for step=%s: %s", step.id, exc)
+                trace_event(
+                    run_id,
+                    "HEAL-REPAIR-REJECT",
+                    step=step.id,
+                    reason=f"LLM/proposal failure: {exc}",
+                )
                 proposal = None
             if proposal is None:
                 await self._append_run_event(
                     run_id,
-                    EventType.STEP_LOCAL_REPAIR_COMPLETED,
+                    EventType.STEP_REPAIR,
                     StepLocalRepairCompletedPayload(
                         step_id=step.id,
                         plan_id=plan_id,
@@ -195,11 +222,19 @@ class LocalRepairMixin:
                 round_used=used + 1,
                 budget=budget,
                 step_tools_read_only=ro_tools,
+                original_signature=action_signature(step.tool, step.input or {}),
             )
             if not decision.allowed:
+                trace_event(
+                    run_id,
+                    "HEAL-REPAIR-REJECT",
+                    step=step.id,
+                    proposed=proposal.tool_name,
+                    reason=decision.reason,
+                )
                 await self._append_run_event(
                     run_id,
-                    EventType.STEP_LOCAL_REPAIR_COMPLETED,
+                    EventType.STEP_REPAIR,
                     StepLocalRepairCompletedPayload(
                         step_id=step.id,
                         plan_id=plan_id,
@@ -226,7 +261,7 @@ class LocalRepairMixin:
             results.pop(step.id, None)  # force re-run under the new action
             await self._append_run_event(
                 run_id,
-                EventType.STEP_LOCAL_REPAIR_COMPLETED,
+                EventType.STEP_REPAIR,
                 StepLocalRepairCompletedPayload(
                     step_id=step.id,
                     plan_id=plan_id,
@@ -245,6 +280,13 @@ class LocalRepairMixin:
                 proposal.tool_name,
                 used + 1,
                 budget.max_repair_rounds,
+            )
+            trace_event(
+                run_id,
+                "HEAL-REPAIR-ACCEPT",
+                step=step.id,
+                action=f"{step.tool} -> {proposal.tool_name} {proposal.input}",
+                round=used + 1,
             )
             return patched
         return None

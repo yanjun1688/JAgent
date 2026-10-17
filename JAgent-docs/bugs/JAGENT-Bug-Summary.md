@@ -7,8 +7,8 @@
 | 分类 | 数量 |
 |---|---:|
 | P0 | 7 |
-| P1 | 12 |
-| 合计 | 19 |
+| P1 | 13 |
+| 合计 | 20 |
 
 ## P0
 
@@ -43,6 +43,14 @@
 | [P1-11](./JAGENT-2026-P1-11_Checked_In_OpenAPI_Invalid_UTF8.md) | 已提交 OpenAPI 文件不是有效 UTF-8 | 已修复 |
 | [P1-12](./JAGENT-2026-P1-12_Query_Feedback_Scoped_SQL_Rejects_Valid_Query.md) | feedback 查询被 ScopedEventStore 错误拒绝 | 已修复 |
 | [P1-13](./JAGENT-2026-P1-13_Blackbox_Real_LLM_Workspace_Completion_and_Environment.md) | 真实 LLM Workspace 黑盒测试异常（classify 绕过 / 完成门脱钩 / DAG / watchdog / 环境） | 部分修复，08-13 复核发现遗留问题 |
+
+## 渗透测试发现（2026-10-12）
+
+对本地 Docker 部署实例的红队测试发现。受信边界缺口统一在此登记。
+
+| Bug | 标题 | 状态 |
+|---|---|---|
+| [P1-14](./JAGENT-2026-P1-14_LLM_Quota_Outage_Hard_Couples_Run_Tool_Execution.md) | 在线 LLM 配额失效时 run/tool 执行层直接 403（无降级/熔断） | 未修复 |
 
 ## 测试关联
 

@@ -42,7 +42,7 @@ class TestConversationIdColumn:
         conv_id = "conv-1"
         await store.append_event(
             conv_id,
-            EventType.CONVERSATION_STARTED,
+            EventType.CONVERSATION,
             ConversationStartedPayload(conversation_id=conv_id, title="T").model_dump(),
         )
         await asyncio.sleep(0.001)
@@ -51,7 +51,7 @@ class TestConversationIdColumn:
         run_id = "run-abc12345"
         await store.append_event(
             conv_id,
-            EventType.CONVERSATION_MESSAGE,
+            EventType.CONVERSATION,
             ConversationMessagePayload(
                 conversation_id=conv_id, run_id=run_id, role="user", content="hello"
             ).model_dump(),
@@ -62,7 +62,7 @@ class TestConversationIdColumn:
         #    both cache and column.
         await store.append_event(
             run_id,
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="do X", conversation_id=conv_id).model_dump(),
         )
         await asyncio.sleep(0.001)
@@ -72,14 +72,14 @@ class TestConversationIdColumn:
         await store.append_event(
             run_id,
             EventType.AGENT_THOUGHT,
-            AgentThoughtPayload(thought="thinking", token_count=10).model_dump(),
+            AgentThoughtPayload(thought="thinking").model_dump(),
         )
         await asyncio.sleep(0.001)
 
         # 5. Assistant message closes the conversation timeline
         await store.append_event(
             conv_id,
-            EventType.CONVERSATION_MESSAGE,
+            EventType.CONVERSATION,
             ConversationMessagePayload(
                 conversation_id=conv_id, run_id=run_id, role="assistant", content="done"
             ).model_dump(),
@@ -88,15 +88,15 @@ class TestConversationIdColumn:
         # Fetch the full conversation timeline
         events = await store.get_events_for_conversation(conv_id)
 
-        # Expected: all 5 events returned, in created_at order
-        types = [e.event_type for e in events]
-        assert types == [
-            EventType.CONVERSATION_STARTED,
-            EventType.CONVERSATION_MESSAGE,
-            EventType.RUN_STARTED,
-            EventType.AGENT_THOUGHT,
-            EventType.CONVERSATION_MESSAGE,
-        ], f"timeline order mismatch: {types}"
+        # Expected: all 5 events returned, in created_at order (aggregate + phase)
+        pairs = [(e.event_type, e.phase) for e in events]
+        assert pairs == [
+            (EventType.CONVERSATION, "started"),
+            (EventType.CONVERSATION, "message"),
+            (EventType.RUN, "started"),
+            (EventType.AGENT_THOUGHT, None),
+            (EventType.CONVERSATION, "message"),
+        ], f"timeline order mismatch: {pairs}"
 
     async def test_run_events_inherit_conversation_id_via_cache(self, store: EventStore):
         """After RunStarted sets the mapping, later run events pull from cache."""
@@ -105,20 +105,20 @@ class TestConversationIdColumn:
 
         await store.append_event(
             run_id,
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="i", conversation_id=conv_id).model_dump(),
         )
         # AGENT_THOUGHT has no conversation_id field; cache must fill the column.
         await store.append_event(
             run_id,
             EventType.AGENT_THOUGHT,
-            AgentThoughtPayload(thought="t", token_count=5).model_dump(),
+            AgentThoughtPayload(thought="t").model_dump(),
         )
 
         # Append a conversation-level assistant message to ensure timeline lookup hits
         await store.append_event(
             conv_id,
-            EventType.CONVERSATION_MESSAGE,
+            EventType.CONVERSATION,
             ConversationMessagePayload(
                 conversation_id=conv_id, run_id=run_id, role="assistant", content="ok"
             ).model_dump(),
@@ -145,49 +145,49 @@ class TestConversationIsolation:
         # Conversation A timeline
         await store.append_event(
             conv_a,
-            EventType.CONVERSATION_STARTED,
+            EventType.CONVERSATION,
             ConversationStartedPayload(conversation_id=conv_a, title="A").model_dump(),
         )
         await store.append_event(
             conv_a,
-            EventType.CONVERSATION_MESSAGE,
+            EventType.CONVERSATION,
             ConversationMessagePayload(
                 conversation_id=conv_a, run_id=run_a, role="user", content="A-user"
             ).model_dump(),
         )
         await store.append_event(
             run_a,
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="A", conversation_id=conv_a).model_dump(),
         )
         await store.append_event(
             run_a,
             EventType.AGENT_THOUGHT,
-            AgentThoughtPayload(thought="A-thinking", token_count=1).model_dump(),
+            AgentThoughtPayload(thought="A-thinking").model_dump(),
         )
 
         # Conversation B timeline
         await store.append_event(
             conv_b,
-            EventType.CONVERSATION_STARTED,
+            EventType.CONVERSATION,
             ConversationStartedPayload(conversation_id=conv_b, title="B").model_dump(),
         )
         await store.append_event(
             conv_b,
-            EventType.CONVERSATION_MESSAGE,
+            EventType.CONVERSATION,
             ConversationMessagePayload(
                 conversation_id=conv_b, run_id=run_b, role="user", content="B-user"
             ).model_dump(),
         )
         await store.append_event(
             run_b,
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="B", conversation_id=conv_b).model_dump(),
         )
         await store.append_event(
             run_b,
             EventType.AGENT_THOUGHT,
-            AgentThoughtPayload(thought="B-thinking", token_count=1).model_dump(),
+            AgentThoughtPayload(thought="B-thinking").model_dump(),
         )
 
         events_a = await store.get_events_for_conversation(conv_a)
@@ -225,19 +225,19 @@ class TestListRunsExcludesConversations:
         # Conversation events: run_id == conversation_id, column set
         await store.append_event(
             conv_id,
-            EventType.CONVERSATION_STARTED,
+            EventType.CONVERSATION,
             ConversationStartedPayload(conversation_id=conv_id, title="T").model_dump(),
         )
         await store.append_event(
             conv_id,
-            EventType.CONVERSATION_MESSAGE,
+            EventType.CONVERSATION,
             ConversationMessagePayload(conversation_id=conv_id, run_id=run_id, role="user", content="hi").model_dump(),
         )
 
         # Run event: run_id != conversation_id, column set
         await store.append_event(
             run_id,
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="i", conversation_id=conv_id).model_dump(),
         )
 
@@ -253,7 +253,7 @@ class TestListRunsExcludesConversations:
         run_id = "run-standalone"
         await store.append_event(
             run_id,
-            EventType.RUN_STARTED,
+            EventType.RUN,
             RunStartedPayload(intent="solo").model_dump(),
         )
         rows = await store.list_runs()
@@ -284,7 +284,7 @@ class TestLegacyPersistenceCompat:
             (
                 conv_id,
                 1,
-                EventType.CONVERSATION_STARTED.value,
+                EventType.CONVERSATION.value,
                 ConversationStartedPayload(conversation_id=conv_id, title="L").model_dump_json(),
                 _t.time(),
             ),
@@ -294,4 +294,4 @@ class TestLegacyPersistenceCompat:
         events = await store.get_events_for_conversation(conv_id)
         # Fallback arm `run_id = ?` catches it despite NULL conversation_id column
         assert len(events) == 1
-        assert events[0].event_type == EventType.CONVERSATION_STARTED
+        assert events[0].event_type == EventType.CONVERSATION

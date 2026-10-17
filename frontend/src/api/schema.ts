@@ -81,7 +81,6 @@ export interface DashboardOverview {
   total_tool_calls: number
   total_tool_failures: number
   total_guardrail_triggers: number
-  total_tokens_consumed: number
   avg_tool_success_rate: number
 }
 
@@ -271,7 +270,6 @@ export interface RunAnalysisSummary {
   intent: string
   status: string
   event_count: number
-  total_tokens: number
   total_duration_ms: number
   created_at?: number
   completed_at?: number

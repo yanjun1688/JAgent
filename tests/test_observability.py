@@ -73,18 +73,18 @@ async def test_failure_count_from_fold_matches_terminal_state():
     store = EventStore(":memory:")
     await store.initialize()
     try:
-        await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="t").model_dump())
+        await store.append_event("r1", EventType.RUN, RunStartedPayload(intent="t").model_dump())
         await store.append_event(
             "r1",
-            EventType.TOOL_FAILED,
+            EventType.TOOL,
             ToolFailedPayload(tool_call_id="tc1", tool_name="echo", error="boom").model_dump(),
         )
         await store.append_event(
             "r1",
-            EventType.TOOL_TIMEOUT,
+            EventType.TOOL,
             ToolTimeoutPayload(tool_call_id="tc2", tool_name="echo", timeout_ms=100).model_dump(),
         )
-        await store.append_event("r1", EventType.RUN_FAILED, RunFailedPayload(final_error="x", event_count=3).model_dump())
+        await store.append_event("r1", EventType.RUN, RunFailedPayload(final_error="x", event_count=3).model_dump())
 
         state = fold_events(await store.get_events("r1"))
         folded_failures = sum(
@@ -110,10 +110,10 @@ async def test_completed_run_failure_count_zero():
     store = EventStore(":memory:")
     await store.initialize()
     try:
-        await store.append_event("r1", EventType.RUN_STARTED, RunStartedPayload(intent="t").model_dump())
+        await store.append_event("r1", EventType.RUN, RunStartedPayload(intent="t").model_dump())
         await store.append_event(
             "r1",
-            EventType.TOOL_COMPLETED,
+            EventType.TOOL,
             {
                 "tool_call_id": "tc1",
                 "tool_name": "echo",
@@ -122,7 +122,7 @@ async def test_completed_run_failure_count_zero():
                 "result_type": "success",
             },
         )
-        await store.append_event("r1", EventType.RUN_COMPLETED, RunCompletedPayload(result_summary="done").model_dump())
+        await store.append_event("r1", EventType.RUN, RunCompletedPayload(result_summary="done").model_dump())
         state = fold_events(await store.get_events("r1"))
         folded_failures = sum(
             1

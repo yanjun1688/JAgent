@@ -8,6 +8,20 @@ repos:
         types: [python]
         pass_filenames: false
         always_run: true
+      - id: mypy
+        name: mypy (project venv via uv; never global python -m mypy)
+        entry: uv run mypy harness
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
+      - id: dead-code
+        name: dead private-symbol check
+        entry: uv run python scripts/check_dead_code.py harness evaluation scripts
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
       - id: openapi-diff
         name: OpenAPI artifacts in sync (scripts/generate_openapi.py --check)
         entry: uv run python scripts/generate_openapi.py --check

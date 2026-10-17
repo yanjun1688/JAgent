@@ -20,6 +20,8 @@ from harness.models.tools import RetryPolicy, ToolDefinition
 from harness.tools.executor import ToolExecutor
 from harness.tools.registry import ToolRegistry
 
+from tests.dag_layer_runner import run_plan_layers
+
 
 def _probe_def(name: str, *, max_parallel: int) -> ToolDefinition:
     return ToolDefinition(
@@ -58,7 +60,7 @@ class TestPerToolSemaphore:
             ],
         )
 
-        results = await dag.execute("run-serial", plan)
+        results = await run_plan_layers(dag, "run-serial", plan)
 
         assert results["p1"].is_completed, results["p1"].error
         assert results["p2"].is_completed, results["p2"].error
@@ -93,7 +95,7 @@ class TestPerToolSemaphore:
             ],
         )
 
-        run_task = asyncio.create_task(dag.execute("run-par", plan))
+        run_task = asyncio.create_task(run_plan_layers(dag, "run-par", plan))
         both_entered = False
         try:
             await asyncio.wait_for(asyncio.gather(entered["a"].wait(), entered["b"].wait()), timeout=5)

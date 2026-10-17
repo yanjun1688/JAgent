@@ -2,7 +2,7 @@
 
 > **所属层**: L2（Tool Layer 核心）
 > **关联**: `models/tools.py` · `tools/file_op.py` · `tools/http_request.py` · `tools/browser_tool.py` · `tools/mcp_call.py`
-> **决策编号**: C-04（引用校验粒度）· D-01（引用受信化，依赖 output_schema 与 `ref_allowed`）· 问题五（Tool Contract 粒度）
+> **决策编号**: C-04（引用校验粒度）· D-01（引用受信化，依赖 output_schema 与字段角色）· 问题五（Tool Contract 粒度）
 > **主控**: `JAGENT-2026-Completion-INDEX.md`
 
 ---
@@ -23,12 +23,12 @@
 - `http_request(GET)` 被拒 `probe`，因为 `side_effects=['external']`——**只读 GET 被当成有外部副作用**。
 - 根因：副作用、确认要求、幂等字段、probe 允许性全部按**工具**声明，无法区分 `file_op.read / write / delete`、`http_request.GET / POST`。
 
-这不是 Probe 语义 bug，而是**契约粒度缺陷**：系统把工具视为原子单元，无法对 operation/参数做安全判定。必须把契约下沉到 operation 级别（问题五），并为 D-01 的引用校验提供 per-field `ref_allowed`（C-04）。
+这不是 Probe 语义 bug，而是**契约粒度缺陷**：系统把工具视为原子单元，无法对 operation/参数做安全判定。必须把契约下沉到 operation 级别（问题五），并为 D-01 的引用校验提供 per-field 字段角色（C-04）。
 
 ## 3. 为什么这么做
 
 - 让 `file_op(read)` 的合法只读探测不触发误判；让 `http_request(GET)` 不被当成有副作用请求。
-- 为 S04 的 `$step.output` 引用校验提供：每个 operation 的 `output_schema` + 每个 input 字段的 `ref_allowed`。
+- 为 S04 的 `$step.output` 引用校验提供：每个 operation 的 `output_schema` + 每个 input 字段的字段角色。
 - 为将来 confirmation / idempotency 按 operation 差异化铺路（决策 D-02/D-03 的受信判定基础）。
 
 ## 4. 做之前先检查影响范围
@@ -44,7 +44,7 @@
 ## 5. 期望达到的目标
 
 - 存在统一的 per-operation 契约模型，四个工具（file_op / http_request / browser / mcp_call）均声明。
-- `file_op.read` 的 `side_effects=[]`、`probe_allowed=True`、`ref_allowed` 对 `path/content` 为 False。
+- `file_op.read` 的 `side_effects=[]`、`probe_allowed=True`；字段角色 `path=authority`（禁引用）、`content=data`（允许引用）。
 - `file_op.write/delete` 的 `side_effects=[WRITE]`/`[DELETE]`、`probe_allowed=False`。
 - `http_request.GET/HEAD` 的 `side_effects=[]`（仅只读）、`probe_allowed=True`；`POST/PUT/PATCH/DELETE` 的 `side_effects=[EXTERNAL]`、`probe_allowed=False`。
 - 所有字段由 Pydantic 模型产出，无裸字典。
@@ -63,8 +63,9 @@ class OperationContract(BaseModel):
     idempotency_key_fields: list[str] | None = None  # 覆盖工具级；None = 继承工具级
     probe_allowed: bool = False          # 该 operation 是否允许 probe 声明
     retry_policy: RetryPolicy | None = None  # 覆盖工具级
-    ref_allowed_fields: dict[str, bool] = {}   # C-04: input 字段名 → 是否允许 $step.output 引用
-    # 未列出的字段名默认 ref_allowed=False
+    # C-04: 引用允许性由 input_schema 字段角色 `x-role` 派生
+    # （`data`=允许 $step.output 引用 / `authority`=禁止，缺省 AUTHORITY fail-closed）；
+    # 原 `ref_allowed_fields: dict[str, bool]` 已移除（见 review_20260912_field_role_contract_diff）。
 ```
 
 在 `ToolDefinition` 增加：
@@ -96,14 +97,14 @@ def resolve_operation_contract(tool_def: ToolDefinition, input: dict) -> Operati
    - `file_op.delete` → `side_effects=[DELETE]`、`probe_allowed=False`。
    - `http_request.GET/HEAD` → `side_effects=[]`、`probe_allowed=True`。
    - `http_request.POST/PUT/PATCH/DELETE` → `side_effects=[EXTERNAL]`、`probe_allowed=False`。
-   - `ref_allowed_fields`：`file_op.path`=False、`file_op.content`=False；至少一个工具存在 `ref_allowed=True` 的字段示例。
+   - 字段角色：`file_op.path`=authority（禁）、`file_op.content`=data（允许）；`http_request.url/method`=authority、`body/headers`=data。
    - 解析函数对未知 operation 返回 None 且回退工具级声明。
 3. OpenAPI/前端：若 `ToolDefinition` 出现在 API response 中，需重新生成前端类型（本步如无 API 变更可跳过，但需在文档记录）。
 
 ## 8. 这么做的后果
 
 - **对 S03**：无直接影响。
-- **对 S04**：提供 `output_schema` 与 `ref_allowed_fields` 作为引用校验依据。
+- **对 S04**：提供 `output_schema` 与字段角色（`input_schema` 的 `x-role`）作为引用校验依据。
 - **对 S06**：完成门"操作+路径级"的匹配可精确到 operation。
 - **技术债**：`browser`/`mcp_call` 的 operation 枚举若与输入 schema enum 不一致，解析函数需容错（记录在案）。
 
@@ -122,4 +123,4 @@ def resolve_operation_contract(tool_def: ToolDefinition, input: dict) -> Operati
 | 状态 | 已完成 |
 | 执行会话 | opencode（S02 会话） |
 | 完成日期 | 2026-08-13 |
-| 备注 | `models/tools.py` 新增 `OperationContract` + `resolve_operation_contract`；file_op/http_request/browser 声明 operations（read-only 探测放行、write/delete/外部副作用保留）；mcp_call 无静态 operation 判别键 → 空列表走工具级回退（技术债记录）；planner probe 校验按 operation；executor 幂等/确认按 operation 覆盖。新增 `tests/test_operation_contract.py`（15 测试）。 |
+| 备注 | `models/tools.py` 新增 `OperationContract` + `resolve_operation_contract`；file_op/http_request/browser 声明 operations（read-only 探测放行、write/delete/外部副作用保留）；mcp_call 无静态 operation 判别键 → 空列表走工具级回退（技术债记录）；planner probe 校验按 operation；executor 幂等/确认按 operation 覆盖。新增 `tests/test_operation_contract.py`（15 测试）。后续变更（2026-09-12）：per-field 引用政策由 `ref_allowed_fields` 收敛为 `input_schema` 字段角色 `x-role`（DATA/AUTHORITY，缺省 AUTHORITY），见 `review_20260912_field_role_contract_diff`。 |

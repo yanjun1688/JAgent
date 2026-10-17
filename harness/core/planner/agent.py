@@ -6,6 +6,7 @@ execution; repair proposals are mechanically re-validated by the Scheduler.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -22,11 +23,16 @@ from harness.core.planner.prompts import (
     build_tool_descriptions,
     build_tool_descriptions_subset,
 )
-from harness.core.planner.schema_contract import build_step_schema_text, retry_prompt
+from harness.core.planner.rejections import record_plan_rejection
+from harness.core.planner.schema_contract import (
+    build_step_schema_text,
+    local_repair_retry_prompt,
+    retry_prompt,
+)
 from harness.core.recovery import LocalRepairProposal
 from harness.core.system_prompt import AgentPhase, get_prompt
 from harness.models.plan import DagPlan, DagStep
-from harness.storage.event_store import EventStore
+from harness.storage import EventStoreLike
 from harness.tools.registry import ToolRegistry
 
 _log = agent_logger("planner")
@@ -42,7 +48,7 @@ class Planner:
         self,
         llm_client: LLMClient,
         registry: ToolRegistry,
-        store: EventStore | None = None,
+        store: EventStoreLike | None = None,
         max_plan_retries: int = 2,
     ):
         self.llm = llm_client
@@ -113,6 +119,14 @@ class Planner:
             if errors:
                 last_error = "; ".join(errors)
                 _log.warning("[plan] Guardrail failed on attempt %d: %s", attempt, last_error)
+                await record_plan_rejection(
+                    self.store,
+                    run_id,
+                    stage="plan",
+                    attempt=attempt,
+                    reasons=errors,
+                    recovered=attempt < self.max_plan_retries + 1,
+                )
                 continue
 
             _log.info("[plan] Valid plan with %d steps", len(plan.steps))
@@ -191,6 +205,14 @@ class Planner:
             if errors:
                 last_error = "; ".join(errors)
                 _log.warning("[revise] Guardrail failed on attempt %d: %s", attempt, last_error)
+                await record_plan_rejection(
+                    self.store,
+                    run_id,
+                    stage="revise",
+                    attempt=attempt,
+                    reasons=errors,
+                    recovered=attempt < total_attempts,
+                )
                 continue
 
             _log.info("[revise] Attempt %d — valid plan with %d steps", attempt, len(revised.steps))
@@ -231,29 +253,46 @@ class Planner:
             step.tool,
             error or "?",
         )
+        last_error = ""
         for attempt in range(1, self.max_plan_retries + 2):
+            messages = [{"role": "system", "content": prompt}]
+            if last_error:
+                messages.append({"role": "user", "content": local_repair_retry_prompt(last_error)})
             try:
                 chat_resp = await self._chat_structured(
-                    AgentPhase.LOCAL_REPAIR.value, run_id, [{"role": "system", "content": prompt}], temperature=0.0
+                    AgentPhase.LOCAL_REPAIR.value, run_id, messages, temperature=0.0
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception:
+                # 既定语义（T-R8b-3 固化，非缺陷）：首个 LLM 传输异常即放弃本次
+                # 局部修复（"该修复方案给不出就放弃"），调度器随后升级到全局 revise，
+                # 不对传输失败做重试。CancelledError 是 BaseException 不在此列 —
+                # run 取消必须原样传播，不得被局部修复吞掉。
                 _log.exception("[local_repair] LLM call failed for step=%s", step.id)
                 return None
             response = chat_resp.content or ""
             self.last_raw_response = response
-            proposal = parse_local_repair_proposal(response)
-            if proposal is not None:
+            proposal, parse_err = parse_local_repair_proposal(response)
+            if parse_err == "":
+                # 无错误即终态：proposal 非空 = 可修复建议；proposal 为空 = 模型合法
+                # 地回答 {"tool_name": ""}（无可用修复）。两者都不再重试。
+                if proposal is None:
+                    _log.info("[local_repair] Model reported no repair possible for step=%s", step.id)
                 return proposal
+            last_error = parse_err
             _log.warning(
-                "[local_repair] Unparseable proposal on attempt %d for step=%s (%.200s)",
+                "[local_repair] Unparseable proposal on attempt %d for step=%s: %s (%.200s)",
                 attempt,
                 step.id,
+                parse_err,
                 response.strip(),
             )
         _log.warning(
-            "[local_repair] No valid proposal after %d attempts for step=%s",
+            "[local_repair] No valid proposal after %d attempts for step=%s (last error: %s)",
             self.max_plan_retries + 1,
             step.id,
+            last_error,
         )
         return None
 

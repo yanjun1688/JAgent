@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
-from harness.core.logger import agent_logger
+from harness.core.logger import agent_logger, trace_event
 from harness.monitoring.langfuse_tracer import _get_current_trace_ctx, _get_current_tracer
 
 _logger = agent_logger("llm")
@@ -44,14 +44,41 @@ async def timed_chat(
     hand-copied timing blocks in planner/agent.py and scheduler/classify.py.
     """
     _t0 = time.monotonic()
+    trace_event(
+        run_id,
+        "LLM-IN",
+        phase=phase,
+        messages=len(messages),
+    )
+    for index, message in enumerate(messages):
+        trace_event(
+            run_id,
+            "LLM-IN",
+            index=index,
+            role=message.get("role", "?"),
+            content=message.get("content", ""),
+        )
     try:
         resp = await llm.chat(messages, run_id=run_id, **kwargs)
+        duration_ms = int((time.monotonic() - _t0) * 1000)
         logger.info(
             "[llm] phase=%s run=%s duration_ms=%d chars=%d",
             phase,
             run_id or "",
-            int((time.monotonic() - _t0) * 1000),
+            duration_ms,
             len(resp.content) if resp and resp.content else 0,
+        )
+        trace_event(
+            run_id,
+            "LLM-OUT",
+            phase=phase,
+            duration_ms=duration_ms,
+            prompt_tokens=resp.prompt_tokens,
+            completion_tokens=resp.completion_tokens,
+            content=resp.content,
+            tool_calls=", ".join(
+                f"{call.name}({json.dumps(call.arguments, ensure_ascii=False)})" for call in resp.tool_calls
+            ),
         )
         return resp
     except BaseException as exc:
@@ -64,6 +91,12 @@ async def timed_chat(
             int((time.monotonic() - _t0) * 1000),
             type(exc).__name__,
             str(exc)[:200],
+        )
+        trace_event(
+            run_id,
+            "LLM-OUT",
+            phase=phase,
+            error=f"{type(exc).__name__}: {exc}",
         )
         raise
 
@@ -82,6 +115,8 @@ class ChatResponse(BaseModel):
     content: str = ""
     tool_calls: list[ToolCall] = Field(default_factory=list)
     finish_reason: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     raw: dict[str, Any] | None = None
 
 
@@ -282,5 +317,7 @@ class OpenAILLMClient(LLMClient):
             content=content,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             raw=choice,
         )

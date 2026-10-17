@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    image: jagent-backend:local
+    env_file:
+      - .env
+    environment:
+      HARNESS_DB_PATH: /app/data/harness.db
+      JAGENT_WORKSPACE_BASE_DIR: /app/data/workspaces
+      HARNESS_LOG_DIR: /app/data/logs
+      HARNESS_PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    image: jagent-frontend:local
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

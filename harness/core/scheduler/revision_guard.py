@@ -14,11 +14,17 @@ mechanical; the LLM's own task assessment (``step_tasks``) is audit-only.
 from __future__ import annotations
 
 import copy
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from harness.core.planner import Planner
+    from harness.core.scheduler import SchedulerConfig
+    from harness.storage import EventStoreLike
 
 from harness.core.dag_types import ExecState, StepResult, TaskState, action_signature
 from harness.core.logger import guard_logger
 from harness.core.planner import revision_invariant_feedback, validate_revision_invariants
+from harness.core.planner.rejections import record_plan_rejection
 from harness.models.plan import DagPlan, DagStep
 
 _sched_breaker = guard_logger("scheduler.breaker")
@@ -226,7 +232,17 @@ def merge_step_tasks(results: dict[str, StepResult], revised: DagPlan) -> int:
 
 
 class RevisionGuardMixin:
-    """Degenerate-revision guard + delivery-invariant guard on revise (trusted)."""
+    """Degenerate-revision guard + delivery-invariant guard on revise (trusted).
+
+    Mixin: attributes/methods below come from the combined scheduler.
+    """
+
+    if TYPE_CHECKING:
+        config: SchedulerConfig
+        planner: Planner
+        store: EventStoreLike
+
+        async def _phase_call(self, run_id: str, phase: str, coro: Any) -> Any: ...
 
     @staticmethod
     def _find_degenerate_revised_steps(
@@ -329,6 +345,17 @@ class RevisionGuardMixin:
                     self.config.max_revise_retries + 1,
                     ", ".join(degenerate),
                 )
+                await record_plan_rejection(
+                    self.store,
+                    run_id,
+                    stage="degenerate",
+                    attempt=attempt + 1,
+                    reasons=[
+                        f"Degenerate revision: step(s) {', '.join(degenerate)} repeat a failed action "
+                        "(same tool+input, no new upstream step)"
+                    ],
+                    recovered=attempt < self.config.max_revise_retries,
+                )
                 fb = (fb or "") + self._degenerate_feedback(degenerate)
             if invariant_errors:
                 _sched_breaker.error(
@@ -336,6 +363,14 @@ class RevisionGuardMixin:
                     attempt + 1,
                     self.config.max_revise_retries + 1,
                     "; ".join(invariant_errors),
+                )
+                await record_plan_rejection(
+                    self.store,
+                    run_id,
+                    stage="invariant",
+                    attempt=attempt + 1,
+                    reasons=invariant_errors,
+                    recovered=attempt < self.config.max_revise_retries,
                 )
                 fb = (fb or "") + revision_invariant_feedback(invariant_errors)
         _sched_breaker.error("[breaker] Degenerate revision budget exhausted for run=%s", run_id)

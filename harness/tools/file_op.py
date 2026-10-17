@@ -30,8 +30,12 @@ class FileOpTool(BaseTool):
                 "enum": ["read", "write", "append", "delete", "list"],
                 "description": "File operation to perform",
             },
-            "path": {"type": "string", "description": "File path relative to sandbox root"},
-            "content": {"type": "string", "description": "Content to write or append (required for write/append)"},
+            "path": {"type": "string", "description": "File path relative to sandbox root", "x-role": "authority"},
+            "content": {
+                "type": "string",
+                "description": "Content to write or append (required for write/append)",
+                "x-role": "data",
+            },
         },
         "required": ["operation", "path"],
     }
@@ -57,18 +61,17 @@ class FileOpTool(BaseTool):
     scope_targets = [ToolScopeTarget(kind="path", input_field="path")]
     needs_backend = True
 
-    @operation("read", probe_allowed=True, ref_allowed_fields={"path": False, "content": False})
+    @operation("read", probe_allowed=True)
     async def read(self, input):
         return await self.backend.read(input["path"])
 
-    @operation("list", probe_allowed=True, ref_allowed_fields={"path": False})
+    @operation("list", probe_allowed=True)
     async def list(self, input):
         return await self.backend.list(input["path"])
 
     @operation(
         "write",
         side_effects=[SideEffect.WRITE],
-        ref_allowed_fields={"path": False, "content": False},
     )
     async def write(self, input):
         return await self.backend.write(input["path"], input.get("content") or "")
@@ -76,12 +79,11 @@ class FileOpTool(BaseTool):
     @operation(
         "append",
         side_effects=[SideEffect.WRITE],
-        ref_allowed_fields={"path": False, "content": False},
     )
     async def append(self, input):
         return await self.backend.append(input["path"], input.get("content") or "")
 
-    @operation("delete", side_effects=[SideEffect.DELETE], ref_allowed_fields={"path": False})
+    @operation("delete", side_effects=[SideEffect.DELETE])
     async def delete(self, input):
         return await self.backend.delete(input["path"])
 

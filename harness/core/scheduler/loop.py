@@ -14,7 +14,7 @@ from harness.models.events import (
     RunCompletedPayload,
 )
 from harness.models.tools import ToolDefinition
-from harness.storage.event_store import EventStore
+from harness.storage import EventStoreLike
 from harness.tools.executor import ToolExecutor
 
 _sched_iter = agent_logger("scheduler.iter")
@@ -34,7 +34,7 @@ class AgentLoopScheduler(BaseScheduler):
 
     def __init__(
         self,
-        store: EventStore,
+        store: EventStoreLike,
         executor: ToolExecutor,
         kernel: AgentKernel,
         tool_defs: list[ToolDefinition],
@@ -68,7 +68,7 @@ class AgentLoopScheduler(BaseScheduler):
         consecutive_failures = 0
         _last_iter_time = time.monotonic()
 
-        for _iteration in range(1, self.config.max_iterations + 1):
+        for _iteration in range(1, self.config.run_attempt_budget + 1):
             _iter_elapsed = (time.monotonic() - _last_iter_time) * 1000
             if _iteration > 1:
                 _sched_iter.info(
@@ -80,13 +80,7 @@ class AgentLoopScheduler(BaseScheduler):
                 await self._fail(run_id, "Run cancelled by user")
                 return fold_events(await self.store.get_events(run_id))
 
-            command_state = await self._handle_pending_commands(run_id)
-            if command_state is not None:
-                if command_state.status in (RunStatus.COMPLETED, RunStatus.FAILED):
-                    return command_state
-                continue
-
-            _sched_iter.info("[iter %d/%d] Starting iteration", _iteration, self.config.max_iterations)
+            _sched_iter.info("[iter %d/%d] Starting iteration", _iteration, self.config.run_attempt_budget)
 
             # Langfuse: open an iteration span and activate it in the current
             # context so the LLM generation + tool spans nest under it.
@@ -100,8 +94,8 @@ class AgentLoopScheduler(BaseScheduler):
                 return result
             consecutive_failures = result
 
-        _sched_iter.error("[exhaust] Exceeded max iterations (%d)", self.config.max_iterations)
-        await self._fail(run_id, f"Exceeded max iterations ({self.config.max_iterations})")
+        _sched_iter.error("[exhaust] Exceeded max iterations (%d)", self.config.run_attempt_budget)
+        await self._fail(run_id, f"Exceeded max iterations ({self.config.run_attempt_budget})")
         return fold_events(await self.store.get_events(run_id))
 
     async def _run_iteration_body(
@@ -179,7 +173,6 @@ class AgentLoopScheduler(BaseScheduler):
             AgentThoughtPayload(
                 thought=first.thought,
                 tool_choice=first.tool_name,
-                token_count=first.token_count,
                 tool_calls=tool_names or None,
             ).model_dump(),
         )
@@ -189,7 +182,7 @@ class AgentLoopScheduler(BaseScheduler):
                 _sched_think.info('[answer] Agent answered directly: "%s"', think_result.direct_answer)
                 await self.store.append_event(
                     run_id,
-                    EventType.RUN_COMPLETED,
+                    EventType.RUN,
                     RunCompletedPayload(
                         result_summary=think_result.direct_answer,
                     ).model_dump(),
@@ -200,7 +193,7 @@ class AgentLoopScheduler(BaseScheduler):
                 _sched_think.info("[stop] Agent chose to stop, writing RunCompleted")
                 await self.store.append_event(
                     run_id,
-                    EventType.RUN_COMPLETED,
+                    EventType.RUN,
                     RunCompletedPayload(result_summary=think_result.thought).model_dump(),
                 )
                 return fold_events(await self.store.get_events(run_id))

@@ -99,7 +99,9 @@ def test_system_prompt_text_variant_still_has_tool_args_directive():
 
 
 def test_system_prompt_no_tools():
-    prompt = get_prompt(AgentPhase.SERIAL_THINK, intent="Just think", tool_list="(no tools available)")
+    # T-R8b-5: the dead SERIAL_THINK registration was removed; the text path is
+    # the canonical no-tools variant.
+    prompt = get_prompt(AgentPhase.SERIAL_THINK_TEXT, intent="Just think", tool_list="(no tools available)")
     assert "no tools available" in prompt.lower() or "(no tools" in prompt
 
 

@@ -24,7 +24,6 @@ from fastapi.responses import JSONResponse
 
 from harness.api.analysis_routes import router as analysis_router
 from harness.api.deps import HarnessAPI, configure_hapi, get_hapi
-from harness.api.query import router as query_router
 from harness.api.replay_routes import router as replay_router
 from harness.api.routes import router as routes_router
 from harness.api.ws import router as ws_router
@@ -203,5 +202,4 @@ async def tenant_context_middleware(request: Request, call_next):
 app.include_router(routes_router)
 app.include_router(ws_router)
 app.include_router(analysis_router)
-app.include_router(query_router)
 app.include_router(replay_router)
