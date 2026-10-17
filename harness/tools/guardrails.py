@@ -22,6 +22,7 @@ from harness.execution.base import ExecutionBackend
 from harness.models.events import event_matches
 from harness.models.tools import DependencyConstraint, SideEffect, ToolDefinition
 from harness.models.workspace import WorkspaceScope
+from harness.tools.egress import EgressBlockedError, validate_egress_url
 
 _log_guard = guard_logger("executor.guardrails")
 
@@ -52,6 +53,39 @@ class SchemaGuardrail:
                 guardrail_id=SchemaGuardrail.GUARDRAIL_ID,
                 reason=exc.message,
             )
+
+
+# ── 7.0 EgressGuardrail (SSRF) ────────────────────────────────────
+
+
+class EgressGuardrail:
+    """Deny server-side requests to non-global network addresses.
+
+    The URL is checked before the tool runs: scheme must be http/https, no
+    embedded credentials, and every resolved address must be globally
+    routable. DNS resolution is bounded by ``DNS_TIMEOUT_SECONDS``; failures
+    are fail-closed because an unresolvable target cannot be proven safe.
+    """
+
+    GUARDRAIL_ID = "egress"
+
+    def __init__(self, **kwargs):
+        pass
+
+    @staticmethod
+    async def check(tool_def: ToolDefinition, input: dict, config: dict[str, Any]) -> GuardrailResult:
+        url = input.get("url")
+        if not isinstance(url, str) or not url:
+            return GuardrailResult(
+                False,
+                EgressGuardrail.GUARDRAIL_ID,
+                "Egress target URL is missing",
+            )
+        try:
+            await validate_egress_url(url)
+        except EgressBlockedError as exc:
+            return GuardrailResult(False, EgressGuardrail.GUARDRAIL_ID, str(exc))
+        return GuardrailResult(passed=True, guardrail_id=EgressGuardrail.GUARDRAIL_ID, reason="")
 
 
 # ── 7.1 ScopeGuardrail ────────────────────────────────────────────
@@ -379,6 +413,7 @@ class DependencyGuardrail:
 # GuardrailTriggered events) for historical reasons.
 _GUARDRAIL_TYPE_DESTRUCTIVE = "destructive"
 _GUARDRAIL_TYPE_SCOPE = ScopeGuardrail.GUARDRAIL_ID  # "scope"
+_GUARDRAIL_TYPE_EGRESS = EgressGuardrail.GUARDRAIL_ID  # "egress"
 
 
 def validate_registration_safety(tool_def: ToolDefinition) -> list[str]:
@@ -401,6 +436,10 @@ def validate_registration_safety(tool_def: ToolDefinition) -> list[str]:
       targets are enforced only by ScopeGuardrail; declaring targets without
       it leaves the whitelist with no enforcer — and an empty whitelist itself
       means "no restriction", making the gap doubly silent.
+    - A ``domain`` scope target requires the ``egress`` guardrail. Domain
+      targets describe outbound requests; without the egress check an empty
+      ``allowed_domains`` list would leave loopback/private/metadata addresses
+      reachable (SSRF).
 
     SideEffect.WRITE / EXTERNAL deliberately carry no required-guardrail rule
     here: every current WRITE tool declares a path scope target (covered by
@@ -429,6 +468,13 @@ def validate_registration_safety(tool_def: ToolDefinition) -> list[str]:
             f"Add Guardrail(guardrail_type='{_GUARDRAIL_TYPE_SCOPE}') to the tool's guardrails list."
         )
 
+    if any(target.kind == "domain" for target in tool_def.scope_targets) and _GUARDRAIL_TYPE_EGRESS not in declared:
+        violations.append(
+            f"Tool '{tool_def.name}' declares a domain scope_target but does not attach the "
+            f"'{_GUARDRAIL_TYPE_EGRESS}' guardrail: loopback/private/metadata addresses would remain "
+            f"reachable. Add Guardrail(guardrail_type='{_GUARDRAIL_TYPE_EGRESS}') to the tool's guardrails list."
+        )
+
     return violations
 
 
@@ -440,6 +486,7 @@ class GuardrailRunner:
         self._registry: dict[str, type] = {
             "destructive": DestructiveOpGuardrail,
             "scope": ScopeGuardrail,
+            "egress": EgressGuardrail,
             "rate_limit": RateLimitGuardrail,
             "dependency": DependencyGuardrail,
         }

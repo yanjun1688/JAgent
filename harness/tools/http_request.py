@@ -40,7 +40,9 @@ async def _get_client() -> httpx.AsyncClient:
             return _client
         _client = httpx.AsyncClient(
             timeout=httpx.Timeout(DEFAULT_TIMEOUT),
-            follow_redirects=True,
+            # SSRF: never auto-follow redirects; a 3xx is returned to the caller
+            # and any follow-up target is validated by the egress guardrail.
+            follow_redirects=False,
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
         return _client
@@ -103,7 +105,10 @@ HTTP_REQUEST_DEF = ToolDefinition(
     },
     idempotency_key_fields=["url", "method", "headers", "body"],
     side_effects=[SideEffect.EXTERNAL],
-    guardrails=[Guardrail(guardrail_type="scope", config={})],
+    guardrails=[
+        Guardrail(guardrail_type="scope", config={}),
+        Guardrail(guardrail_type="egress", config={}),
+    ],
     timeout_ms=60000,
     success_indicator=SuccessIndicator(field="status_code", op="lt", value=400),
     # ADR-010 D-02: 判别键与默认操作（取代原魔法 `_OPERATION_KEYS` / 名称特判）。
@@ -260,7 +265,10 @@ class HttpRequestTool(BaseTool):
     default_operation = "GET"
     side_effects = [SideEffect.EXTERNAL]
     idempotency_key_fields = ["url", "method", "headers", "body"]
-    guardrails = [Guardrail(guardrail_type="scope", config={})]
+    guardrails = [
+        Guardrail(guardrail_type="scope", config={}),
+        Guardrail(guardrail_type="egress", config={}),
+    ]
     timeout_ms = 60000
     success_indicator = SuccessIndicator(field="status_code", op="lt", value=400)
     scope_targets = [ToolScopeTarget(kind="domain", input_field="url")]
