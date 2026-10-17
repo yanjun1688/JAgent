@@ -1,5 +1,4 @@
-# syntax=docker/dockerfile:1
-# Harness frontend — build with Vite, serve static assets via nginx (reverse-proxies /api).
+﻿# Harness frontend 鈥?build with Vite, serve static assets via nginx (reverse-proxies /api).
 FROM node:22-alpine AS build
 
 WORKDIR /app

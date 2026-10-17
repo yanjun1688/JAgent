@@ -9,12 +9,21 @@ services:
     environment:
       HARNESS_DB_PATH: /app/data/harness.db
       JAGENT_WORKSPACE_BASE_DIR: /app/data/workspaces
+      JAGENT_REMOTE_KEY_BASE_DIR: /app/data/remote_keys
       HARNESS_LOG_DIR: /app/data/logs
       HARNESS_PORT: "8000"
+      JAGENT_AUTH_MODE: jwt
+      JAGENT_JWT_ISSUER: jagent
+      JAGENT_JWT_AUDIENCE: jagent-api
+      JAGENT_JWT_ALGORITHMS: RS256,ES256
+      JAGENT_JWT_PUBLIC_KEYS_DIR: /run/secrets/jwt_public_keys
+      JAGENT_JWT_MAX_TTL_SECONDS: "43200"
+      JAGENT_DOCS_ENABLED: "false"
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data
+      - ./secrets/jwt_public_keys:/run/secrets/jwt_public_keys:ro
     restart: unless-stopped
 
   frontend:

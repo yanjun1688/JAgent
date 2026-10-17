@@ -1,5 +1,4 @@
-# syntax=docker/dockerfile:1
-# Harness backend — FastAPI + Uvicorn (Python 3.11, uv-managed deps).
+﻿# Harness backend 鈥?FastAPI + Uvicorn (Python 3.11, uv-managed deps).
 FROM ghcr.io/astral-sh/uv:0.7.16 AS uv
 
 FROM python:3.11-slim
@@ -33,6 +32,7 @@ RUN uv sync --frozen --no-dev
 # --- runtime data paths (persisted via compose volume) ---
 ENV HARNESS_DB_PATH=/app/data/harness.db \
     JAGENT_WORKSPACE_BASE_DIR=/app/data/workspaces \
+    JAGENT_REMOTE_KEY_BASE_DIR=/app/data/remote_keys \
     HARNESS_LOG_DIR=/app/data/logs \
     HARNESS_PORT=8000
 
@@ -41,7 +41,7 @@ RUN mkdir -p /app/data
 EXPOSE 8000
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=10 \
-    CMD curl -fsS http://localhost:8000/openapi.json >/dev/null || exit 1
+    CMD curl -fsS http://localhost:8000/health >/dev/null || exit 1
 
 # Linux container: default asyncio loop handles subprocess (no Proactor needed).
 CMD ["uvicorn", "harness.api.serve:app", "--host", "0.0.0.0", "--port", "8000"]
