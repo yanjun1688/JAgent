@@ -128,6 +128,9 @@ def test_acceptance_13_replay_is_stable_and_uses_no_model(tmp_path) -> None:
     app, propose = _app(tmp_path, _read_plan(EvidenceReq("read", "content")), advice, model=model)
     try:
         out = app.session.handle_turn("先看文件再判断")
+        # D-042：run 终态会调一次模型写收尾总结（这个替身没有脚本，调用失败后
+        # 退回模板摘要）。重放的判据是"此后不再有调用"，不是"全程零调用"。
+        calls_after_turn = model.calls
         events = list(app.store.read())
         delivered_before = [dict(e.payload) for e in _delivered(events)]
         checked_before = [dict(e.payload) for e in _checked(events)]
@@ -144,7 +147,7 @@ def test_acceptance_13_replay_is_stable_and_uses_no_model(tmp_path) -> None:
         app.close()
 
     # 重放不调用任何模型；也没有重新合成。
-    assert model.calls == 0
+    assert model.calls == calls_after_turn, "重放期间发生了模型调用"
     assert len(propose.calls) == 1
     assert [dict(e.payload) for e in _delivered(events_after)] == delivered_before
     assert [dict(e.payload) for e in _checked(events_after)] == checked_before

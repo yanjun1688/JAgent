@@ -22,6 +22,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
 
+from .. import logsupport
 from ..agent.delivery import DEFAULT_DISCLAIMER, fallback, render
 from ..agent.planner import PlanningError
 from ..agent.propose import ProposeError
@@ -51,7 +52,7 @@ from ..harness.fold import World
 from ..harness.human import HumanCenter
 from ..harness.plancheck import PlanIssue, first_message
 from ..harness.writer import Writer
-from .runner import Runner
+from .runner import Runner, has_model_summary
 
 PATH_SLOT = "__path__"
 
@@ -223,6 +224,11 @@ class Session:
                 "reason": decision.reason,
             },
         )
+        logsupport.event(
+            "route", session=self.session_id, intent=decision.type.value,
+            single_step=decision.single_step, conf=decision.confidence,
+            reason=decision.reason, missing=list(decision.missing_params),
+        )
 
         # 置信度不够：先问「要建议还是要执行」，不猜。
         # 这道闸只服务降级装配（UnavailablePlanner）：draft_capable 的 planner
@@ -323,7 +329,15 @@ class Session:
 
         # run 完成后一律让模型基于执行证据做一次收尾：要判断的给建议（过闸），
         # 只是查/做的给一段总结回复。E19 已按意图/`then` 收尾；普通执行走这里。
-        if plan.then != "advice" and outcome.status == "completed" and self._draft_capable:
+        # D-042：run 层已经写过收尾总结（Result.summary 带模型草稿）时不再写第二遍——
+        # 一次 run 一段总结，否则事件流里两套叙事、端到端还多付一次 token。
+        # 这条路保留给「总结缺席」（模型不可用 / 输出不合法）的 completed run。
+        if (
+            plan.then != "advice"
+            and outcome.status == "completed"
+            and self._draft_capable
+            and not has_model_summary(outcome.result)
+        ):
             synthesized = self._answer_from_evidence(decision, text, outcome)
             if synthesized is not None:
                 # 同上：模型总结只产出文本，run 的判定/ID 不能在收尾时蒸发。
@@ -332,13 +346,20 @@ class Session:
         return self._handed_off(decision, outcome)
 
     def _handed_off(self, decision: IntentDecision | None, outcome: Any) -> TurnOutcome:
-        """普通收尾：落 ``turn.ended{handed_off}``，只回 run 的结果摘要。
+        """普通收尾：只回 run 的结果摘要。
 
+        事件口径（D-042）：``Result.summary`` 已由模型写过时，这一次 turn 交付的
+        就是一段模型写的回答，落 ``turn.ended{outcome:"answered"}``；总结缺席
+        （模板摘要）才是 ``handed_off``——"只把手里的 run 结果原样交出去"。
         不再调用模型或规划器；E19 合成失败时也用它收尾，避免 gather 回落到
         ``Planner.plan``（D-004）。
         """
 
-        self.writer.emit(EventType.TURN_ENDED, {"outcome": "handed_off"})
+        result = getattr(outcome, "result", None)
+        self.writer.emit(
+            EventType.TURN_ENDED,
+            {"outcome": "answered" if has_model_summary(result) else "handed_off"},
+        )
         return TurnOutcome(
             status="answered",
             text=(outcome.result.summary if outcome.result else ""),
@@ -554,6 +575,7 @@ class Session:
         verdict = self.gate.check(advice, evidence, plan)
         unreviewed = _unreviewed(verdict.judge)
         verdict, advice = self._review_state(verdict, advice)
+        self._log_gate(verdict, run_id=run_id)
         self.writer.emit(
             EventType.GATE_CHECKED,
             self._gate_payload(
@@ -781,6 +803,7 @@ class Session:
     def _advice_draft(self, draft: AdviceDraft, decision: IntentDecision) -> TurnOutcome:
         verdict = self.gate.check(draft.advice, framework_only=False)
         unreviewed = _unreviewed(verdict.judge)
+        self._log_gate(verdict, session_only=True)
         verdict, advice = self._review_state(verdict, draft.advice)
         self.writer.emit(
             EventType.GATE_CHECKED,
@@ -832,6 +855,35 @@ class Session:
         if _unreviewed(verdict.judge):
             return verdict, _mark_unsemantic(advice)
         return verdict, advice
+
+    def _log_gate(self, verdict: Any, *, run_id: str | None = None, session_only: bool = False) -> None:
+        """gate 结论进日志：通过一行，违规逐条（为什么被拦一目了然）。"""
+        fields: dict[str, Any] = {"mode": verdict.mode}
+        if run_id:
+            fields["run"] = run_id
+        if verdict.passed:
+            if verdict.judge is not None:
+                fields["judge"] = f"{verdict.judge.verdict}:{verdict.judge.reason}"
+            logsupport.event("gate pass", session=self.session_id, **fields)
+            return
+        for violation in verdict.violations:
+            logsupport.warn(
+                "gate violation", session=self.session_id,
+                code=violation.code, rule=violation.rule_id, detail=violation.detail,
+                **({"run": run_id} if run_id else {}),
+            )
+        judge = verdict.judge
+        if judge is not None and judge.verdict != "none":
+            logsupport.warn(
+                "judge verdict", session=self.session_id,
+                verdict=judge.verdict, reason=judge.reason, model=judge.model,
+                **({"run": run_id} if run_id else {}),
+            )
+        if session_only:
+            logsupport.event(
+                "advice fallback delivered", session=self.session_id,
+                fallback=verdict.fallback.reason if verdict.fallback else "-",
+            )
 
     def _gate_payload(
         self,

@@ -6,15 +6,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from collections.abc import Sequence
+import queue as _queue
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -24,7 +27,7 @@ from ..audit import run_verification
 from ..contracts import Result
 from ..metrics import run_metrics, session_metrics, session_summaries
 from ..wiring import App, build_app
-from .logsink import LogSink
+from .logsink import LogEntry, LogSink
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,62 @@ UI_DIST = PACKAGE_ROOT / "ui" / "dist"
 
 WAITING_HUMAN_TEXT = "这一步需要你确认，确认后我继续。"
 SERVER_ERROR_TEXT = "服务出错了，请重试"
+
+
+def _sse_line(entry: LogEntry) -> str:
+    payload = json.dumps(
+        {
+            "id": entry.id,
+            "at": entry.at,
+            "level": entry.level,
+            "logger": entry.logger,
+            "message": entry.message,
+        },
+        ensure_ascii=False,
+    )
+    return f"data: {payload}\n\n"
+
+
+#: SSE 空闲心跳间隔（秒）：无新日志时发注释行，防中间层断连。
+_SSE_HEARTBEAT_S = 15.0
+
+
+async def sse_stream(
+    sink: LogSink,
+    *,
+    after: int = -1,
+    max_events: int | None = None,
+) -> AsyncIterator[str]:
+    """SSE 推流生成器：先回放存量（``after`` 之后），再实时推送每一行。
+
+    日志落地即推（logsink 订阅广播），面板不再轮询。无新日志时按
+    ``_SSE_HEARTBEAT_S`` 发心跳注释行。``max_events`` 是有界模式
+    （测试/巡检用）：推满即收流；缺省无限流，客户端断开时反注册订阅。
+    """
+    sent = 0
+    q = sink.subscribe()
+    try:
+        entries, cursor = sink.since(after)
+        for entry in entries:
+            yield _sse_line(entry)
+            sent += 1
+            if max_events is not None and sent >= max_events:
+                return
+        while True:
+            try:
+                entry = await asyncio.to_thread(q.get, timeout=_SSE_HEARTBEAT_S)
+            except _queue.Empty:
+                yield ": ping\n\n"
+                continue
+            if entry.id <= cursor:
+                continue  # 订阅先于回放：重叠部分跳过，不重不漏
+            cursor = entry.id
+            yield _sse_line(entry)
+            sent += 1
+            if max_events is not None and sent >= max_events:
+                return
+    finally:
+        sink.unsubscribe(q)
 
 
 class ChatRequest(BaseModel):
@@ -271,8 +330,10 @@ def create_app(
     def recent_logs(after: int = Query(-1, ge=-1)) -> JSONResponse:
         """进程日志只读出口（运维观测，不是事件）：环形窗口 + 游标增量。
 
-        内容 = uvicorn 访问线 + 服务生命周期 + 模型调用 + 异常堆栈；
+        内容 = uvicorn 生命周期 + 服务日志 + 执行链路（route/plan/step/
+        verify/failure/repair/run 终态）+ 模型调用 + 异常堆栈；访问线不在。
         ``after=-1`` 取整个窗口，之后带上一页的 ``next`` 做增量。
+        面板默认走 ``/api/logs/stream``（SSE 推流），这里是兼容/测试出口。
         """
         entries, cursor = api.state.log_sink.since(after)
         return JSONResponse(
@@ -289,6 +350,21 @@ def create_app(
                 ],
                 "next": cursor,
             }
+        )
+
+    @api.get("/api/logs/stream")
+    async def stream_logs(
+        after: int = Query(-1, ge=-1),
+        max_events: int | None = Query(None, ge=1, le=500),
+    ) -> StreamingResponse:
+        """SSE 推流：连上先回放存量（``after`` 之后），再实时推送每一行。
+
+        推流逻辑在 ``sse_stream``（模块级，可直接测试）；这里只是 HTTP 薄壳。
+        """
+        return StreamingResponse(
+            sse_stream(api.state.log_sink, after=after, max_events=max_events),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     # 静态页必须在所有 API 路由之后挂载，否则 "/" 会把 /healthz、/chat、

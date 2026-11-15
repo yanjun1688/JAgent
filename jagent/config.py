@@ -30,6 +30,7 @@ REQUIRED_PROMPTS: tuple[str, ...] = (
     "propose",
     "judge",
     "repair",
+    "reporter",
 )
 
 

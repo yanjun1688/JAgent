@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { Pause, Play, TerminalWindow } from '@phosphor-icons/react'
-import { api, ApiError, type LogEntry } from '../lib/api'
+import { MagnifyingGlass, Pause, Play, TerminalWindow } from '@phosphor-icons/react'
+import type { LogEntry } from '../lib/api'
 import { logLevelTone } from '../lib/kernel'
 import { cx } from '../lib/cx'
 import { Led } from './Led'
 
-const POLL_MS = 1000
 const KEEP = 600
 
 type LevelFilter = 'all' | 'warn' | 'error'
@@ -33,44 +32,37 @@ const LEVEL_TEXT: Record<string, string> = {
 }
 
 /**
- * Right column: the backend's own log stream (D-036) — uvicorn access lines,
- * service lifecycle, model calls, exception stacks. Operational telemetry,
- * NOT the event stream: the two never merge on screen.
+ * Right column: the backend's own log stream (D-039) — SSE push from
+ * `/api/logs/stream`, no polling. What flows here is what the system is doing
+ * right now: route → plan → step → verify → failure → run verdict, model
+ * calls, exception stacks. Operational telemetry, NOT the event stream.
  */
 export function LogsPanel() {
   const [logs, setLogs] = useState<LogEntry[]>([])
-  const [error, setError] = useState<string | null>(null)
+  const [live, setLive] = useState(false)
   const [filter, setFilter] = useState<LevelFilter>('all')
+  const [needle, setNeedle] = useState('')
   const [paused, setPaused] = useState(false)
-  const cursorRef = useRef(-1)
   const boxRef = useRef<HTMLDivElement>(null)
   const stickRef = useRef(true)
 
   useEffect(() => {
     if (paused) return
-    let cancelled = false
-    let timer: number | undefined
-
-    const tick = async () => {
+    const source = new EventSource('/api/logs/stream')
+    source.onopen = () => setLive(true)
+    source.onerror = () => setLive(false) // EventSource reconnects on its own
+    source.onmessage = (message) => {
       try {
-        const page = await api.pollLogs(cursorRef.current)
-        if (cancelled) return
-        cursorRef.current = page.next
-        setError(null)
-        if (page.logs.length > 0) {
-          setLogs((current) => [...current, ...page.logs].slice(-KEEP))
-        }
-      } catch (caught) {
-        if (cancelled) return
-        setError(caught instanceof ApiError ? caught.detail : '读取日志失败，正在重试。')
+        const entry = JSON.parse(message.data) as LogEntry
+        setLogs((current) => [...current, entry].slice(-KEEP))
+        setLive(true)
+      } catch {
+        // a malformed line never breaks the console
       }
-      timer = window.setTimeout(tick, POLL_MS)
     }
-
-    void tick()
     return () => {
-      cancelled = true
-      if (timer !== undefined) window.clearTimeout(timer)
+      source.close()
+      setLive(false)
     }
   }, [paused])
 
@@ -90,7 +82,12 @@ export function LogsPanel() {
 
   const threshold =
     filter === 'error' ? LEVEL_ORDER.ERROR : filter === 'warn' ? LEVEL_ORDER.WARNING : 0
-  const visible = logs.filter((entry) => (LEVEL_ORDER[entry.level] ?? 0) >= threshold)
+  const needleLower = needle.trim().toLowerCase()
+  const visible = logs.filter(
+    (entry) =>
+      (LEVEL_ORDER[entry.level] ?? 0) >= threshold &&
+      (!needleLower || entry.message.toLowerCase().includes(needleLower)),
+  )
   const errorCount = logs.filter((entry) => (LEVEL_ORDER[entry.level] ?? 0) >= LEVEL_ORDER.ERROR)
     .length
   const warnCount = logs.filter((entry) => (LEVEL_ORDER[entry.level] ?? 0) >= LEVEL_ORDER.WARNING)
@@ -99,7 +96,7 @@ export function LogsPanel() {
   return (
     <aside
       aria-label="后端日志"
-      className="hidden min-h-0 w-[420px] shrink-0 flex-col border-l border-night-500 bg-night-900/80 lg:flex 2xl:w-[480px]"
+      className="hidden min-h-0 w-[440px] shrink-0 flex-col border-l border-night-500 bg-night-900/80 lg:flex 2xl:w-[500px]"
     >
       <div className="panel-edge flex shrink-0 items-center gap-2 border-b border-night-500 px-4 py-2.5">
         <TerminalWindow size={14} className="text-neon-cyan" aria-hidden />
@@ -107,25 +104,31 @@ export function LogsPanel() {
           后端日志
         </span>
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-text-tertiary">
-          stdout · D-036
+          SSE · D-039
         </span>
-        <span className="ml-auto flex items-center gap-2 font-mono text-[10px] tabular-nums text-text-tertiary">
-          {warnCount > 0 ? <span className="text-led-warn">!{warnCount}</span> : null}
-          {errorCount > 0 ? <span className="text-led-bad">✕{errorCount}</span> : null}
-          <button
-            type="button"
-            onClick={() => setPaused((value) => !value)}
-            title={paused ? '继续滚动' : '暂停拉取'}
-            className={cx(
-              'border p-1 transition-colors duration-300 ease-base',
-              paused
-                ? 'border-led-warn/60 text-led-warn'
-                : 'border-night-500 text-text-tertiary hover:border-neon-cyan/60 hover:text-text-primary',
-            )}
-          >
-            {paused ? <Play size={11} aria-hidden /> : <Pause size={11} aria-hidden />}
-          </button>
+        <span
+          className={cx(
+            'ml-auto flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em]',
+            live ? 'text-led-ok' : 'text-led-warn',
+          )}
+          title={live ? '日志推流已连接' : '推流断开，自动重连中'}
+        >
+          <Led tone={live ? 'ok' : 'warn'} size="xs" breathe={!live} />
+          {live ? 'LIVE' : 'RECONNECT'}
         </span>
+        <button
+          type="button"
+          onClick={() => setPaused((value) => !value)}
+          title={paused ? '继续推流' : '暂停推流'}
+          className={cx(
+            'border p-1 transition-colors duration-300 ease-base',
+            paused
+              ? 'border-led-warn/60 text-led-warn'
+              : 'border-night-500 text-text-tertiary hover:border-neon-cyan/60 hover:text-text-primary',
+          )}
+        >
+          {paused ? <Play size={11} aria-hidden /> : <Pause size={11} aria-hidden />}
+        </button>
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5 border-b border-night-600 px-4 py-1.5">
@@ -150,7 +153,23 @@ export function LogsPanel() {
             {label}
           </button>
         ))}
-        <span className="ml-auto font-mono text-[10px] tabular-nums text-text-tertiary">
+        {errorCount > 0 ? (
+          <span className="font-mono text-[10px] text-led-bad">✕{errorCount}</span>
+        ) : null}
+        {warnCount > 0 ? (
+          <span className="font-mono text-[10px] text-led-warn">!{warnCount}</span>
+        ) : null}
+
+        <span className="ml-auto flex items-center gap-1 border border-night-500 bg-night-800 px-1.5 py-0.5">
+          <MagnifyingGlass size={10} className="text-text-tertiary" aria-hidden />
+          <input
+            value={needle}
+            onChange={(event) => setNeedle(event.target.value)}
+            placeholder="过滤关键字 / run_id"
+            className="w-[140px] bg-transparent font-mono text-[10px] text-text-primary placeholder:text-text-tertiary focus:outline-none"
+          />
+        </span>
+        <span className="font-mono text-[10px] tabular-nums text-text-tertiary">
           {visible.length} 行
         </span>
       </div>
@@ -162,10 +181,10 @@ export function LogsPanel() {
       >
         {visible.length === 0 ? (
           <p className="px-3 py-8 text-center font-mono text-xs leading-relaxed text-text-tertiary">
-            {error ?? '等待服务日志……'}
+            {paused ? '推流已暂停。' : '等待服务日志……'}
             <br />
             <span className="text-[10px]">
-              每条 HTTP 请求、模型调用与异常都会流经这里。
+              发一条消息，系统内部每一步（路由 / 计划 / 执行 / 校验）都会流经这里。
             </span>
           </p>
         ) : (

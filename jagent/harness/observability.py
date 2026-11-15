@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from ..contracts import EventType
+from ..logsupport import blocks, event, warn
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +48,13 @@ class ObservationModel:
             reply = self._inner.complete(system=system, prompt=prompt, temperature=temperature)
         except Exception as exc:  # noqa: BLE001 - 失败的调用也要观测：outage/超时是最需要看见的时刻
             duration_ms = int((time.perf_counter() - started) * 1000)
-            logger.warning(
-                "model.call failed purpose=%s model=%s ms=%d error=%s",
-                self._purpose,
-                self.name,
-                duration_ms,
-                f"{type(exc).__name__}: {exc}",
+            warn(
+                "model.call FAILED",
+                purpose=self._purpose,
+                model=self.name,
+                ms=duration_ms,
+                error=f"{type(exc).__name__}: {exc}",
+                detail=blocks(("prompt", prompt_text)),
             )
             self._writer.emit(
                 EventType.MODEL_CALLED,
@@ -73,13 +75,15 @@ class ObservationModel:
         duration_ms = int((time.perf_counter() - started) * 1000)
         tokens_in = int(getattr(reply, "tokens_in", 0) or 0)
         tokens_out = int(getattr(reply, "tokens_out", 0) or 0)
-        logger.info(
-            "model.call purpose=%s model=%s ms=%d tok_in=%d tok_out=%d",
-            self._purpose,
-            self.name,
-            duration_ms,
-            tokens_in,
-            tokens_out,
+        reply_text = getattr(reply, "text", "") or ""
+        event(
+            "model.call",
+            purpose=self._purpose,
+            model=self.name,
+            ms=duration_ms,
+            tok_in=tokens_in,
+            tok_out=tokens_out,
+            detail=blocks(("prompt", prompt_text), ("reply", reply_text)),
         )
         self._writer.emit(
             EventType.MODEL_CALLED,

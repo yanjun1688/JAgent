@@ -19,9 +19,11 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import time
 from pathlib import Path
 from typing import Any
 
+from .. import logsupport
 from ..contracts import (
     EventType,
     Step,
@@ -182,6 +184,12 @@ class Executor:
             run_id=run_id,
             step_id=step.id,
         )
+        logsupport.event(
+            "step started", run=run_id, step=step.id, attempt=attempt,
+            tool=step.tool, args=logsupport.short(raw_args),
+            detail=logsupport.blocks(("args", raw_args)),
+        )
+        step_started = time.perf_counter()
 
         # 缺口 4：契约快照复核——冻结后工具被换（契约变了）→ 派发即拒，工具不跑。
         frozen = self.writer.world.runs[run_id].tool_snapshot
@@ -190,7 +198,7 @@ class Executor:
         else:
             try:
                 args = self._bind_args(run_id, raw_args)
-                result = self._invoke(step, args)
+                result = self._invoke(run_id, step, args)
             except BindingError as exc:
                 result = ToolResult(
                     ok=False, error_code="invalid_args", error_message=f"binding failed: {exc}"
@@ -198,6 +206,7 @@ class Executor:
         data = _jsonable(result.data or {})
         artifact_refs = self._write_artifacts(run_id, step.id, result, data)
         observations = _observations(result, data)
+        duration_ms = int((time.perf_counter() - step_started) * 1000)
 
         self.writer.emit(
             EventType.STEP_FINISHED,
@@ -213,6 +222,25 @@ class Executor:
             run_id=run_id,
             step_id=step.id,
         )
+        outputs = logsupport.blocks(
+            ("stdout", observations.get("stdout")),
+            ("stderr", observations.get("stderr")),
+            ("data", data),
+            ("error", result.error_message),
+        )
+        if result.ok:
+            logsupport.event(
+                "step finished", run=run_id, step=step.id,
+                ms=duration_ms, exit_code=result.exit_code,
+                detail=outputs,
+            )
+        else:
+            logsupport.warn(
+                "step FAILED", run=run_id, step=step.id,
+                ms=duration_ms, error_code=result.error_code,
+                error=result.error_message or observations,
+                detail=outputs,
+            )
 
         return StepOutcome(
             ok=result.ok,
@@ -245,13 +273,19 @@ class Executor:
                 by_step[step_id] = dict(event.payload.get("observations") or {})
         return by_step
 
-    def _invoke(self, step: Step, args: dict[str, Any]) -> ToolResult:
+    def _invoke(self, run_id: str, step: Step, args: dict[str, Any]) -> ToolResult:
         try:
             spec = self.registry.get(step.tool)
             return self.registry.call(
                 step.tool, args, workspace=self.workspace, timeout=spec.timeout_s
             )
         except Exception as exc:  # 工具抛异常 = 一次可记录的工具失败，不是进程失败
+            # 日志带完整堆栈：异常文本往往不进 observations（如 MCP 工具把
+            # stderr 吞掉），这里是"为什么失败"的第一现场（D-039）。
+            logsupport.fail(
+                "tool exception", run=run_id, step=step.id,
+                tool=step.tool, error=f"{type(exc).__name__}: {exc}", exc=True,
+            )
             return ToolResult(
                 ok=False,
                 error_code="tool_exception",

@@ -71,6 +71,8 @@ class SharedComponents:
     propose_param: Any = None
     #: 显式注入的 repairer（测试/特殊装配）：全部栈共享它，不再按栈观测。
     repairer_override: Any = None
+    #: 显式注入的收尾总结器（D-042）：None = 有模型就按栈装配、没模型就没有总结。
+    summarizer: Any = None
 
 
 @dataclass
@@ -175,12 +177,20 @@ class App:
         if repairer is None:
             repairer = HeuristicRepairer()
 
+        # 收尾总结（D-042）：有模型才有总结；观测视图带本栈 writer，
+        # 日志/事件里能看到 purpose=reporter 的那次调用。
+        summarizer = shared.summarizer
+        if summarizer is None and shared.model is not None:
+            from .agent.summarize import LLMSummarizer
+
+            summarizer = LLMSummarizer(observed("reporter"), config=shared.config)
+
         runner = Runner(
             writer=writer, executor=executor, verifier=shared.verifier,
             repairer=repairer, reporter=shared.reporter,
             human=human, budget=shared.budget, registry=shared.registry,
             auto_approve=frozenset(shared.budget.auto_approve_tools),
-            env=shared.env, artifacts=shared.artifacts,
+            env=shared.env, artifacts=shared.artifacts, summarizer=summarizer,
         )
         session = Session(
             writer=writer,
@@ -253,6 +263,7 @@ def build_app(
     propose: Any = None,
     mcp_servers: Sequence[McpServer] | None = None,
     config: Config | None = None,
+    summarizer: Any = None,
 ) -> App:
     """装配根。
 
@@ -262,6 +273,8 @@ def build_app(
     缺 judge 时语义违规的建议会被静默投递，这是不能默认接受的边界。
     `mcp_servers` 非空 => 把 MCP 服务暴露的工具注册进 ToolRegistry（工具层），
     planner 通过 descriptors 看见它们，executor 通过 registry.call 调用它们。
+    `summarizer` 是收尾总结器（D-042）：不传时「有模型就按栈装配一个」，
+    传 None 且无模型 = 没有总结能力（模板摘要）；显式传入时用注入的实例（测试/特殊装配）。
 
     配置（prompt / budget）在**这里**读一次并注入各组件（宪法 I6）：
     显式传 ``config`` 时用它（测试/替换配置树），否则读包内 ``jagent/config/``。
@@ -325,7 +338,7 @@ def build_app(
         judge=judge, model=model,
         router_param=router, planner_param=planner, propose_param=propose,
         config=config, budget=budget, env=env,
-        repairer_override=repairer_override,
+        repairer_override=repairer_override, summarizer=summarizer,
     )
     app = App(
         store=store, world=world, shared=shared, registry=registry,

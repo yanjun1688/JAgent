@@ -59,6 +59,7 @@ from ..harness.reconcile import (
 from ..harness.repair import reuse_key
 from ..harness.statemachine import RUN_TERMINAL
 from ..harness.writer import Writer
+from ..logsupport import event, fail, warn
 
 #: `_settle` 的控制令牌：继续跑下一步。
 CONTINUE = "continue"
@@ -66,6 +67,26 @@ CONTINUE = "continue"
 #: 修复预算耗尽的失败原因前缀。带 step_id，由 `_fail` 补成含尝试次数与
 #: 最后一次失败原因的可读文本；只用于报告，不是审批事件（I1 终态守卫）。
 REPAIR_BUDGET_EXHAUSTED = "repair_budget_exhausted"
+
+
+def _plan_detail(plan: Plan) -> str:
+    """计划的逐步规划详情（日志）：工具、参数、断言、依赖、闸门。"""
+    lines: list[str] = []
+    for step in plan.steps:
+        head = f"{step.id} · {step.tool}"
+        if step.gated:
+            head += " [gated]"
+        if not step.required:
+            head += " [optional]"
+        if step.depends_on:
+            head += f"  depends_on={list(step.depends_on)}"
+        lines.append(head)
+        lines.append(f"      args={json.dumps(step.args or {}, ensure_ascii=False)}")
+        if step.verify is not None:
+            lines.append(f"      verify: {step.verify.expr}  needs={list(step.verify.needs)}")
+        else:
+            lines.append("      verify: (none)")
+    return "\n".join(lines)
 
 #: 修复调用只喂失败事实：实际观测摘要与 stderr 的字符上限（runner 侧先截断一次，
 #: 修复 prompt 侧还有第二道同类上限）。这两个值就是"失败事实"的输入边界：
@@ -92,7 +113,8 @@ class Runner:
                  registry: Any = None, auto_approve: frozenset[str] = frozenset(),
                  workspace: str | Path | None = None,
                  env: Mapping[str, str] | None = None,
-                 artifacts: Any = None) -> None:
+                 artifacts: Any = None,
+                 summarizer: Any = None) -> None:
         self.writer = writer
         self.executor = executor
         self.verifier = verifier
@@ -103,6 +125,9 @@ class Runner:
         self.registry = registry
         #: 缺口 5：报告全文落产物库；未注入（直接构造的测试）则跳过。
         self.artifacts = artifacts
+        #: 收尾总结（D-042）：模型把事实包复述成一段人话，替换模板摘要。
+        #: 未注入（离线/替身装配）时与没有这个能力时完全一致。
+        self.summarizer = summarizer
         #: 本次启动的代码/配置指纹（I6）。装配处算一次传进来；直接构造 Runner 的
         #: 测试/工具没有注入时，按包内配置算一次，保证 run.started 永远带 env。
         self.env: dict[str, str] = dict(env) if env is not None else runtime_env(load_config())
@@ -152,6 +177,11 @@ class Runner:
                 ),
             },
             run_id=run_id,
+        )
+        event(
+            "plan frozen", run=run_id, kind=kind,
+            steps=[f"{s.id}:{s.tool}" for s in plan.steps],
+            detail=_plan_detail(plan),
         )
         return self.drive(run_id)
 
@@ -249,6 +279,7 @@ class Runner:
         if next_step is not None:
             payload["at_step"] = next_step.id
         self.writer.emit(EventType.RUN_CANCELLED, payload, run_id=run_id)
+        event("run CANCELLED", run=run_id, reason=reason)
         return RunOutcome(run_id=run_id, status="cancelled", reason=reason)
 
     def _settle(
@@ -269,16 +300,28 @@ class Runner:
         run = self.writer.world.runs[run_id]
         if verdict is None:
             verdict = self.verifier.verify(step, outcome)
+            passed_all = outcome.ok and verdict.passed
             self.writer.emit(
                 EventType.STEP_VERIFIED,
                 {
                     "step_id": step.id,
-                    "result": "pass" if (outcome.ok and verdict.passed) else "fail",
+                    "result": "pass" if passed_all else "fail",
                     "checks": list(verdict.checks),
                     "reason": verdict.reason,
                 },
                 run_id=run_id, step_id=step.id,
             )
+            if passed_all:
+                event("verify pass", run=run_id, step=step.id, checks=len(verdict.checks))
+            else:
+                failed = [
+                    str(check.get("detail") or check.get("expr") or "?")
+                    for check in verdict.checks if not check.get("passed")
+                ]
+                warn(
+                    "verify FAIL", run=run_id, step=step.id,
+                    checks=failed or verdict.reason, reason=verdict.reason,
+                )
 
         if outcome.ok and verdict.passed:
             self.writer.step_to(run_id, step.id, "passed", "assertions_passed")
@@ -295,15 +338,20 @@ class Runner:
             return CONTINUE
 
         cls = self._classify(outcome, verdict)
+        error_code = outcome.error_code or ("assertion_failed" if outcome.ok else None)
         self.writer.emit(
             EventType.FAILURE_CLASSIFIED,
             {
                 "step_id": step.id,
                 "class": cls.value,
-                "error_code": outcome.error_code or ("assertion_failed" if outcome.ok else None),
+                "error_code": error_code,
                 "reason": verdict.reason,
             },
             run_id=run_id, step_id=step.id,
+        )
+        warn(
+            "failure classified", run=run_id, step=step.id,
+            cls=cls.value, error=error_code, reason=verdict.reason,
         )
         self.writer.step_to(run_id, step.id, "failed", cls.value)
 
@@ -311,6 +359,7 @@ class Runner:
         if cls is FailureClass.TRANSIENT and attempts.get(step.id, 0) < self.budget.transient_per_step:
             self.writer.budget(run_id, "transient")
             self.writer.step_to(run_id, step.id, "pending", "transient_retry")
+            event("transient retry", run=run_id, step=step.id, attempt=attempts.get(step.id, 1))
             time.sleep(min(0.05 * attempts.get(step.id, 1), 0.2))
             return CONTINUE
 
@@ -334,6 +383,10 @@ class Runner:
                     ),
                 },
                 attempt=attempts.get(step.id, 1),
+            )
+            warn(
+                "repair attempted", run=run_id, step=step.id,
+                new_plan="yes" if new_plan is not None else "no",
             )
             # `_apply_repair` 负责应用前的 check_plan 复核：复核不过就不应用、
             # 不记修复次数，落回下面的既有失败路径（不重试）。
@@ -496,6 +549,7 @@ class Runner:
             context += "（批准之后要执行的参数变了，重新确认一次）"
         elif note == "payload_unverifiable":
             context += "（批准时没留下可核对的摘要，重新确认一次）"
+        event("approval requested", run=run_id, step=step.id, tool=step.tool)
         return self.human.request(run_id, step.id, payload_hash=_payload_hash(step), context=context)
 
     def _stale_approval(self, run: Any, step: Step) -> dict[str, Any] | None:
@@ -619,6 +673,10 @@ class Runner:
             },
             run_id=run_id,
         )
+        event(
+            "plan amended", run=run_id, step=step_id, version=amended.version,
+            invalidated=invalidated or "-",
+        )
         for sid in invalidated:
             status = run.steps[sid].status
             if status == "passed":
@@ -680,18 +738,52 @@ class Runner:
             return None
         return self.artifacts.put_text(result.summary).artifact_id
 
+    def _summarize(self, run: Any, result: Result, *, note: str = "") -> Result:
+        """收尾总结（D-042）：模型复述事实包，**只替换 summary 文本**。
+
+        I3 的边界在这里是机械的：返回的是 ``dataclasses.replace`` 出来的新 Result，
+        判定字段（verdict / steps / remaining_plan / budget_used）逐项来自受信组件，
+        模型写不出相反的结论；失败/空输出退回模板摘要（warn 一行，不重试、不编）。
+        """
+        if self.summarizer is None:
+            return result
+        try:
+            draft = self.summarizer.summarize(_summary_facts(run, result, note=note))
+        except Exception as exc:  # noqa: BLE001 - 总结是装饰性文本：失败不能拖垮终态
+            warn("summary fallback", run=run.run_id, error=f"{type(exc).__name__}: {exc}")
+            return result
+        text = draft.strip() if isinstance(draft, str) else ""
+        if not text:
+            reason = "empty draft" if isinstance(draft, str) else "no draft"
+            warn("summary fallback", run=run.run_id, error=reason)
+            return result
+        # 模型写的总结也是"对外的回答文本"：走一遍 reply 合规扫描（T3 口径）——
+        # 命中指令性表述/无来源数字声明就退回模板，不让它绕过闸门。
+        violations = _scan_reply(text)
+        if violations:
+            warn(
+                "summary rejected", run=run.run_id,
+                codes=[getattr(v, "code", "?") for v in violations],
+            )
+            return result
+        event("summary drafted", run=run.run_id, chars=len(text))
+        return dataclasses.replace(result, summary=text, generated_by="template+model")
+
     def _finish(self, run_id: str) -> RunOutcome:
         run = self.writer.world.runs[run_id]
         remaining = [s.id for s in run.steps.values() if s.status != "passed"]
         if remaining:
             return self._fail(run_id, f"unfinished:{','.join(remaining)}")
         result = self.reporter.render(run, status_override="completed")
+        # D-042：拿得到收尾总结就换掉模板摘要；拿不到就是现在的样子。
+        result = self._summarize(run, result)
         self.writer.emit(
             EventType.REPORT_RENDERED,
             {"result": _result_dict(result), "artifact_id": self._report_artifact_id(result)},
             run_id=run_id,
         )
         self.writer.emit(EventType.RUN_COMPLETED, {"result": _result_dict(result)}, run_id=run_id)
+        event("run COMPLETED", run=run_id, summary=result.summary)
         return RunOutcome(run_id=run_id, status="completed", result=result)
 
     def _fail(self, run_id: str, reason: str) -> RunOutcome:
@@ -708,12 +800,15 @@ class Runner:
         result = self.reporter.render(run, status_override="failed")
         if note:
             result = dataclasses.replace(result, summary=f"{result.summary}；{note}")
+        # D-042：「转人工」这类运行侧补的说明以 note 进事实包，总结不许把它吞掉。
+        result = self._summarize(run, result, note=note)
         self.writer.emit(
             EventType.REPORT_RENDERED,
             {"result": _result_dict(result), "artifact_id": self._report_artifact_id(result)},
             run_id=run_id,
         )
         self.writer.emit(EventType.RUN_FAILED, {"reason": reason, "result": _result_dict(result)}, run_id=run_id)
+        fail("run FAILED", run=run_id, reason=reason, summary=result.summary)
         return RunOutcome(run_id=run_id, status="failed", result=result, reason=reason)
 
 
@@ -835,6 +930,77 @@ def _bounded_observations(observations: dict[str, Any]) -> dict[str, str]:
             bounded.popitem()
             break
     return bounded
+
+
+#: 事实包里最多带几步（只取前 N 步 + 省略计数）：总结是复述，不是审计报告。
+SUMMARY_MAX_STEPS = 12
+#: 事实包里单条文字（失败原因 / 目标 / note）的上限。
+SUMMARY_TEXT_CHARS = 300
+
+
+def _summary_facts(run: Any, result: Result, *, note: str = "") -> dict[str, Any]:
+    """收尾总结的事实包（D-042）：只装受信组件已有的事实，不装推断。
+
+    来源与边界：
+
+    - ``verdict`` / ``remaining_plan`` / ``budget_used`` 来自 ``Result``（代码判定）；
+    - 每步的 status / attempts / failure_class / error_code / verified_reason 来自
+      事件投影（``RunState``）；
+    - observations 走 ``_bounded_observations``（与修复事实同一量级：8 个字段 ×
+      120 字符）：总结要的是"做出了什么结果"，不是把整份 stdout 塞进 prompt。
+
+    模型只拿到这些东西，所以它写不出事实之外的新数字或相反的判定。
+    """
+
+    plan_steps = run.plan.by_id() if run.plan is not None else {}
+    states = run.step_list()
+    steps: list[dict[str, Any]] = []
+    for state in states:
+        step = plan_steps.get(state.id)
+        steps.append(
+            {
+                "id": state.id,
+                "tool": getattr(step, "tool", "") or "",
+                "status": state.status,
+                "attempts": state.attempts,
+                "failure_class": state.failure_class or "",
+                "error_code": state.error_code or "",
+                "reason": _clip_text(state.verified_reason or "", SUMMARY_TEXT_CHARS),
+                "observations": _bounded_observations(state.observations),
+            }
+        )
+    passed = sum(1 for state in states if state.status == "passed")
+    return {
+        "run_id": run.run_id,
+        "verdict": result.verdict.value,
+        "kind": run.kind,
+        "steps_total": len(states),
+        "steps_passed": passed,
+        "steps": steps[:SUMMARY_MAX_STEPS],
+        "steps_omitted": max(0, len(steps) - SUMMARY_MAX_STEPS),
+        "fail_reason": _clip_text(run.fail_reason or "", SUMMARY_TEXT_CHARS),
+        "note": _clip_text(note, SUMMARY_TEXT_CHARS),
+        "remaining_plan": list(result.remaining_plan),
+        "budget_used": dict(result.budget_used),
+    }
+
+
+def has_model_summary(result: Any) -> bool:
+    """``Result.summary`` 是不是已经由模型写过（D-042）。
+
+    ``Reporter`` 的纯模板产出记 ``generated_by="template"``；收尾总结落地后记
+    ``"template+model"``。会话层据此决定还要不要做证据收尾（run 层写过就不再写）。
+    """
+
+    return str(getattr(result, "generated_by", "template")) != "template"
+
+
+def _scan_reply(text: str) -> tuple[Any, ...]:
+    """reply 合规扫描（惰性 import：gate 依赖 contracts，不反向依赖 app）。"""
+
+    from ..gate.rules import scan_reply
+
+    return scan_reply(text)
 
 
 def _result_dict(result: Result) -> dict[str, Any]:

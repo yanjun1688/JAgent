@@ -368,15 +368,21 @@ def _shell_exec(args: dict[str, Any], workspace: Path, timeout: float) -> ToolRe
 
 
 def _locate_bash() -> str:
-    """定位执行底座的 bash：PATH → Git for Windows 常规安装路径。
+    """定位执行底座的 bash。
+
+    Windows 的查找顺序是 **git 旁边的 Git bash → 常规安装路径 → PATH**：
+    `where bash` 在 Windows 上常常先命中 `System32\\bash.exe`——那是 WSL 启动器，
+    没有发行版时会一直挂到超时；它不是 D-037 的执行底座。git 是硬依赖，与它同装的
+    `bin/bash.exe` 才是 Git for Windows 的 bash；git 装在非默认盘（如
+    `D:\\ToolsInstall\\Git`）时，PATH 与 ProgramFiles 都找不到它。
 
     `shell=True` 换成显式 `bash -c` 后，"没有 shell" 从不可达变成可达：
     找不到 bash 是一句明确的 `command_not_found`，而不是模糊的异常。
     """
-    found = shutil.which("bash")
-    if found:
-        return found
     if sys.platform == "win32":
+        sibling = _git_sibling_bash()
+        if sibling is not None:
+            return sibling
         roots = (
             os.environ.get("ProgramFiles", ""),
             os.environ.get("ProgramFiles(x86)", ""),
@@ -389,10 +395,25 @@ def _locate_bash() -> str:
                 candidate = Path(root) / relative
                 if candidate.is_file():
                     return str(candidate)
+    found = shutil.which("bash")
+    if found:
+        return found
     raise FileNotFoundError(
         "bash 不可用：shell.exec 的执行底座是 POSIX bash（D-037）。"
         "Windows 需要安装 Git for Windows；POSIX 系统需要 /bin/bash。"
     )
+
+
+def _git_sibling_bash() -> str | None:
+    """git 可执行文件旁边的 `bin/bash.exe`（Git for Windows 的 bash）。
+
+    `git` 在 `cmd/git.exe`，bash 在 `bin/bash.exe`——同一次安装，所以非默认盘也找得到。
+    """
+    git = shutil.which("git")
+    if not git:
+        return None
+    candidate = Path(git).resolve().parent.parent / "bin" / "bash.exe"
+    return str(candidate) if candidate.is_file() else None
 
 
 def _text(value: Any) -> str:

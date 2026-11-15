@@ -48,15 +48,21 @@ class FakeJudge:
 class DispatchModel:
     """按 prompt 里出现的 JSON 键分发，避免依赖中文提示词。"""
 
-    def __init__(self, *, router: str = "", planner: str = "", proposer: str = "") -> None:
-        self.replies = {"router": router, "planner": planner, "proposer": proposer}
+    def __init__(self, *, router: str = "", planner: str = "", proposer: str = "",
+                 reporter: str = "已完成读取。"):
+        self.replies = {
+            "router": router, "planner": planner, "proposer": proposer, "reporter": reporter,
+        }
         self.calls: list[str] = []
 
     def complete(self, *, system: str = "", prompt: str = "", temperature: float = 0.0):
         from jagent.ports import ModelReply
 
         blob = system + prompt
-        if '"steps"' in blob:
+        # 收尾总结（D-042）先认系统提示词：它的事实块里也有 "steps" 键。
+        if "收尾总结" in system:
+            kind = "reporter"
+        elif '"steps"' in blob:
             kind = "planner"
         elif '"risks"' in blob:
             kind = "proposer"
@@ -105,11 +111,12 @@ def test_llm_planner_end_to_end_completes(root):
     assert out.result.verdict.value == "completed"
     assert [s.id for s in out.result.steps] == ["read_doc"]
     assert out.result.steps[0].checks[0]["passed"] is True
-    # 一次路由 + 一次规划 + 一次收尾：draft_capable 的 planner 不再被静态槽位表
-    # 强制澄清，信息齐了就直接出计划；run 完成后会再调一次模型做总结。
-    # 这个桩在收尾时仍输出 steps，会立刻失败（不重试），所以 planner 恰好 2 次。
-    assert model.calls.count("planner") == 2
+    # 一次路由 + 一次规划 + 一次收尾总结（D-042）：run 层写过总结后，会话层不再
+    # 走 `_answer_from_evidence` 写第二遍（一次 run 一段叙事、不付双倍 token）。
+    assert model.calls.count("planner") == 1
     assert model.calls.count("router") == 1
+    assert model.calls.count("reporter") == 1
+    assert out.result.summary == "已完成读取。", "收尾总结替换模板摘要"
     app.close()
 
 
@@ -168,6 +175,10 @@ class OnceClarifyModel:
     def complete(self, *, system: str = "", prompt: str = "", temperature: float = 0.0):
         from jagent.ports import ModelReply
 
+        # 收尾总结（D-042）单列一类：它也是模型调用，但不是规划/路由。
+        if "收尾总结" in system:
+            self.calls.append("reporter")
+            return ModelReply(text="读完了 doc.md。")
         if "计划器" in system:
             self.calls.append("planner")
             text = self._clarify if self.calls.count("planner") == 1 else self._steps
@@ -202,7 +213,7 @@ def test_llm_planner_clarify_mode_asks_model_questions(root):
     assert out2.result is not None and out2.result.verdict.value == "completed"
     updated = [e for e in app.store.read() if e.type.value == "slot.updated"]
     assert any(e.payload["name"] == "target_path" for e in updated)
-    assert model.calls == ["router", "planner", "router", "planner", "planner"]
+    assert model.calls == ["router", "planner", "router", "planner", "reporter"], model.calls
     app.close()
 
 
