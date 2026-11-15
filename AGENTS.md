@@ -79,16 +79,22 @@ uv run pytest -m llm tests/e2e_live -s      # 真实模型在线（花钱/受网
 
 - **分支**：本地唯一 `main`；特性工作从 main 拉分支，全绿 ff 回 main（2026-11-14 分支治理后）；
 - **commit**：`type(scope): why` + 测试证据；pre-commit 自动跑 ruff + 全量测试，**禁 `--no-verify`**；
+- **AI 并行开发协议**（2026-11-15 事故后立规，全文见 CONTRIBUTING.md）：多个 AI 会话**禁止共享工作区**——一个会话 = 一个 `git worktree`（独立工作树与 index，切分支/stash 互不可见）+ 一份 `JAGENT_DATA_DIR` + 端口偏移；只动自己的分支，commit 前先 `git branch --show-current` 确认归属；
+- **环境治理**：CI 跑**全量离线套件**（门禁面 = 发布面，新测试目录自动进 CI）；平台语义测试必须带 `skipif` + 理由；对本地私有路径（docs/scripts 等）的新引用必须在 conformance allowlist 登记；环境差异问题先 `scripts/ci_check.sh`（docker 预演 CI）再下结论；分支卫生随手跑 `scripts/repo_hygiene.py`；
 - **改事件词表要四处同步**：contracts（枚举 + REQUIRED_FIELDS）、fold、writer 守卫词表、`check_invariants.py` + `tests/v8_arch/test_conformance.py` 的 SPEC_VOCAB、架构文档事件表——少一处门禁/审计就漏；
 - **规格改动**：同步 constitution / 架构 / grounding + 在 `deviations.md` 台账记一条（编号递增，写决定与理由）；
-- **痕迹优先**：LLM 上下文是缓存，测试/feature/台账/commit/STATUS 才是事实源；新会话先读 STATUS + 台账 + 任务书，不用"我记得"代替仓库证据。
+- **痕迹优先**：LLM 上下文是缓存，测试/feature/台账/commit/STATUS 才是事实源；新会话先读 STATUS + 台账 + 任务书，不用"我记得"代替仓库证据；
+- **完整开发史**只在本地 `local/full-history` 分支（397+ commit；公开树是压缩快照）——不推送、不重写，考古/回滚用它。
 
 ## 6. 已知教训（遇同类问题先翻这里）
 
 - **离线绿 ≠ 在线对**：替身路径分叉的 bug 只在真实模型下暴露（e2e 壳缺 judge、TurnOutcome 丢 verdict）——给新分支补"离线可复现的红测试"钉住分叉点，不靠真钱冒烟兜底；
-- **deselect 的测试会静默腐坏**：e2e_live 的夹具要跟生产不变量同步演进；
+- **deselect 的测试会静默腐坏**：e2e_live 的夹具要跟生产不变量同步演进；skipif 也要审计（理由写在 reason 里，CI 侧跳过的数量是已知缺口不是无声丢失）；
+- **门禁面 = 发布面**（2026-11-15 CI 事故）：CI 只跑子集、ruff 查不存在的目录、"本地绿"掩盖"公开树红"——把教训编码成 conformance 机械规则（引用登记/路径有效性/全量套件），不靠自觉；
+- **平台语义是测试的归属**：shell 沙箱按 Windows cmd 语义写却跑到 ubuntu 上——统一底座（D-037）或 skipif 标注，二选一，不许裸奔；
+- **多会话不共享工作区**：同 worktree 里切分支/stash 会撞车（事故复现过）；用 worktree 隔离（§5 协议）；
 - **对抗测试的断言选"只有失守才出现的信号"**（如注入回显标记），不选与正常防御共享词表的短语（否定句误报）；
-- **不可达的枚举值即删**（D-011 先例）：规格预留但系统产不出的值等于契约里写了一条不存在的行为；
+- **不可达的枚举值即删**（D-011 先例）：规格预留但系统产不出的值等于契约里写了一条不存在的行为；反过来，显式化之后可达的死码可以转正（command_not_found，D-037）；
 - **取消是边界语义**（D-028）：在跑步跑完、未开步不开、账本在取消点闭合；取消是记账制，没有"回收"。
 
 ## 7. 禁止事项
