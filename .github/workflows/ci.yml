@@ -38,7 +38,9 @@ jobs:
         run: uv sync --frozen --dev
 
       - name: Ruff
-        run: uv run ruff check jagent tests scripts
+        # scripts/ 按仓库约定本地维护、不入公开库（D-034 re-baseline）——
+        # 本地 pre-commit 仍跑 `ruff check jagent tests scripts`，CI 只查已发布树。
+        run: uv run ruff check jagent tests
 
       - name: Pytest
-        run: uv run pytest -q tests/v8 tests/v8_redteam tests/v8_arch tests/v8_hardening
+        run: uv run pytest -q tests/v8 tests/v8_eval tests/v8_redteam tests/v8_arch tests/v8_hardening
