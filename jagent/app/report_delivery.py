@@ -21,21 +21,26 @@ from ..grounding import CHECK_DIRECTIVES, CHECK_NUMBERS, check_numbers
 from ..logsupport import event, warn
 from .runner import _bounded_observations, _clip_text
 
-#: 事实包里最多带几步（只取前 N 步 + 省略计数）：总结是复述，不是审计报告。
+#: 事实包里最多带几步的兜底（未注入 Budget 时）：预算里是 ``delivery_max_steps``。
 SUMMARY_MAX_STEPS = 12
 #: 事实包里单条文字（失败原因 / note / 模板摘要）的上限。
-SUMMARY_TEXT_CHARS = 300
+SUMMARY_TEXT_CHARS = 600
 
 
-def summary_facts(run: Any, result: Result) -> dict[str, Any]:
+def summary_facts(run: Any, result: Result, *, budget: Any = None) -> dict[str, Any]:
     """收尾复述的事实包：只装受信组件已有的事实，不装推断。
 
     - ``verdict`` / ``remaining_plan`` / ``budget_used`` 来自 ``Result``（代码判定）；
     - 每步的 status / attempts / failure_class / error_code / verified_reason 来自事件投影；
-    - ``observations`` 走 ``_bounded_observations``（与修复事实同一量级）；
+    - ``observations`` 走 ``_bounded_observations``，但用 **投递侧预算**（``delivery_*``）：
+      这是"报结果"的上下文，不能沿用修复 prompt 的小预算（8 字段 × 120 字符）——
+      实测会把行情价格剪掉，模型只能说"内容被截断"（D-046）；
     - ``template_summary`` 是 Reporter 的模板摘要：失败时那里的"转人工"说明不能被吞掉。
     """
 
+    max_steps = int(getattr(budget, "delivery_max_steps", SUMMARY_MAX_STEPS) or SUMMARY_MAX_STEPS)
+    value_chars = int(getattr(budget, "delivery_observation_chars", 2000) or 2000)
+    total_chars = int(getattr(budget, "delivery_observations_chars", 8000) or 8000)
     plan_steps = run.plan.by_id() if run.plan is not None else {}
     states = run.step_list()
     steps: list[dict[str, Any]] = []
@@ -50,7 +55,12 @@ def summary_facts(run: Any, result: Result) -> dict[str, Any]:
                 "failure_class": state.failure_class or "",
                 "error_code": state.error_code or "",
                 "reason": _clip_text(state.verified_reason or "", SUMMARY_TEXT_CHARS),
-                "observations": _bounded_observations(state.observations),
+                "observations": _bounded_observations(
+                    state.observations,
+                    fields=16,
+                    value_chars=value_chars,
+                    total_chars=total_chars,
+                ),
             }
         )
     passed = sum(1 for state in states if state.status == "passed")
@@ -60,8 +70,8 @@ def summary_facts(run: Any, result: Result) -> dict[str, Any]:
         "kind": run.kind,
         "steps_total": len(states),
         "steps_passed": passed,
-        "steps": steps[:SUMMARY_MAX_STEPS],
-        "steps_omitted": max(0, len(steps) - SUMMARY_MAX_STEPS),
+        "steps": steps[:max_steps],
+        "steps_omitted": max(0, len(steps) - max_steps),
         "fail_reason": _clip_text(run.fail_reason or "", SUMMARY_TEXT_CHARS),
         "template_summary": _clip_text(result.summary, SUMMARY_TEXT_CHARS * 2),
         "remaining_plan": list(result.remaining_plan),
@@ -93,7 +103,7 @@ def _grounds(run: Any) -> tuple[int, ...]:
 
 
 def build_run_delivery(
-    run: Any, result: Result, *, summarizer: Any = None
+    run: Any, result: Result, *, summarizer: Any = None, budget: Any = None
 ) -> Delivery:
     """终态 Result → 对外文本。没有总结器/草稿不合格时返回模板文本（verified）。"""
 
@@ -105,7 +115,7 @@ def build_run_delivery(
     if summarizer is None:
         return template
 
-    facts = summary_facts(run, result)
+    facts = summary_facts(run, result, budget=budget)
     try:
         draft = summarizer.summarize(facts)
     except Exception as exc:  # noqa: BLE001 - 复述失败不能拖垮终态

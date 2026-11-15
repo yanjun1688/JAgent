@@ -272,15 +272,19 @@ def create_app(
     # /runs/{id}，也让 StaticFiles 挂到 / 时不会把这些接口吞掉。
     @api.get("/api/runs")
     def list_runs(limit: int = Query(50, ge=1, le=200)) -> JSONResponse:
+        # 投影在另一线程被 Writer 改写：先持世界锁拍快照，再拼载荷（D-045）。
+        snapshot = [
+            (run.run_id, run.status, run.result) for run in app_obj.world.snapshot_runs()
+        ]
         rows: list[dict[str, Any]] = []
-        for run in app_obj.world.runs.values():
-            result = run.result if isinstance(run.result, dict) else {}
+        for run_id, status, result in snapshot:
+            result = result if isinstance(result, dict) else {}
             rows.append(
                 {
-                    "run_id": run.run_id,
-                    "status": run.status,
+                    "run_id": run_id,
+                    "status": status,
                     "summary": str(result.get("summary") or ""),
-                    "updated_seq": _run_updated_seq(app_obj, run.run_id),
+                    "updated_seq": _run_updated_seq(app_obj, run_id),
                 }
             )
         rows.sort(key=lambda row: (row["updated_seq"], row["run_id"]), reverse=True)

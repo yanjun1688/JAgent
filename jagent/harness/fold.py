@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -123,11 +124,21 @@ class World:
     seq: int = 0
     digest: str = ""
     diagnostics: list[str] = field(default_factory=list)
+    #: 写读互斥（D-045）：Writer 在写投影时持有它，API 在遍历投影时持有它。
+    #: 事件循环里写、HTTP 线程池里读是两线程，dict 遍历撞上插入会直接抛
+    #: "dictionary changed size during iteration"（2026-11-15 面板轮询实测）。
+    lock: Any = field(default_factory=threading.RLock, compare=False, repr=False)
 
     def session(self, session_id: str) -> SessionState:
         if session_id not in self.sessions:
             self.sessions[session_id] = SessionState(session_id=session_id)
         return self.sessions[session_id]
+
+    def snapshot_runs(self) -> list[RunState]:
+        """run 投影的只读快照：持锁拷贝，调用方在同一把锁内不要做慢活。"""
+
+        with self.lock:
+            return list(self.runs.values())
 
     def run(self, run_id: str) -> RunState:
         return self.runs[run_id]

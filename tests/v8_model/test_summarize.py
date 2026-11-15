@@ -17,7 +17,12 @@ from pathlib import Path
 import pytest
 
 from jagent.agent.model import ModelCallFailed
-from jagent.agent.summarize import MAX_SUMMARY_CHARS, LLMSummarizer, summary_nonce
+from jagent.agent.summarize import (
+    MAX_PROMPT_CHARS,
+    MAX_SUMMARY_CHARS,
+    LLMSummarizer,
+    summary_nonce,
+)
 from jagent.config import load_config
 from jagent.ports import ModelReply, ModelUnavailable
 
@@ -231,7 +236,7 @@ def test_prompt_stays_bounded_for_huge_observation_payloads() -> None:
         )
     )
 
-    assert len(model.prompts[0]) <= 8000, "上限按字符数算，慢模型也不该被一次总结拖爆"
+    assert len(model.prompts[0]) <= MAX_PROMPT_CHARS, "上限按字符数算，慢模型也不该被一次总结拖爆"
 
 
 def test_load_config_requires_the_reporter_prompt(tmp_path: Path) -> None:

@@ -45,12 +45,14 @@ _FENCE = "```"
 #: 截断标注（固定长度，便于把每段文本确实压到上限以内）。
 _TRUNCATED = "…（已截断）"
 
-#: 整个 user prompt 的硬上限（字符数，含围栏与固定说明）。
-MAX_PROMPT_CHARS = 8000
+#: 整个 user prompt 的硬上限（字符数，含围栏与固定说明）。D-046：报"结果"要读得到
+#: 观测里的关键值，原先 8000 会把放大后的事实包再裁一次。
+MAX_PROMPT_CHARS = 16000
 #: 事实包正文（围栏内）的上限。
-MAX_FACTS_CHARS = 5000
-#: 事实包里单个字符串值的上限（先压值，尽量保住完整 JSON 结构）。
-MAX_FACT_VALUE_CHARS = 400
+MAX_FACTS_CHARS = 12000
+#: 事实包里单个字符串值的上限（与 `Budget.delivery_observation_chars` 同量级：
+#: 先按预算截断，这里只防止整包超限）。
+MAX_FACT_VALUE_CHARS = 2400
 #: 总结正文的上限：前端对话气泡读得完，也防止模型长篇复述提示词。
 MAX_SUMMARY_CHARS = 800
 

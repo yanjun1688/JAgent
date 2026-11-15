@@ -136,6 +136,38 @@ def test_repair_budget_note_reaches_the_drafter(tmp_path) -> None:
     assert "修复预算" in facts["template_summary"] or "转人工" in facts["template_summary"]
 
 
+def test_delivery_facts_carry_large_observations(tmp_path) -> None:
+    """复述要能读到"结果"，不能用修复 prompt 的小预算把它剪没了。
+
+    实测（2026-11-15，贵州茅台行情）：MCP 的 data 字段被 120 字符裁断，总结只能说
+    "内容被截断"，用户要的价格根本没进事实包。投递侧的事实预算必须单独放大。
+    """
+
+    long_body = "x" * 1200 + "\nlast_price=17.19\n" + "y" * 400
+    (tmp_path / "ws").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "ws" / "a.txt").write_text(long_body, encoding="utf-8")
+    summarizer = RecordingSummarizer("读取完成：最新价 17.19 元。")
+
+    app = build_app(
+        tmp_path,
+        planner=DraftPlanner([_plan()]),
+        router=FixedRouter(IntentType.EXECUTE),
+        summarizer=summarizer,
+    )
+    try:
+        out = app.session.handle_turn("读一下 a.txt")
+    finally:
+        app.close()
+
+    facts = summarizer.facts[-1]
+    blob = repr(facts)
+    assert "17.19" in blob, "长观测里的价格没进事实包（上下文预算太小）"
+    assert "（已截断）" not in blob[:0]  # 只是提示：截断标注本身允许存在
+    assert out.text == "读取完成：最新价 17.19 元。", "有真实价格的事实应能通过接地检查"
+    assert out.delivery is not None and out.delivery.regime.value == "grounded"
+
+
+
 def test_broken_drafter_falls_back_to_template(tmp_path, caplog) -> None:
     import logging
 

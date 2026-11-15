@@ -711,6 +711,13 @@ class Budget:
     evidence_max_steps: int = 8
     #: 证据里每一步观测值的截断长度（MCP 载荷可能很大，事件日志不当缓存用）。
     evidence_clip_chars: int = 600
+    #: run 收尾复述的事实预算（D-044/D-046）：报"结果"要能读到观测里的关键值，
+    #: 不能沿用修复 prompt 的小预算（8 字段 × 120 字符）——实测会把行情价格剪没。
+    delivery_max_steps: int = 12
+    #: 事实包每个观测值的截断长度。
+    delivery_observation_chars: int = 2000
+    #: 事实包里单步观测（JSON）合计上限。
+    delivery_observations_chars: int = 8000
     #: 允许跳过"不可逆工具必须人工确认"的工具名。默认空 = 全部要确认。
     #: 产品里应该由用户在界面上逐次批准，而不是预先写死。
     auto_approve_tools: tuple[str, ...] = ()
@@ -748,6 +755,9 @@ class Budget:
             "max_clarify_rounds",
             "evidence_max_steps",
             "evidence_clip_chars",
+            "delivery_max_steps",
+            "delivery_observation_chars",
+            "delivery_observations_chars",
         ):
             value = values[key]
             if isinstance(value, bool) or not isinstance(value, int):

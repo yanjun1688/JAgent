@@ -871,23 +871,28 @@ def _value_text(value: Any) -> str:
         return repr(value)
 
 
-def _bounded_observations(observations: dict[str, Any]) -> dict[str, str]:
-    """实际观测的有界摘要：最多 8 个字段、每值 120 字符、JSON 合计 ≤ 1000 字符。
+def _bounded_observations(
+    observations: dict[str, Any],
+    *,
+    fields: int = REPAIR_OBSERVATION_FIELDS,
+    value_chars: int = REPAIR_OBSERVATION_VALUE_CHARS,
+    total_chars: int = REPAIR_OBSERVATIONS_CHARS,
+) -> dict[str, str]:
+    """实际观测的有界摘要：默认是"修复事实"的量级（8 字段 × 120 字符，合计 ≤ 1000）。
 
-    只给修复器"实际值"这一项事实，不给全量事件历史；也不把大载荷整包塞进 prompt。
+    修复器只该看到"实际值"这一项事实；run 收尾复述要报"结果"，用更大的预算
+    （`Budget.delivery_*`）——同一个实现、不同消费者各自的边界（D-046）。
     键名截到 40 字符，保证单条记录的 JSON 不会因为键名超长而突破总上限。
     """
 
     bounded: dict[str, str] = {}
-    for key, value in list((observations or {}).items())[:REPAIR_OBSERVATION_FIELDS]:
-        bounded[_clip_text(str(key), 40)] = _clip_text(
-            _value_text(value), REPAIR_OBSERVATION_VALUE_CHARS
-        )
+    for key, value in list((observations or {}).items())[:fields]:
+        bounded[_clip_text(str(key), 40)] = _clip_text(_value_text(value), value_chars)
         try:
             size = len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":")))
         except (TypeError, ValueError):  # pragma: no cover - 值已经全是字符串
-            size = REPAIR_OBSERVATIONS_CHARS + 1
-        if size > REPAIR_OBSERVATIONS_CHARS:
+            size = total_chars + 1
+        if size > total_chars:
             bounded.popitem()
             break
     return bounded

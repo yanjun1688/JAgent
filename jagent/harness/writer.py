@@ -60,8 +60,10 @@ class Writer:
         # 的第二条也按“前一条落完之后”的状态来判断。
         appended = self._apply_terminal_guard(drafts)
         events = self.store.append(appended)
-        for event in events:
-            apply_event(self.world, event)
+        # D-045：写投影与 HTTP 线程池的读互斥；一次 emit 是一批原子投影。
+        with self.world.lock:
+            for event in events:
+                apply_event(self.world, event)
         return events
 
     def _apply_terminal_guard(self, drafts: Sequence[EventDraft]) -> list[EventDraft]:

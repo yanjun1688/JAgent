@@ -12,4 +12,9 @@ max_clarify_rounds = 3
 # 证据包：最多带几步、每步观测值截断到多少字符（原 session.py 里写死的 8 / 600）。
 evidence_max_steps = 8
 evidence_clip_chars = 600
+# 收尾复述的事实预算（D-044/D-046）：报"结果"要读得到观测里的关键值。
+# 修复 prompt 的 8 字段 × 120 字符太小——实测把行情价格剪成了"内容被截断"。
+delivery_max_steps = 12
+delivery_observation_chars = 2000
+delivery_observations_chars = 8000
 auto_approve_tools = []

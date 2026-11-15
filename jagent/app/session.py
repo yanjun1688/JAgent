@@ -369,7 +369,9 @@ class Session:
         """
 
         run = self.world.runs.get(outcome.run_id or "")
-        delivery = build_run_delivery(run, outcome.result, summarizer=self.summarizer)
+        delivery = build_run_delivery(
+            run, outcome.result, summarizer=self.summarizer, budget=self.budget
+        )
         artifact_id = self._store_delivery_text(delivery.text)
         delivery = replace(delivery, artifact_id=artifact_id)
         self.writer.emit(
@@ -1113,11 +1115,14 @@ class Session:
         每个 turn 边界扫一次——确定性、无后台线程；语义完全复用 cancel_run
         的 waiting_human 分支（D-028：run.cancelled + token 作废 + reply 通知）。
         """
-        for run_id, run in list(self.world.runs.items()):
-            approval = run.approval
-            if run.status != "waiting_human" or not approval:
-                continue
-            expires_at = float(approval.get("expires_at") or 0.0)
+        with self.world.lock:  # D-045：快照与 Writer 的写互斥
+            pending = [
+                (run_id, run.approval)
+                for run_id, run in self.world.runs.items()
+                if run.status == "waiting_human" and run.approval
+            ]
+        for run_id, approval in pending:
+            expires_at = float((approval or {}).get("expires_at") or 0.0)
             if expires_at and time.time() > expires_at:
                 self.cancel_run(run_id, reason="ttl_expired")
 
