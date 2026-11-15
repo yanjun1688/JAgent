@@ -19,6 +19,9 @@ const NOTICE_COLOR: Record<Tone, string> = {
   warn: 'text-led-warn',
   bad: 'text-led-bad',
   off: 'text-text-tertiary',
+  flow: 'text-led-flow',
+  human: 'text-led-human',
+  live: 'text-led-live',
 }
 
 export function CommandBar({
@@ -64,7 +67,7 @@ export function CommandBar({
   }
 
   return (
-    <footer className="shrink-0 border-t border-ink-500 bg-ink-800">
+    <footer className="shrink-0 border-t border-night-500 bg-night-800/80">
       <div className="mx-auto flex w-full max-w-[1000px] flex-col gap-2 px-4 py-3 sm:px-6">
         <p
           aria-live="polite"
@@ -78,11 +81,12 @@ export function CommandBar({
         <form
           onSubmit={submit}
           className={cx(
-            'flex items-end gap-3 border border-ink-500 bg-ink-700 px-3 py-3',
-            'transition-colors duration-300 ease-base focus-within:border-text-secondary',
+            'flex items-end gap-3 border border-night-500 bg-night-700 px-3 py-3',
+            'transition-colors duration-300 ease-base focus-within:border-neon-cyan',
+            'focus-within:shadow-[0_0_18px_rgb(var(--neon-cyan)/0.15)]',
           )}
         >
-          <span aria-hidden className="pb-1 text-lg leading-none text-text-secondary">
+          <span aria-hidden className="neon-magenta-glow pb-1 font-mono text-lg leading-none text-neon-magenta">
             &gt;
           </span>
 
@@ -110,7 +114,7 @@ export function CommandBar({
                 aria-hidden
                 className="pointer-events-none absolute inset-x-0 top-1 flex items-center gap-1 text-lg leading-7 text-text-tertiary"
               >
-                <span className="animate-caret text-text-primary">▊</span>
+                <span className="animate-caret text-neon-cyan neon-cyan-glow">▊</span>
                 <span className="truncate">{placeholder}</span>
               </span>
             ) : null}
@@ -120,11 +124,11 @@ export function CommandBar({
             type="submit"
             disabled={!canSend}
             className={cx(
-              'flex shrink-0 items-center gap-1.5 px-4 py-2.5 text-base font-semibold leading-none',
-              'transition-transform duration-300 ease-base active:scale-[0.98]',
+              'flex shrink-0 items-center gap-1.5 border px-4 py-2.5 text-base font-semibold leading-none',
+              'transition-all duration-300 ease-base active:scale-[0.98]',
               canSend
-                ? 'bg-text-primary text-ink-800 hover:opacity-85'
-                : 'cursor-not-allowed border border-ink-500 text-text-tertiary',
+                ? 'border-neon-magenta/80 bg-neon-magenta/15 text-neon-magenta shadow-[0_0_16px_rgb(var(--neon-magenta)/0.3)] hover:bg-neon-magenta/25'
+                : 'cursor-not-allowed border-night-500 text-text-tertiary',
             )}
           >
             <PaperPlaneRight size={15} aria-hidden />
@@ -143,8 +147,8 @@ export function CommandBar({
                 area.current?.focus()
               }}
               className={cx(
-                'max-w-[300px] truncate border border-ink-500 px-2 py-1 text-xs text-text-secondary',
-                'transition-colors duration-300 ease-base hover:border-text-tertiary hover:text-text-primary',
+                'max-w-[300px] truncate border border-night-500 px-2 py-1 text-xs text-text-secondary',
+                'transition-colors duration-300 ease-base hover:border-neon-cyan/60 hover:text-text-primary',
               )}
             >
               {chip}

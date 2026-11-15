@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { X } from '@phosphor-icons/react'
+import { StopCircle } from '@phosphor-icons/react'
 import { Header } from './components/Header'
-import { StreamLoop } from './components/StreamLoop'
-import { CommandBar } from './components/CommandBar'
+import { DataFlowPanel } from './components/DataFlowPanel'
+import { ConversationPanel } from './components/ConversationPanel'
 import { ApprovalGate } from './components/ApprovalGate'
-import { IntakePanel } from './components/IntakePanel'
-import { Topology } from './components/Topology'
-import { Section } from './components/Section'
+import { CommandBar } from './components/CommandBar'
+import { LogsPanel } from './components/LogsPanel'
+import { VerifyDrawer } from './components/VerifyDrawer'
 import { Led } from './components/Led'
 import {
   api,
@@ -16,10 +16,10 @@ import {
   type Decision,
   type RunRow,
   type RunView,
+  type SessionSummary,
 } from './lib/api'
 import type { ChatMessage } from './lib/chat'
 import { runStatusLabel, runStatusTone, type Tone } from './lib/kernel'
-import { applyTheme, readTheme, type Theme } from './lib/theme'
 import { cx } from './lib/cx'
 
 const GREETING =
@@ -27,6 +27,7 @@ const GREETING =
 
 const IDLE_CHIPS = ['跑回归测试', '看一下当前目录里有什么', '帮我评估这个方案的风险']
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled'])
+const MAIN_SESSION = 's_main'
 
 function describeError(error: unknown): string {
   if (error instanceof ApiError) return error.detail
@@ -59,8 +60,9 @@ function resultMeta(reply: ChatReply): { text: string; tone: Tone } | null {
 }
 
 export default function App() {
-  const [theme, setTheme] = useState<Theme>(readTheme)
   const [online, setOnline] = useState<boolean | null>(null)
+  const [sessionId, setSessionId] = useState(MAIN_SESSION)
+  const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
     { id: 1, role: 'agent', text: GREETING, at: Date.now(), meta: '从一句话开始' },
   ])
@@ -73,9 +75,7 @@ export default function App() {
   const [run, setRun] = useState<RunView | null>(null)
   const [runs, setRuns] = useState<RunRow[]>([])
   const [gate, setGate] = useState<ApprovalView | null>(null)
-  const [panelOpen, setPanelOpen] = useState<boolean>(
-    () => typeof window !== 'undefined' && window.innerWidth >= 1024,
-  )
+  const [verifyOpen, setVerifyOpen] = useState(false)
   const nextId = useRef(2)
 
   const pushMessage = useCallback(
@@ -104,9 +104,14 @@ export default function App() {
     }
   }, [])
 
-  useEffect(() => {
-    applyTheme(theme)
-  }, [theme])
+  const refreshSessions = useCallback(async () => {
+    try {
+      const page = await api.listSessions()
+      setSessions(page.sessions)
+    } catch {
+      // Same: the picker is secondary.
+    }
+  }, [])
 
   // The badge is a fact: probe now, then recover automatically when the
   // local service is started after the page was opened.
@@ -132,6 +137,13 @@ export default function App() {
 
   useEffect(() => {
     void refreshRuns()
+    void refreshSessions()
+  }, [refreshRuns, refreshSessions])
+
+  // The history list keeps moving without user input.
+  useEffect(() => {
+    const timer = window.setInterval(() => void refreshRuns(), 4000)
+    return () => window.clearInterval(timer)
   }, [refreshRuns])
 
   // Keep the selected run current while it is alive. Terminal runs get one
@@ -180,7 +192,8 @@ export default function App() {
 
       const meta = resultMeta(reply)
       const tone: Tone =
-        meta?.tone ?? (reply.status === 'waiting_human' || reply.status === 'needs_input' ? 'warn' : 'ok')
+        meta?.tone ??
+        (reply.status === 'waiting_human' || reply.status === 'needs_input' ? 'warn' : 'ok')
       pushMessage('agent', reply.message?.trim() || fallbackMessage(reply), {
         ...(meta ? { meta: meta.text } : {}),
         tone,
@@ -203,8 +216,9 @@ export default function App() {
       }
 
       if (reply.run_id) void refreshRuns()
+      void refreshSessions()
     },
-    [notify, pushMessage, refreshRuns, runId],
+    [notify, pushMessage, refreshRuns, refreshSessions, runId],
   )
 
   const send = useCallback(
@@ -219,7 +233,7 @@ export default function App() {
       setNotice(null)
       setBusy(true)
       try {
-        const reply = await api.chat(trimmed, answers)
+        const reply = await api.chat(trimmed, answers, sessionId)
         applyReply(reply, trimmed)
       } catch (error) {
         const detail = describeError(error)
@@ -229,7 +243,7 @@ export default function App() {
         setBusy(false)
       }
     },
-    [applyReply, busy, notify, pushMessage],
+    [applyReply, busy, notify, pushMessage, sessionId],
   )
 
   const choose = useCallback(
@@ -275,6 +289,59 @@ export default function App() {
     [applyReply, busy, gate, notify, pushMessage, runId],
   )
 
+  const cancelRun = useCallback(async () => {
+    if (!runId || busy) return
+    pushMessage('you', '取消任务', { meta: '你的决定' })
+    setBusy(true)
+    try {
+      const reply = await api.cancel(runId, '用户取消')
+      applyReply(reply, null)
+      const view = await api.getRun(runId).catch(() => null)
+      if (view) setRun(view)
+    } catch (error) {
+      const detail = describeError(error)
+      pushMessage('agent', detail, { tone: 'bad' })
+      notify(detail, 'bad')
+    } finally {
+      setBusy(false)
+    }
+  }, [applyReply, busy, notify, pushMessage, runId])
+
+  const resetConversationView = useCallback(() => {
+    setMessages([{ id: nextId.current++, role: 'agent', text: GREETING, at: Date.now(), meta: '从一句话开始' }])
+    setPending(null)
+    setRunId(null)
+    setRun(null)
+    setGate(null)
+    setNotice(null)
+    setLastInput('')
+    setVerifyOpen(false)
+  }, [])
+
+  const selectSession = useCallback(
+    (id: string) => {
+      if (id === sessionId) return
+      setSessionId(id)
+      resetConversationView()
+      notify(`已切换到 ${id}；记忆跨对话共享，对话历史各自独立。`, 'ok')
+      void refreshRuns()
+      void refreshSessions()
+    },
+    [notify, refreshRuns, refreshSessions, resetConversationView, sessionId],
+  )
+
+  const createSession = useCallback(async () => {
+    try {
+      const { session_id } = await api.createSession()
+      setSessionId(session_id)
+      resetConversationView()
+      notify(`新对话 ${session_id} 已就绪，说一句话开始。`, 'ok')
+      void refreshSessions()
+    } catch (error) {
+      notify(describeError(error), 'bad')
+    }
+  }, [notify, refreshSessions, resetConversationView])
+
   const selectRun = useCallback(
     async (id: string) => {
       if (id === runId) return
@@ -296,182 +363,102 @@ export default function App() {
 
   const headerStatus = busy ? 'running' : (run?.status ?? (pending ? 'needs_input' : null))
   const live = Boolean(runId) && (!run || !TERMINAL_STATUSES.has(run.status))
+  const canCancel = live && !busy && !gate
 
   return (
-    <div className="crt flex h-full flex-col bg-ink-800">
+    <div className="crt grid-floor flex h-full flex-col bg-night-900">
       <a
         href="#main"
-        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:bg-ink-600 focus:px-3 focus:py-2 focus:text-sm"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:bg-night-700 focus:px-3 focus:py-2 focus:text-sm"
       >
         跳到对话
       </a>
 
       <Header
         status={headerStatus}
-        theme={theme}
         online={online}
-        panelOpen={panelOpen}
-        onToggleTheme={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
-        onTogglePanel={() => setPanelOpen((current) => !current)}
+        sessions={sessions}
+        sessionId={sessionId}
+        onSelectSession={(id) => void selectSession(id)}
+        onCreateSession={() => void createSession()}
       />
 
-      <div className="flex min-h-0 flex-1">
+      <div className="relative z-10 flex min-h-0 flex-1">
+        <DataFlowPanel
+          runId={runId}
+          live={live}
+          run={run}
+          runs={runs}
+          busy={busy}
+          onSelectRun={(id) => void selectRun(id)}
+          onVerify={() => setVerifyOpen(true)}
+        />
+
         <main id="main" className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div className="flex min-h-0 flex-1 flex-col px-4 py-4 sm:px-6">
-            <IntakePanel
-              messages={messages}
-              pending={pending}
-              busy={busy}
-              onChoice={choose}
+          {/* 任务状态条：运行中的任务可以在这里取消（D-028） */}
+          <div className="flex shrink-0 items-center gap-3 border-b border-night-600 bg-night-800/50 px-4 py-1.5 sm:px-6">
+            <Led
+              tone={runStatusTone(run?.status)}
+              size="xs"
+              breathe={live && Boolean(runId)}
             />
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-text-secondary">
+              {runId ? `${runStatusLabel(run?.status)} · ${runId}` : '对话待命 · 说一句话开始任务'}
+            </span>
+            {canCancel ? (
+              <button
+                type="button"
+                onClick={() => void cancelRun()}
+                disabled={busy}
+                className={cx(
+                  'ml-auto flex items-center gap-1 border px-2 py-0.5 font-mono text-[10px]',
+                  'border-led-bad/50 text-led-bad transition-colors duration-300 ease-base hover:bg-led-bad/10',
+                  busy && 'cursor-not-allowed opacity-60',
+                )}
+                title="在步边界记账式取消；已完成/已失败的任务不可取消"
+              >
+                <StopCircle size={11} aria-hidden />
+                取消任务
+              </button>
+            ) : null}
           </div>
 
-          {gate ? (
-            <ApprovalGate
-              key={`${gate.step_id}:${gate.what}`}
-              approval={gate}
-              busy={busy}
-              onDecide={decide}
-            />
-          ) : null}
+          <div className="flex min-h-0 flex-1 flex-col px-0 py-0">
+            <div className="flex min-h-0 flex-1 flex-col px-4 py-4 sm:px-6">
+              <ConversationPanel
+                messages={messages}
+                pending={pending}
+                busy={busy}
+                onChoice={choose}
+              />
+            </div>
 
-          <CommandBar
-            onSubmit={(text) => void send(text)}
-            busy={busy}
-            blocked={Boolean(gate)}
-            notice={notice}
-            noticeTone={noticeTone}
-            chips={IDLE_CHIPS}
-          />
+            {gate ? (
+              <ApprovalGate
+                key={`${gate.step_id}:${gate.what}`}
+                approval={gate}
+                busy={busy}
+                onDecide={(decision, comment) => void decide(decision, comment)}
+              />
+            ) : null}
+
+            <CommandBar
+              onSubmit={(text) => void send(text)}
+              busy={busy}
+              blocked={Boolean(gate)}
+              notice={notice}
+              noticeTone={noticeTone}
+              chips={IDLE_CHIPS}
+            />
+          </div>
         </main>
 
-        {panelOpen ? (
-          <button
-            type="button"
-            aria-label="收起过程面板"
-            onClick={() => setPanelOpen(false)}
-            className="fixed inset-0 z-30 bg-black/50 lg:hidden"
-          />
-        ) : null}
-
-        <aside
-          aria-label="过程"
-          className={cx(
-            'z-40 min-h-0 flex-col border-ink-500 bg-ink-800',
-            panelOpen
-              ? 'fixed inset-y-0 right-0 flex w-[min(92vw,380px)] border-l shadow-2xl lg:static lg:w-[380px] lg:shadow-none'
-              : 'hidden',
-          )}
-        >
-          <div className="flex shrink-0 items-center justify-between border-b border-ink-500 px-4 py-3">
-            <div className="flex min-w-0 items-center gap-2">
-              <Led tone={runStatusTone(run?.status)} size="xs" breathe={live && Boolean(runId)} />
-              <span className="text-sm text-text-primary">过程</span>
-              <span className="truncate font-mono text-[10px] uppercase tracking-[0.14em] text-text-tertiary">
-                状态与事件
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setPanelOpen(false)}
-              aria-label="收起过程"
-              className="border border-ink-500 p-1 text-text-tertiary transition-colors duration-300 ease-base hover:border-text-tertiary hover:text-text-primary"
-            >
-              <X size={13} aria-hidden />
-            </button>
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 scroll-thin">
-            <div className="flex flex-col gap-5">
-              <Section title="当前任务" code="run">
-                <div className="border border-ink-500 bg-ink-700 px-3 py-3">
-                  <div className="flex items-center gap-2">
-                    <Led
-                      tone={runStatusTone(run?.status)}
-                      size="sm"
-                      breathe={run?.status === 'running' || run?.status === 'waiting_human'}
-                    />
-                    <span className="text-sm text-text-primary">{runStatusLabel(run?.status)}</span>
-                    {run ? (
-                      <span className="ml-auto font-mono text-[10px] tabular-nums text-text-tertiary">
-                        {run.steps.length} 步
-                      </span>
-                    ) : null}
-                  </div>
-
-                  {run?.summary ? (
-                    <p className="mt-2 text-xs leading-relaxed text-text-secondary">{run.summary}</p>
-                  ) : (
-                    <p className="mt-2 text-xs leading-relaxed text-text-tertiary">
-                      {run
-                        ? '这条任务还没有可展示的总结。'
-                        : '还没有任务。在左侧说一句话就能开始。'}
-                    </p>
-                  )}
-
-                  {gate ? (
-                    <p className="mt-2 border-t border-ink-600 pt-2 text-xs text-led-warn">
-                      有一条操作在等你确认，批准前不会执行。
-                    </p>
-                  ) : null}
-
-                  {runId ? (
-                    <p className="mt-2 font-mono text-[10px] text-text-tertiary">编号 {runId}</p>
-                  ) : null}
-                </div>
-              </Section>
-
-              <Section title="步骤" code="steps">
-                <Topology steps={run?.steps ?? []} />
-              </Section>
-
-              <StreamLoop runId={runId} live={live} />
-
-              <Section
-                title="最近任务"
-                code="history"
-                right={
-                  <span className="font-mono text-[10px] tabular-nums text-text-tertiary">
-                    {runs.length}
-                  </span>
-                }
-              >
-                <div className="border border-ink-500 bg-ink-700">
-                  {runs.length === 0 ? (
-                    <p className="px-3 py-4 text-center text-xs text-text-tertiary">还没有历史任务。</p>
-                  ) : (
-                    <ul>
-                      {runs.map((row) => (
-                        <li key={row.run_id} className="border-b border-ink-600 last:border-0">
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => void selectRun(row.run_id)}
-                            className={cx(
-                              'flex w-full items-center gap-2 px-3 py-2 text-left',
-                              'transition-colors duration-300 ease-base',
-                              row.run_id === runId ? 'bg-ink-600' : 'hover:bg-ink-600/60',
-                              busy && 'cursor-not-allowed opacity-60',
-                            )}
-                          >
-                            <Led tone={runStatusTone(row.status)} size="xs" />
-                            <span className="min-w-0 flex-1 truncate text-xs text-text-primary">
-                              {row.summary || `任务 ${row.run_id.slice(-6)}`}
-                            </span>
-                            <span className="shrink-0 font-mono text-[10px] text-text-tertiary">
-                              {runStatusLabel(row.status)}
-                            </span>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              </Section>
-            </div>
-          </div>
-        </aside>
+        <LogsPanel />
       </div>
+
+      {verifyOpen && runId ? (
+        <VerifyDrawer runId={runId} onClose={() => setVerifyOpen(false)} />
+      ) : null}
     </div>
   )
 }

@@ -6,7 +6,8 @@
  * browser never needs CORS.
  *
  * The panel only projects what the runtime returns. It does not invent a run,
- * a step, or a verdict.
+ * a step, or a verdict. Logs (`/api/logs`) are operational telemetry — they
+ * are NOT events; the event stream and the log stream never merge.
  */
 
 export type ChatStatus = 'needs_input' | 'answered' | 'waiting_human'
@@ -43,6 +44,7 @@ export interface PendingQuestion {
 export interface ChatReply {
   status: ChatStatus
   message: string
+  session_id?: string
   slot?: string
   choices?: Choice[]
   run_id?: string
@@ -84,6 +86,99 @@ export interface RunsPage {
 }
 
 export type Decision = 'approve' | 'reject'
+
+// --------------------------------------------------------------------------- //
+// 多对话（D-034）
+// --------------------------------------------------------------------------- //
+
+export interface SessionSummary {
+  session_id: string
+  turns: number
+  runs: number
+  first_at: number
+  last_at: number
+  title: string
+}
+
+export interface SessionsPage {
+  sessions: SessionSummary[]
+}
+
+// --------------------------------------------------------------------------- //
+// 指标（D-031 S2，纯派生）
+// --------------------------------------------------------------------------- //
+
+export interface PurposeTokens {
+  calls: number
+  tokens_in: number
+  tokens_out: number
+}
+
+export interface SessionMetrics {
+  turns: number
+  runs: number
+  verdicts: { completed: number; failed: number; cancelled: number }
+  completion_rate: number | null
+  human_interventions: number
+  human_intervention_rate: number | null
+  model_calls: number
+  tokens_in: number
+  tokens_out: number
+  model_tokens_by_purpose: Record<string, PurposeTokens>
+  repairs: number
+  invalidations: number
+  memory_proposed: number
+  memory_confirmed: number
+}
+
+// --------------------------------------------------------------------------- //
+// 验证对账（D-032：声称 vs 证据）
+// --------------------------------------------------------------------------- //
+
+export interface VerifyCheck {
+  [key: string]: unknown
+}
+
+export interface VerifyStep {
+  step_id: string
+  tool: string
+  args: Record<string, unknown>
+  status: string
+  attempts: number
+  verified: string
+  checks: VerifyCheck[]
+  observations: Record<string, unknown>
+  error_code: string | null
+  failure: { class?: unknown; error_code?: unknown; reason?: unknown } | null
+  invalidated: boolean
+}
+
+export interface VerifyView {
+  run_id: string
+  claimed: { verdict: string; fail_reason: string }
+  steps: VerifyStep[]
+  model_calls: Array<Record<string, unknown>>
+  invalidations: Array<{ step_id?: unknown; reason?: unknown }>
+  consistent: boolean
+  problems: string[]
+}
+
+// --------------------------------------------------------------------------- //
+// 进程日志（D-036：运维观测，不是事件）
+// --------------------------------------------------------------------------- //
+
+export interface LogEntry {
+  id: number
+  at: number
+  level: string
+  logger: string
+  message: string
+}
+
+export interface LogsPage {
+  logs: LogEntry[]
+  next: number
+}
 
 /** A friendly API refusal. The runtime always sends `{status, message}`. */
 export class ApiError extends Error {
@@ -131,12 +226,20 @@ export const api = {
   health: () => request<{ ok: boolean }>('/healthz'),
 
   /** One conversational turn. `answers` fills the question asked last time. */
-  chat: (text: string, answers?: Record<string, string>) =>
-    post<ChatReply>('/chat', { text, answers: answers ?? null }),
+  chat: (text: string, answers?: Record<string, string>, sessionId?: string) =>
+    post<ChatReply>('/chat', {
+      text,
+      answers: answers ?? null,
+      session_id: sessionId ?? '',
+    }),
 
   /** Approve or reject the command the runtime is parked on. */
   decide: (runId: string, decision: Decision, comment = '') =>
     post<ChatReply>(`/runs/${encodeURIComponent(runId)}/decision`, { decision, comment }),
+
+  /** Cancel a live run (D-028). Terminal runs answer 409. */
+  cancel: (runId: string, reason = '') =>
+    post<ChatReply>(`/runs/${encodeURIComponent(runId)}/cancel`, { reason }),
 
   getRun: (runId: string) => request<RunView>(`/runs/${encodeURIComponent(runId)}`),
 
@@ -148,4 +251,21 @@ export const api = {
     request<EventsPage>(
       `/api/runs/${encodeURIComponent(runId)}/events?after_seq=${afterSeq}`,
     ),
+
+  /** Sessions (D-034). New conversations register their stack on creation. */
+  listSessions: () => request<SessionsPage>('/api/sessions'),
+  createSession: () => post<{ session_id: string }>('/api/sessions', {}),
+
+  /** Session metrics projection (D-031 S2); empty `sessionId` = all. */
+  sessionMetrics: (sessionId = '') =>
+    request<SessionMetrics>(
+      `/api/metrics/session${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`,
+    ),
+
+  /** Claimed vs evidence, side by side (D-032). */
+  verifyRun: (runId: string) =>
+    request<VerifyView>(`/api/runs/${encodeURIComponent(runId)}/verify`),
+
+  /** Process log tail (D-036). `after=-1` returns the whole ring window. */
+  pollLogs: (after: number) => request<LogsPage>(`/api/logs?after=${after}`),
 }

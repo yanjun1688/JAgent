@@ -6,7 +6,7 @@
  * These helpers only translate those words into human labels and lamp tones.
  */
 
-export type Tone = 'off' | 'ok' | 'warn' | 'bad'
+export type Tone = 'off' | 'ok' | 'warn' | 'bad' | 'flow' | 'human' | 'live'
 
 const RUN_STATUS_LABEL: Record<string, string> = {
   planning: '准备中',
@@ -20,9 +20,9 @@ const RUN_STATUS_LABEL: Record<string, string> = {
 
 const RUN_STATUS_TONE: Record<string, Tone> = {
   planning: 'warn',
-  running: 'ok',
+  running: 'flow',
   needs_input: 'warn',
-  waiting_human: 'warn',
+  waiting_human: 'human',
   completed: 'ok',
   failed: 'bad',
   cancelled: 'off',
@@ -83,6 +83,7 @@ const EVENT_LABEL: Record<string, string> = {
   'step.finished': '步骤执行完成',
   'artifact.written': '写入产物',
   'step.verified': '步骤校验完成',
+  'step.fingerprinted': '记录步骤指纹',
   'env.fingerprinted': '记录环境指纹',
   'run.transition_rejected': '拒绝了一次非法状态变更',
   'failure.classified': '归类失败原因',
@@ -96,22 +97,29 @@ const EVENT_LABEL: Record<string, string> = {
   'run.started': '任务开始',
   'run.completed': '任务完成',
   'run.failed': '任务失败',
+  'run.cancelled': '任务已取消',
   'report.rendered': '整理结果',
   'advice.delivered': '给出建议',
+  'memory.proposed': '提议记住一条',
+  'memory.resolved': '记忆处理完毕',
+  'model.called': '调用模型',
 }
 
 const EVENT_TONE: Record<string, Tone> = {
   'plan.rejected': 'bad',
-  'step.failed': 'bad',
   'failure.classified': 'bad',
   'run.failed': 'bad',
-  'approval.requested': 'warn',
+  'run.transition_rejected': 'bad',
+  'approval.requested': 'human',
   'run.suspended': 'warn',
   'step.invalidated': 'warn',
   'clarify.asked': 'warn',
+  'run.cancelled': 'off',
   'run.completed': 'ok',
   'step.verified': 'ok',
   'approval.resolved': 'ok',
+  'model.called': 'flow',
+  'artifact.written': 'flow',
 }
 
 export function eventLabel(type: string): string {
@@ -120,6 +128,88 @@ export function eventLabel(type: string): string {
 
 export function eventTone(type: string): Tone {
   return EVENT_TONE[type] ?? 'off'
+}
+
+// --------------------------------------------------------------------------- //
+// 数据流 lane（F1）：事件按管线分组，新事件到达时对应 lane 闪烁
+// --------------------------------------------------------------------------- //
+
+export interface Lane {
+  id: string
+  label: string
+  sub: string
+}
+
+/** 七条管线：对话 → 模型 → 计划 → 步骤 → 闸门 → 运行 → 记忆。 */
+export const LANES: Lane[] = [
+  { id: 'turn', label: 'TURN', sub: '对话' },
+  { id: 'model', label: 'MODEL', sub: '模型' },
+  { id: 'plan', label: 'PLAN', sub: '计划' },
+  { id: 'step', label: 'STEP', sub: '步骤' },
+  { id: 'gate', label: 'GATE', sub: '闸门' },
+  { id: 'run', label: 'RUN', sub: '运行' },
+  { id: 'mem', label: 'MEM', sub: '记忆' },
+]
+
+const EVENT_LANE: Record<string, string> = {
+  'turn.received': 'turn',
+  'intent.routed': 'turn',
+  'intent.confirmed': 'turn',
+  'clarify.asked': 'turn',
+  'slot.updated': 'turn',
+  'turn.ended': 'turn',
+  'model.called': 'model',
+  'plan.proposed': 'plan',
+  'plan.rejected': 'plan',
+  'gate.checked': 'plan',
+  'plan.frozen': 'plan',
+  'plan.amended': 'plan',
+  'step.started': 'step',
+  'step.finished': 'step',
+  'step.state_changed': 'step',
+  'step.verified': 'step',
+  'step.fingerprinted': 'step',
+  'step.invalidated': 'step',
+  'failure.classified': 'step',
+  'budget.consumed': 'step',
+  'artifact.written': 'step',
+  'approval.requested': 'gate',
+  'approval.received': 'gate',
+  'approval.resolved': 'gate',
+  'run.suspended': 'gate',
+  'run.resumed': 'gate',
+  'env.fingerprinted': 'run',
+  'run.started': 'run',
+  'run.completed': 'run',
+  'run.failed': 'run',
+  'run.cancelled': 'run',
+  'run.transition_rejected': 'run',
+  'report.rendered': 'run',
+  'advice.delivered': 'run',
+  'memory.proposed': 'mem',
+  'memory.resolved': 'mem',
+}
+
+export function laneOf(type: string): string {
+  return EVENT_LANE[type] ?? 'run'
+}
+
+// --------------------------------------------------------------------------- //
+// 进程日志（L1）：级别 → 灯色/标签
+// --------------------------------------------------------------------------- //
+
+export function logLevelTone(level: string): Tone {
+  switch (level) {
+    case 'ERROR':
+    case 'CRITICAL':
+      return 'bad'
+    case 'WARNING':
+      return 'warn'
+    case 'INFO':
+      return 'flow'
+    default:
+      return 'off'
+  }
 }
 
 const ERROR_LABEL: Record<string, string> = {
@@ -173,6 +263,11 @@ export function eventDetail(type: string, payload: Record<string, unknown>): str
     const code = typeof payload.error_code === 'string' ? payload.error_code : ''
     return [step, ERROR_LABEL[code] ?? code].filter(Boolean).join(' · ')
   }
+  if (type === 'model.called') {
+    const purpose = typeof payload.purpose === 'string' ? payload.purpose : ''
+    const ms = typeof payload.duration_ms === 'number' ? Math.round(payload.duration_ms) : 0
+    return [purpose, `${ms}ms`].filter(Boolean).join(' · ')
+  }
   if (type === 'run.failed') {
     return reason ? readableReason(reason) : '任务没能完成'
   }
@@ -181,6 +276,9 @@ export function eventDetail(type: string, payload: Record<string, unknown>): str
   }
   if (type === 'run.completed') {
     return '所有步骤已收口'
+  }
+  if (type === 'run.cancelled') {
+    return reason ? `取消：${reason}` : '任务已取消'
   }
   return step || reason
 }

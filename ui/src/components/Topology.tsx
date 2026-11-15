@@ -12,6 +12,15 @@ function stepName(id: string): string {
   return words || id
 }
 
+const STATUS_TEXT: Record<string, string> = {
+  ok: 'text-led-ok',
+  warn: 'text-led-warn',
+  bad: 'text-led-bad',
+  off: 'text-text-tertiary',
+  flow: 'text-led-flow',
+  human: 'text-led-human',
+}
+
 /**
  * The plan is a list of steps, not a graph: the runtime's own `run.steps` is
  * the source of truth. Status words are translated, never re-derived.
@@ -19,7 +28,7 @@ function stepName(id: string): string {
 export function Topology({ steps }: TopologyProps) {
   if (steps.length === 0) {
     return (
-      <div className="flex min-h-24 flex-col items-center justify-center gap-1 border border-dashed border-ink-500 bg-ink-800/40 px-4 py-5 text-center">
+      <div className="flex min-h-24 flex-col items-center justify-center gap-1 border border-dashed border-night-500 bg-night-800/40 px-4 py-5 text-center">
         <p className="text-sm text-text-secondary">还没有步骤</p>
         <p className="text-xs leading-relaxed text-text-tertiary">
           开始一个任务后，这里会按顺序显示每一步的状态。
@@ -42,9 +51,9 @@ export function Topology({ steps }: TopologyProps) {
         </span>
       </div>
 
-      <div className="h-1 w-full bg-ink-600" role="progressbar" aria-valuenow={ratio} aria-valuemin={0} aria-valuemax={100}>
+      <div className="h-1 w-full bg-night-600" role="progressbar" aria-valuenow={ratio} aria-valuemin={0} aria-valuemax={100}>
         <div
-          className="h-full bg-led-ok transition-[width] duration-500 ease-base"
+          className="h-full bg-led-ok shadow-[0_0_8px_rgb(var(--led-ok)/0.6)] transition-[width] duration-500 ease-base"
           style={{ width: `${ratio}%` }}
         />
       </div>
@@ -58,10 +67,10 @@ export function Topology({ steps }: TopologyProps) {
               {!last ? (
                 <span
                   aria-hidden
-                  className="absolute left-[3px] top-4 h-[calc(100%-0.5rem)] w-px bg-ink-500"
+                  className="absolute left-[3px] top-4 h-[calc(100%-0.5rem)] w-px bg-night-500"
                 />
               ) : null}
-              <span className="relative z-10 mt-1.5 bg-ink-800">
+              <span className="relative z-10 mt-1.5 bg-night-800">
                 <Led tone={tone} size="sm" breathe={step.status === 'running'} />
               </span>
               <div className="flex min-w-0 flex-1 items-baseline justify-between gap-2">
@@ -77,10 +86,7 @@ export function Topology({ steps }: TopologyProps) {
                 <span
                   className={cx(
                     'shrink-0 font-mono text-[10px] uppercase tracking-[0.08em]',
-                    tone === 'ok' && 'text-led-ok',
-                    tone === 'warn' && 'text-led-warn',
-                    tone === 'bad' && 'text-led-bad',
-                    tone === 'off' && 'text-text-tertiary',
+                    STATUS_TEXT[tone],
                   )}
                 >
                   {stepStatusLabel(step.status)}

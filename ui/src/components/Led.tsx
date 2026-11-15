@@ -5,13 +5,16 @@ const SIZE = {
   xs: 'h-1.5 w-1.5',
   sm: 'h-2 w-2',
   md: 'h-2.5 w-2.5',
-}
+} as const
 
 const LAMP: Record<Tone, string> = {
   off: 'lamp-off',
   ok: 'lamp-ok',
   warn: 'lamp-warn',
   bad: 'lamp-bad',
+  flow: 'lamp-flow',
+  human: 'lamp-human',
+  live: 'lamp-live',
 }
 
 interface LedProps {

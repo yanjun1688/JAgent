@@ -3,58 +3,38 @@
 @tailwind utilities;
 
 @layer base {
-  /* Black terminal. Surfaces stay flat; depth comes from hairlines. */
+  /* City Pop night: deep indigo surfaces, neon reserved for state and flow. */
   :root {
     color-scheme: dark;
 
-    --ink-900: 0 0 0;
-    --ink-800: 0 0 0;
-    --ink-700: 24 24 24;
-    --ink-600: 39 39 39;
-    --ink-500: 49 49 49;
+    --night-900: 7 7 18;
+    --night-800: 13 12 30;
+    --night-700: 20 18 42;
+    --night-600: 30 27 58;
+    --night-500: 46 42 78;
 
-    --text-primary: 237 237 237;
-    --text-secondary: 150 150 150;
-    --text-tertiary: 108 108 108;
+    --neon-magenta: 255 61 154;
+    --neon-cyan: 45 226 255;
+    --neon-amber: 255 200 87;
+    --neon-violet: 157 107 255;
 
-    --led-off: 49 49 49;
-    --led-flow: 226 226 226;
-    --led-live: 226 226 226;
-    --led-ok: 150 232 189;
-    --led-warn: 240 168 48;
-    --led-bad: 240 90 66;
-    --led-human: 170 145 250;
+    --text-primary: 238 240 255;
+    --text-secondary: 159 163 200;
+    --text-tertiary: 95 98 136;
 
-    --lamp-glow: 0.34;
-    --scanline-rgb: 255 255 255;
-    --scanline-alpha: 0.032;
-  }
+    --led-off: 46 42 78;
+    --led-flow: 45 226 255;
+    --led-live: 255 61 154;
+    --led-ok: 61 255 160;
+    --led-warn: 255 200 87;
+    --led-bad: 255 77 109;
+    --led-human: 157 107 255;
 
-  /* Paper terminal. Same grid, inverted phosphor. */
-  :root[data-theme='light'] {
-    color-scheme: light;
-
-    --ink-900: 0 0 0;
-    --ink-800: 255 255 255;
-    --ink-700: 250 250 250;
-    --ink-600: 240 240 240;
-    --ink-500: 208 208 208;
-
-    --text-primary: 12 12 12;
-    --text-secondary: 88 88 88;
-    --text-tertiary: 134 134 134;
-
-    --led-off: 208 208 208;
-    --led-flow: 20 20 20;
-    --led-live: 20 20 20;
-    --led-ok: 15 133 84;
-    --led-warn: 178 106 0;
-    --led-bad: 190 42 26;
-    --led-human: 104 60 220;
-
-    --lamp-glow: 0.16;
-    --scanline-rgb: 0 0 0;
-    --scanline-alpha: 0.022;
+    --lamp-glow: 0.45;
+    --scanline-rgb: 160 200 255;
+    --scanline-alpha: 0.028;
+    --grid-rgb: 45 226 255;
+    --grid-alpha: 0.05;
   }
 
   html,
@@ -64,16 +44,19 @@
   }
 
   body {
-    @apply bg-ink-800 font-mono text-text-primary antialiased;
+    @apply bg-night-900 font-sans text-text-primary antialiased;
     letter-spacing: 0.01em;
+    background-image:
+      radial-gradient(1200px 500px at 85% -10%, rgb(var(--neon-violet) / 0.09), transparent 60%),
+      radial-gradient(1000px 420px at 10% 110%, rgb(var(--neon-magenta) / 0.07), transparent 60%);
   }
 
   :focus-visible {
-    @apply outline-none ring-1 ring-led-flow ring-offset-2 ring-offset-ink-800;
+    @apply outline-none ring-1 ring-neon-cyan ring-offset-2 ring-offset-night-900;
   }
 
   ::selection {
-    background: rgb(var(--led-flow) / 0.25);
+    background: rgb(var(--neon-magenta) / 0.3);
     color: rgb(var(--text-primary));
   }
 }
@@ -83,29 +66,32 @@
   .lamp-off {
     background-color: rgb(var(--led-off));
   }
-  .lamp-flow,
+  .lamp-flow {
+    background-color: rgb(var(--led-flow));
+    box-shadow: 0 0 8px 1px rgb(var(--led-flow) / var(--lamp-glow));
+  }
   .lamp-live {
     background-color: rgb(var(--led-live));
-    box-shadow: 0 0 7px 1px rgb(var(--led-live) / var(--lamp-glow));
+    box-shadow: 0 0 8px 1px rgb(var(--led-live) / var(--lamp-glow));
   }
   .lamp-ok {
     background-color: rgb(var(--led-ok));
-    box-shadow: 0 0 7px 1px rgb(var(--led-ok) / var(--lamp-glow));
+    box-shadow: 0 0 8px 1px rgb(var(--led-ok) / var(--lamp-glow));
   }
   .lamp-warn {
     background-color: rgb(var(--led-warn));
-    box-shadow: 0 0 7px 1px rgb(var(--led-warn) / var(--lamp-glow));
+    box-shadow: 0 0 8px 1px rgb(var(--led-warn) / var(--lamp-glow));
   }
   .lamp-bad {
     background-color: rgb(var(--led-bad));
-    box-shadow: 0 0 7px 1px rgb(var(--led-bad) / var(--lamp-glow));
+    box-shadow: 0 0 8px 1px rgb(var(--led-bad) / var(--lamp-glow));
   }
   .lamp-human {
     background-color: rgb(var(--led-human));
-    box-shadow: 0 0 7px 1px rgb(var(--led-human) / var(--lamp-glow));
+    box-shadow: 0 0 8px 1px rgb(var(--led-human) / var(--lamp-glow));
   }
 
-  /* CRT scanlines. A texture, not a panel background: panels stay flat. */
+  /* CRT scanlines — a texture over everything, panels stay flat. */
   .crt::before {
     content: '';
     position: fixed;
@@ -119,21 +105,83 @@
     );
   }
 
-  /* Phosphor bloom on the few pieces that should read as lit. */
-  .phosphor {
-    text-shadow: 0 0 12px rgb(var(--led-live) / 0.4);
+  /* Retro-future horizon grid: perspective-ish lines behind the whole app. */
+  .grid-floor::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background-image:
+      repeating-linear-gradient(
+        to right,
+        rgb(var(--grid-rgb) / var(--grid-alpha)) 0 1px,
+        transparent 1px 56px
+      ),
+      repeating-linear-gradient(
+        to bottom,
+        rgb(var(--grid-rgb) / var(--grid-alpha)) 0 1px,
+        transparent 1px 56px
+      );
+    mask-image: radial-gradient(120% 90% at 50% 0%, transparent 40%, black 100%);
+  }
+
+  /* Chrome type for the wordmark: silver bands, slight shine drift. */
+  .chrome {
+    background-image: linear-gradient(
+      100deg,
+      rgb(244 246 255) 0%,
+      rgb(178 184 232) 28%,
+      rgb(122 128 190) 46%,
+      rgb(216 222 255) 55%,
+      rgb(160 166 224) 78%,
+      rgb(244 246 255) 100%
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .neon-magenta-glow {
+    text-shadow:
+      0 0 6px rgb(var(--neon-magenta) / 0.55),
+      0 0 18px rgb(var(--neon-magenta) / 0.3);
+  }
+  .neon-cyan-glow {
+    text-shadow:
+      0 0 6px rgb(var(--neon-cyan) / 0.55),
+      0 0 18px rgb(var(--neon-cyan) / 0.3);
+  }
+
+  /* Panel top hairline: cyan → magenta, the City Pop skyline signature. */
+  .panel-edge {
+    position: relative;
+  }
+  .panel-edge::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background-image: linear-gradient(
+      to right,
+      rgb(var(--neon-cyan) / 0.7),
+      rgb(var(--neon-magenta) / 0.7)
+    );
   }
 
   .scroll-thin {
     scrollbar-width: thin;
-    scrollbar-color: rgb(var(--ink-500)) transparent;
+    scrollbar-color: rgb(var(--night-500)) transparent;
   }
   .scroll-thin::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
   .scroll-thin::-webkit-scrollbar-thumb {
-    background-color: rgb(var(--ink-500));
+    background-color: rgb(var(--night-500));
     border-radius: 8px;
   }
   .scroll-thin::-webkit-scrollbar-track {
