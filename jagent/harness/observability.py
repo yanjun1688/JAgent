@@ -8,10 +8,13 @@ wiring 给每个组件发一个带 purpose 标签的视图，``ModelPort`` 签�
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
 from ..contracts import EventType
+
+logger = logging.getLogger(__name__)
 
 
 class ObservationModel:
@@ -44,6 +47,13 @@ class ObservationModel:
             reply = self._inner.complete(system=system, prompt=prompt, temperature=temperature)
         except Exception as exc:  # noqa: BLE001 - 失败的调用也要观测：outage/超时是最需要看见的时刻
             duration_ms = int((time.perf_counter() - started) * 1000)
+            logger.warning(
+                "model.call failed purpose=%s model=%s ms=%d error=%s",
+                self._purpose,
+                self.name,
+                duration_ms,
+                f"{type(exc).__name__}: {exc}",
+            )
             self._writer.emit(
                 EventType.MODEL_CALLED,
                 {
@@ -61,13 +71,23 @@ class ObservationModel:
             )
             raise
         duration_ms = int((time.perf_counter() - started) * 1000)
+        tokens_in = int(getattr(reply, "tokens_in", 0) or 0)
+        tokens_out = int(getattr(reply, "tokens_out", 0) or 0)
+        logger.info(
+            "model.call purpose=%s model=%s ms=%d tok_in=%d tok_out=%d",
+            self._purpose,
+            self.name,
+            duration_ms,
+            tokens_in,
+            tokens_out,
+        )
         self._writer.emit(
             EventType.MODEL_CALLED,
             {
                 "purpose": self._purpose,
                 "model": self.name,
-                "tokens_in": int(getattr(reply, "tokens_in", 0) or 0),
-                "tokens_out": int(getattr(reply, "tokens_out", 0) or 0),
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
                 "duration_ms": duration_ms,
                 "prompt_chars": len(prompt_text),
                 "reply_chars": len(getattr(reply, "text", "") or ""),

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -53,6 +54,7 @@ def main() -> None:
 
     from ..adapters.mcp import mcp_servers_from_env
     from .app import create_app
+    from .logsink import attach
 
     root = os.environ.get("JAGENT_DATA_DIR", "data/v8_http")
     port = int(os.environ.get("JAGENT_PORT", "8021"))
@@ -66,7 +68,9 @@ def main() -> None:
         if candidate is not None and _probe(candidate):
             model = candidate
         elif candidate is not None:
-            print("模型不可用（配额/网络/鉴权），本次以模板模式启动。")
+            logging.getLogger(__name__).warning(
+                "模型不可用（配额/网络/鉴权），本次以模板模式启动。"
+            )
     except Exception:  # 模型层没装好也要能起服务，降级为模板
         model = None
 
@@ -74,15 +78,26 @@ def main() -> None:
     mcp_servers = mcp_servers_from_env(env)
     application = create_app(root=root, model=model, mcp_servers=mcp_servers)
     app_obj = application.state.jagent
+
+    # 日志出口（/api/logs）：root INFO 起，uvicorn 以 log_config=None 启动，
+    # 访问线/错误线沿 propagate 流进 sink，控制台仍走 stderr。
+    detach_logs = attach(application.state.log_sink)
+    log = logging.getLogger(__name__)
     if mcp_servers:
         mcp_note = f"{len(app_obj.mcp_tools)} tools / {len(mcp_servers)} servers"
     else:
         mcp_note = "off"
-    print(
-        f"JAgent 已启动：http://127.0.0.1:{port}  "
-        f"(model={'on' if model else 'template'}, mcp={mcp_note})"
+    log.info(
+        "JAgent 已启动 http://127.0.0.1:%d (model=%s, mcp=%s, data=%s)",
+        port,
+        "on" if model else "template",
+        mcp_note,
+        root,
     )
-    uvicorn.run(application, host="127.0.0.1", port=port, log_level="warning")
+    try:
+        uvicorn.run(application, host="127.0.0.1", port=port, log_config=None, log_level="info")
+    finally:
+        detach_logs()
 
 
 if __name__ == "__main__":

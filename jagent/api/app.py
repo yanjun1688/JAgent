@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,9 @@ from ..audit import run_verification
 from ..contracts import Result
 from ..metrics import run_metrics, session_metrics, session_summaries
 from ..wiring import App, build_app
+from .logsink import LogSink
+
+logger = logging.getLogger(__name__)
 
 #: 单文件网页；不依赖任何外部 CDN，离线可用。
 STATIC_FILE = Path(__file__).parent / "static" / "index.html"
@@ -80,6 +84,9 @@ def create_app(
 
     api = FastAPI(title="JAgent", version="8", docs_url=None, redoc_url=None, openapi_url=None)
     api.state.jagent = app_obj
+    # 进程日志环形窗口（运维观测，不是事件）：__main__ 用 attach() 接进
+    # Python logging，端点只读；测试可直接往里写（见 tests/v8/test_api_logs.py）。
+    api.state.log_sink = LogSink()
     api.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -94,7 +101,8 @@ def create_app(
 
     @api.exception_handler(Exception)
     async def _unhandled(_request: Request, _exc: Exception) -> JSONResponse:
-        # 堆栈只留在服务端；前端只看到一句可重试的话。
+        # 堆栈只留在服务端（含日志窗口）；前端只看到一句可重试的话。
+        logger.exception("unhandled error on %s", _request.url.path)
         return _error(500, SERVER_ERROR_TEXT)
 
     @api.get("/healthz")
@@ -107,7 +115,16 @@ def create_app(
         if not text:
             return _error(400, "请先输入你想让我做的事。")
         session = app_obj.stack_for(payload.session_id or None).session
+        logger.info(
+            "chat turn start session=%s chars=%d", session.session_id, len(text)
+        )
         outcome = session.handle_turn(text, payload.answers)
+        logger.info(
+            "chat turn done session=%s status=%s run=%s",
+            session.session_id,
+            outcome.status,
+            outcome.run_id or "-",
+        )
         approval = None
         if outcome.status == "waiting_human" and outcome.run_id:
             run = app_obj.world.runs.get(outcome.run_id)
@@ -135,6 +152,12 @@ def create_app(
             return _error(400, "只能选择「同意」或「拒绝」。")
         if not run.approval:
             return _error(409, "这一步已经处理过了，不需要再确认。")
+        logger.info(
+            "approval decision run=%s decision=%s comment_chars=%d",
+            run_id,
+            decision,
+            len(payload.comment or ""),
+        )
         try:
             outcome = app_obj.session.resume_run(run_id, decision, comment=payload.comment or "")
         except KeyError:
@@ -149,6 +172,7 @@ def create_app(
         run = app_obj.world.runs.get(run_id)
         if run is None:
             return _error(404, "没有找到这次任务。")
+        logger.info("run cancel requested run=%s reason=%s", run_id, payload.reason or "")
         try:
             outcome = app_obj.session.cancel_run(run_id, reason=payload.reason or "用户取消")
         except RuntimeError:
@@ -242,6 +266,30 @@ def create_app(
         ]
         next_seq = events[-1].seq if events else after_seq
         return JSONResponse({"events": body, "next_seq": next_seq})
+
+    @api.get("/api/logs")
+    def recent_logs(after: int = Query(-1, ge=-1)) -> JSONResponse:
+        """进程日志只读出口（运维观测，不是事件）：环形窗口 + 游标增量。
+
+        内容 = uvicorn 访问线 + 服务生命周期 + 模型调用 + 异常堆栈；
+        ``after=-1`` 取整个窗口，之后带上一页的 ``next`` 做增量。
+        """
+        entries, cursor = api.state.log_sink.since(after)
+        return JSONResponse(
+            {
+                "logs": [
+                    {
+                        "id": entry.id,
+                        "at": entry.at,
+                        "level": entry.level,
+                        "logger": entry.logger,
+                        "message": entry.message,
+                    }
+                    for entry in entries
+                ],
+                "next": cursor,
+            }
+        )
 
     # 静态页必须在所有 API 路由之后挂载，否则 "/" 会把 /healthz、/chat、
     # /runs/* 一起吃掉。构建产物存在时优先用它；否则退回内置单文件页。
