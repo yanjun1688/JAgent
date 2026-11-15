@@ -20,13 +20,16 @@ v8 只有四个工具，优先复用从 v6 归档里 vendor 进来的适配器
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from ..contracts import ERROR_CLASS, Idempotency, SideEffect, ToolResult, ToolSpec
-from .sandbox import check_command, scrub_env
+from .sandbox import check_command, is_absolute_spelling, scrub_env
 
 #: 工具实现：`(args, workspace, timeout) -> ToolResult`。永远不抛异常是约定，
 #: 但 executor 仍然会兜住异常——自定义工具不必信任这份约定。
@@ -204,8 +207,7 @@ def _resolve(workspace: Path, raw: Any, *, default: str | None = None) -> Path:
     if not isinstance(text, str) or not text.strip():
         raise _ToolError("invalid_args", "path must be a non-empty relative string")
     text = text.strip()
-    candidate = Path(text)
-    if candidate.is_absolute() or candidate.drive:
+    if is_absolute_spelling(text):
         raise _ToolError("sandbox_denied", f"absolute paths are outside the workspace: {text!r}")
     root = workspace.resolve()
     target = (root / text).resolve()
@@ -336,13 +338,16 @@ def _shell_exec(args: dict[str, Any], workspace: Path, timeout: float) -> ToolRe
     # 直接调用本函数且没给 timeout 时回落到同一份 spec，不再硬编码。
     effective_timeout = float(timeout) if timeout and timeout > 0 else _SHELL_EXEC_SPEC.timeout_s
     try:
+        # 执行底座统一为 POSIX（D-037）：两平台都是 `bash -c`——Windows 用
+        # Git for Windows 自带的 bash（git 本来就是硬依赖），Linux 用系统 bash。
+        # 显式定位而不是 shell=True：bash 缺失是可达的 command_not_found。
         proc = subprocess.run(
-            cmd,
-            shell=True,
+            [_locate_bash(), "-c", cmd],
             cwd=str(cwd),
             env=scrub_env(workspace=workspace),
             capture_output=True,
             text=True,
+            encoding="utf-8",  # 显式 utf-8：locale 解码（cp936 vs UTF-8）会让观测跨平台不可复现
             errors="replace",  # 解码失败不该冒充工具失败
             timeout=effective_timeout,
         )
@@ -359,6 +364,34 @@ def _shell_exec(args: dict[str, Any], workspace: Path, timeout: float) -> ToolRe
     # 非零退出不是错误：exit_code 是观测，交给断言判。
     return ToolResult(
         ok=True, exit_code=proc.returncode, stdout=proc.stdout or "", stderr=proc.stderr or ""
+    )
+
+
+def _locate_bash() -> str:
+    """定位执行底座的 bash：PATH → Git for Windows 常规安装路径。
+
+    `shell=True` 换成显式 `bash -c` 后，"没有 shell" 从不可达变成可达：
+    找不到 bash 是一句明确的 `command_not_found`，而不是模糊的异常。
+    """
+    found = shutil.which("bash")
+    if found:
+        return found
+    if sys.platform == "win32":
+        roots = (
+            os.environ.get("ProgramFiles", ""),
+            os.environ.get("ProgramFiles(x86)", ""),
+            os.environ.get("LOCALAPPDATA", ""),
+        )
+        for root in roots:
+            if not root:
+                continue
+            for relative in ("Git/bin/bash.exe", "Git/usr/bin/bash.exe"):
+                candidate = Path(root) / relative
+                if candidate.is_file():
+                    return str(candidate)
+    raise FileNotFoundError(
+        "bash 不可用：shell.exec 的执行底座是 POSIX bash（D-037）。"
+        "Windows 需要安装 Git for Windows；POSIX 系统需要 /bin/bash。"
     )
 
 
@@ -435,11 +468,14 @@ _FS_WRITE_SPEC = ToolSpec(
 
 _SHELL_EXEC_SPEC = ToolSpec(
     name="shell.exec",
-    version="1",
+    version="2",
     args_schema={
         "type": "object",
         "properties": {
-            "cmd": {"type": "string", "description": "command line, run through the platform shell"},
+            "cmd": {
+                "type": "string",
+                "description": "command line executed by bash -c (POSIX semantics, D-037)",
+            },
             "cwd": {"type": "string", "description": "workspace-relative directory (default '.')"},
         },
         "required": ["cmd"],
@@ -451,13 +487,15 @@ _SHELL_EXEC_SPEC = ToolSpec(
     timeout_s=60.0,
     readonly=False,
     description=(
-        "Run a shell command inside the workspace; a non-zero exit is an observation, not an error. "
-        "The command body is restricted before the process starts: absolute paths, UNC paths, "
-        "parent-directory and symlink escapes, environment-variable expansion (%VAR%, $HOME, "
-        "$env:) and redirection targets outside the workspace are denied, and only these binaries "
-        "may be invoked: python, pytest, node, npm, git, echo, type, dir, where, findstr. "
+        "Run a shell command inside the workspace via `bash -c` (POSIX semantics on both "
+        "platforms, D-037); a non-zero exit is an observation, not an error. "
+        "The command body is restricted before the process starts: absolute paths (POSIX and "
+        "Windows spellings), UNC paths, parent-directory and symlink escapes, tilde and "
+        "environment-variable expansion ($HOME, %VAR%, $env:), backslashes outside quotes, and "
+        "redirection targets outside the workspace are denied; only these binaries may be "
+        "invoked: python, pytest, node, npm, git, echo, cat, ls, which, grep. "
         "This is a guard against accidental escapes, not a security boundary: code handed to an "
-        "allowed interpreter (e.g. python -c \"open('C:/x')\") is not inspected."
+        "allowed interpreter (e.g. python -c \"open('/etc/x')\") is not inspected."
     ),
     observations=("ok", "exit_code", "stdout", "stderr"),
 )

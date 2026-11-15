@@ -1,10 +1,10 @@
 r"""G-06 shell 沙箱 · 独立验收。
 
 需求（来自用户与审计 G-06）：
-1. shell.exec 的命令体不能读写 workspace 外的文件：`..\..\x`、`C:\Windows\...`、
-   `\\server\share`、`%USERPROFILE%\x`、`$HOME/x` 全部 sandbox_denied，
+1. shell.exec 的命令体不能读写 workspace 外的文件：`../../x`、`C:/Windows/...`、
+   `//server/share`、`%USERPROFILE%/x`、`$HOME/x` 全部 sandbox_denied，
    且 stdout 里不能出现外部文件内容。
-2. 重定向到外部（`> ..\x`）也要拒。
+2. 重定向到外部（`> ../x`）也要拒。
 3. 合法命令要能跑：python -c "print(1)"、pytest --version、git status。
 4. scrub_env 把 HOME/TEMP 指到 workspace 内（子进程 os.environ["HOME"] 落在 workspace 下）。
 5. 不测解释器逃逸（`python -c "open('C:/x')"` 是已知边界，写进来只会是一条永红用例）。
@@ -20,11 +20,6 @@ import pytest
 from jagent.contracts import EventType, Plan, Step
 
 from .conftest import make_runner
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="shell.exec 走平台 shell（Windows cmd 语义，G-06）；单用户本地 Harness 是 Windows",
-)
 
 SECRET = "TOPSECRET-OUTSIDE-WORKSPACE"
 
@@ -50,12 +45,12 @@ def shell(bench, cmd: str, *, timeout: float = SHELL_TIMEOUT_S):
 # --------------------------------------------------------------------------- #
 
 _MUST_BE_DENIED = [
-    ("parent_traversal", r"type ..\secret.txt"),
-    ("double_parent", r"type ..\..\secret.txt"),
-    ("windows_dir", r"type C:\Windows\win.ini"),
-    ("unc_share", r"type \\server\share\x.txt"),
-    ("user_profile_env", r"type %USERPROFILE%\secret.txt"),
-    ("home_env", r"type $HOME/secret.txt"),
+    ("parent_traversal", "cat ../secret.txt"),
+    ("double_parent", "cat ../../secret.txt"),
+    ("windows_dir", "cat C:/Windows/win.ini"),
+    ("unc_share", "cat //server/share/x.txt"),
+    ("user_profile_env", "cat %USERPROFILE%/secret.txt"),
+    ("home_env", "cat $HOME/secret.txt"),
 ]
 
 
@@ -75,7 +70,7 @@ def test_g06_01_command_body_cannot_reach_outside_workspace(shell_bench, outside
 
 def test_g06_01i_absolute_path_to_outside_file_is_denied(shell_bench, outside):
     """绝对路径的真文件：被读到就会在 stdout 里留下明文。"""
-    result = shell(shell_bench, f'type "{outside}"')
+    result = shell(shell_bench, f'cat "{outside}"')
 
     assert result.ok is False, f"绝对路径读到了 workspace 外的文件: {outside}"
     assert result.error_code == "sandbox_denied"
@@ -90,8 +85,8 @@ def test_g06_01i_absolute_path_to_outside_file_is_denied(shell_bench, outside):
 @pytest.mark.parametrize(
     ("label", "cmd", "target"),
     [
-        ("redirect_write_parent", r"echo pwned > ..\stolen.txt", "stolen.txt"),
-        ("redirect_steal", r"type ..\secret.txt > ..\leak.txt", "leak.txt"),
+        ("redirect_write_parent", "echo pwned > ../stolen.txt", "stolen.txt"),
+        ("redirect_steal", "cat ../secret.txt > ../leak.txt", "leak.txt"),
     ],
 )
 def test_g06_02_redirect_outside_workspace_is_denied(shell_bench, outside, label, cmd, target):
@@ -173,7 +168,7 @@ def test_g06_04_scrub_env_keeps_home_and_temp_inside_workspace(shell_bench):
 
 def test_g06_05_denial_is_deterministic_and_leaks_nothing(shell_bench, outside):
     runner = make_runner(shell_bench, auto_approve={"shell.exec"})
-    plan = Plan(steps=(Step(id="peek", tool="shell.exec", args={"cmd": r"type ..\secret.txt"}),))
+    plan = Plan(steps=(Step(id="peek", tool="shell.exec", args={"cmd": "cat ../secret.txt"}),))
 
     outcome = runner.start_and_run(plan)
 

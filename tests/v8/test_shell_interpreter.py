@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import sys
-import pytest
 from pathlib import Path
 
 from jagent.harness.registry import build_default_registry
@@ -47,10 +46,6 @@ def test_shell_python_is_the_service_python(tmp_path: Path) -> None:
     assert Path(result.stdout.strip()).resolve() == Path(sys.executable).resolve()
 
 
-@pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="shell.exec 走平台 shell（Windows cmd 语义）；单用户本地 Harness 是 Windows",
-)
 def test_shell_can_import_what_the_service_has(tmp_path: Path) -> None:
     """pytest 在服务解释器里装好了，子进程就该看得见它。"""
     registry = build_default_registry(tmp_path)

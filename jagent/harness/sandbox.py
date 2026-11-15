@@ -1,8 +1,10 @@
-"""G-06 · `shell.exec` 的命令体沙箱。
+"""G-06 v2 · `shell.exec` 的命令体沙箱（POSIX 统一底座，D-037）。
 
-`shell.exec` 原来只限制 `cwd`，命令体本身是自由的：`type ..\\..\\TOPSECRET`、
-`C:\\Windows\\...`、`\\\\server\\share`、`cmd /c ...` 都能越出 workspace
-（红队 RT-08，P0）。这里在**启动进程之前**对命令体做一次确定性的静态检查。
+`shell.exec` 的执行底座在两平台都是 `bash -c`（Windows 用 Git for Windows
+自带的 bash），所以命令体的静态检查只有**一套 POSIX 语义**：`type ..\\..\\x`
+这类 cmd 拼写不是白名单成员，`C:/Windows/...`、`//server/share`、`/etc/passwd`
+照样越出 workspace（红队 RT-08，P0）。这里在**启动进程之前**对命令体做一次
+确定性的静态检查。
 
 设计约束：
 
@@ -15,32 +17,35 @@
 覆盖的规则
 ----------
 
-1. 绝对路径：盘符路径（``C:\\...``、``C:/...``）、UNC（``\\\\server\\share``）、
-   POSIX 绝对路径（``/etc/passwd``）；
+1. 绝对路径：盘符路径（``C:/...``）、UNC（``//server/share``）、
+   POSIX 绝对路径（``/etc/passwd``，含 ``/etc`` 这类单段根目录）；
 2. 父目录逃逸：token 里出现 ``..`` 路径段时，解析结果必须仍在 workspace 内，
-   所以 ``a/../b`` 合法，``..\\..\\x`` 被拒；
+   所以 ``a/../b`` 合法，``../../x`` 被拒；
 3. 符号链接逃逸：相对路径 token 用 ``Path.resolve()`` 跟随符号链接后再判包含关系；
-4. 环境变量展开：``%USERPROFILE%``、``$HOME``、``$env:...`` 一律拒绝——展开发生在
-   沙箱之外，静态检查无法知道它指向哪；
-5. 重定向目标：``>`` / ``>>`` / ``<`` 后面的路径走 1–3 的同一套检查；
-6. 命令白名单：只允许 ``python``、``pytest``、``node``、``npm``、``git``、``echo``、
-   ``type``、``dir``、``where``、``findstr``；复合命令（``&&``、``|``、``;``）
-   的每一段都单独检查第一 token；
-7. 重定向与复合命令都按 cmd.exe 的习惯做保守切分（``;`` 在 cmd.exe 里其实不是
-   命令分隔符，这里仍按分隔符处理：宁可多拒，不可漏拒）。
+4. 环境变量展开：``%VAR%``、``$HOME``、``${VAR}``、``$(...)``、``$env:...``、
+   ``~`` 一律拒绝——展开发生在沙箱之外，静态检查无法知道它指向哪；
+5. 反斜杠：引号外出现即拒绝——POSIX bash 里它是转义符，静态检查无法可靠解析
+   ``\\..\\`` 这类拼写，宁多拒；引号内是字面量；
+6. 重定向目标：``>`` / ``>>`` / ``<`` 后面的路径走 1–3 的同一套检查；
+7. 命令白名单：只允许 ``python``、``pytest``、``node``、``npm``、``git``、``echo``、
+   ``cat``、``ls``、``which``、``grep``；复合命令（``&&``、``|``、``;``、换行）
+   的每一段都单独检查第一 token（``;`` 在 bash 里确实是分隔符；换行按分隔符
+   处理：宁可多拒，不可漏拒）。
 
 **挡不住的（诚实说明）**：这是「防误操作」，不是「防恶意」的安全边界。
 
-* 解释器代码参数不做语义检查：``python -c "open('C:/x')"``、``node -e "..."``、
+* 解释器代码参数不做语义检查：``python -c "open('/etc/x')"``、``node -e "..."``、
   ``pytest --rootdir=...`` 都能在解释器内部读任意路径。按产品要求**故意不拦**，
   因为拦它需要解析 Python/JS，静态规则只会制造误报。
 * 白名单二进制自身的越界能力：``git --git-dir=...``、``git config core.pager=...``、
   ``npm exec``、``node --eval`` 等。
 * 硬链接：``Path.resolve()`` 只解析符号链接；workspace 内的硬链接可以指向外部文件。
 * TOCTOU：检查与 ``subprocess.run`` 之间文件系统可被替换（检查不是原子操作）。
-* ``check_command`` 看的是 shell 命令行文本，不做 cmd.exe 的完整展开
-  （通配符、变量、延迟展开等）；遇到看不懂的形态按「拒绝」处理。
+* ``check_command`` 看的是 shell 命令行文本，不做 bash 的完整展开
+  （通配符、brace expansion 等）；遇到看不懂的形态按「拒绝」处理。
 * 命令体内部的重定向（例如 ``python -c "open('x','w')"``）完全看不到。
+* 超时只杀直接子进程（``bash -c`` 单命令在 POSIX 上通常 exec 成 payload 进程，
+  等效；Windows 下 bash 的孙进程可能存活）——进程级收口归 ToolBackend/Docker。
 
 真正的隔离（独立用户、Job Object、容器、只读挂载）不在本模块范围内。
 """
@@ -51,11 +56,11 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 #: 允许被调用的命令名（不含扩展名，大小写不敏感）。
-#: 其余二进制一律拒绝：``del``、``format``、``reg``、``net``、``powershell``、
-#: ``cmd`` / ``cmd.exe`` 都在拒绝之列。
+#: 其余二进制一律拒绝：``rm``、``sh``、``bash``、``powershell``、``cmd``、
+#: 以及 v1 的 cmd 内建（``type``/``dir``/``where``/``findstr``，D-037 退出）。
 ALLOWED_BINARIES = frozenset(
     {
         "python",
@@ -64,10 +69,10 @@ ALLOWED_BINARIES = frozenset(
         "npm",
         "git",
         "echo",
-        "type",
-        "dir",
-        "where",
-        "findstr",
+        "cat",
+        "ls",
+        "which",
+        "grep",
     }
 )
 
@@ -122,6 +127,22 @@ _NON_PATH_CHARS = frozenset("(){}[]'\"$%&|;<=>")
 _SCRUBBED_KEYS = frozenset({"HOME", "USERPROFILE", "TEMP", "TMP"})
 
 
+def is_absolute_spelling(text: str) -> bool:
+    """平台无关的「绝对路径拼写」判定：POSIX `/...`、Windows 盘符/UNC 都算。
+
+    `Path.is_absolute()` 只懂当前平台的语义（Windows 上 `/etc` 不算绝对、
+    Linux 上 `C:/x` 不算绝对）；跨平台日志重放与工具路径检查需要把两种
+    拼写都认出来。实现与 tools_v6 的 `_is_absolute` 同构（先例即规则）。
+    """
+    pure_posix = PurePosixPath(text)
+    pure_windows = PureWindowsPath(text)
+    return (
+        pure_posix.is_absolute()
+        or pure_windows.is_absolute()
+        or bool(pure_windows.drive)
+    )
+
+
 @dataclass(frozen=True)
 class SandboxVerdict:
     """一次命令体检查的结论。
@@ -167,20 +188,14 @@ def _absolute_kind(token: str) -> str:
     return ""
 
 
-def _looks_like_windows_flag(token: str) -> bool:
-    """``/I``、``/S``、``/B`` 这类 Windows 风格开关，不是路径。"""
-    return re.fullmatch(r"/[A-Za-z0-9_-]{1,3}", token) is not None
-
-
 def _looks_like_path(token: str) -> bool:
     """保守判断一个 token 是否是要落到文件系统上的路径参数。
 
-    代码片段（``print(1)``）、URL、开关（``-q``、``/I``）不在这里解析；
+    代码片段（``print(1)``）、URL、开关（``-q``）不在这里解析；
     ``..`` / 绝对路径的 token 即使含特殊字符也会在别处被显式检查。
+    ``/x`` 开头的 token 不是开关——POSIX 里那就是绝对路径，交给规则 1。
     """
     if not token or token.startswith("-"):
-        return False
-    if _looks_like_windows_flag(token):
         return False
     if any(ch in _NON_PATH_CHARS for ch in token):
         return False
@@ -205,6 +220,12 @@ def _path_parts(token: str) -> list[str]:
 
 
 def _check_env(token: str) -> SandboxVerdict | None:
+    """规则 4：环境变量展开与 tilde——展开发生在沙箱之外，静态检查无法知道指向。"""
+    if token.startswith("~"):
+        return _deny(
+            f"命令含 tilde 展开 {token!r}（等价于 $HOME 环境变量展开），无法确认它指向哪里，已拒绝执行",
+            f"tilde token={token!r}",
+        )
     if _ENV_PERCENT_RE.search(token) or _ENV_DOLLAR_RE.search(token):
         return _deny(
             f"命令含环境变量展开 {token!r}，无法确认它指向哪里，已拒绝执行",
@@ -299,12 +320,17 @@ def _check_executable(token: str, base: Path, root: Path) -> SandboxVerdict | No
     return None
 
 
+class _BackslashOutsideQuotesError(ValueError):
+    """引号外出现反斜杠：POSIX bash 里它是转义符，静态检查不可靠解析（D-037）。"""
+
+
 def _tokenize(cmd: str) -> list[str]:
     """把命令行切成 token，保留重定向操作符，丢弃引号。
 
-    只做 cmd.exe 够用的最小切分：空白、换行、``;``、``|``、``&``、``<``、``>``
-    在引号外是分隔符；反斜杠是路径分隔符而不是转义符（与 POSIX 相反）；
-    引号外的 ``^`` 按 cmd.exe 的规则吃掉并还原后一个字符。
+    POSIX bash 的最小够用切分：空白、换行、``;``、``|``、``&``、``<``、``>``
+    在引号外是分隔符；``^`` 是普通字面量；**引号外的反斜杠是转义符**——
+    静态检查无法可靠解析 ``\\..\\`` 这类拼写，直接拒绝（宁多拒，D-037）；
+    引号内的反斜杠是字面量，原样保留。
     未闭合的引号一直吃到行尾——看不懂的形态交给后面的保守检查。
     """
     tokens: list[str] = []
@@ -321,18 +347,16 @@ def _tokenize(cmd: str) -> list[str]:
                 buf.append(ch)
             i += 1
             continue
+        if ch == "\\":
+            raise _BackslashOutsideQuotesError(
+                f"backslash outside quotes at {i}: {cmd[max(0, i - 12): i + 12]!r}"
+            )
         if ch in "\"'":
             quote = ch
             i += 1
             continue
-        if ch == "^" and i + 1 < length:
-            # cmd.exe 的转义符：`^..` 在 cmd 眼里就是 `..`，这里先还原，
-            # 免得用脱字符把父目录逃逸藏过去。双引号内 `^` 是字面量（见上面的分支）。
-            buf.append(cmd[i + 1])
-            i += 2
-            continue
         if ch in "\r\n":
-            # 换行在 cmd 里同样起到命令分隔的作用
+            # 换行在 bash 里同样是命令分隔符
             if buf:
                 tokens.append("".join(buf))
                 buf = []
@@ -402,7 +426,13 @@ def check_command(cmd: str, workspace: Path, *, cwd: Path | None = None) -> Sand
             f"cwd={base}",
         )
 
-    tokens = _tokenize(cmd)
+    try:
+        tokens = _tokenize(cmd)
+    except _BackslashOutsideQuotesError as exc:
+        return _deny(
+            "命令在引号外含反斜杠：POSIX bash 里它是转义符，静态检查无法可靠解析，已拒绝执行",
+            f"{exc}",
+        )
     exec_pending = True
     saw_exec = False
     redirect_target = False
@@ -504,8 +534,18 @@ def scrub_env(base: dict | None = None, workspace: Path | None = None) -> dict:
     env["USERPROFILE"] = str(home)
     env["TEMP"] = str(tmp)
     env["TMP"] = str(tmp)
+    if sys.platform == "win32":
+        # Git Bash（MSYS2）调用原生 exe 时会改写 POSIX 风格参数（/etc → Git 安装
+        # 目录）：关掉改写，放行命令的参数不被静默变形（D-037）。
+        env["MSYS2_ARG_CONV_EXCL"] = "*"
     _prepend_service_interpreter(env)
     return env
 
 
-__all__ = ["ALLOWED_BINARIES", "SandboxVerdict", "check_command", "scrub_env"]
+__all__ = [
+    "ALLOWED_BINARIES",
+    "SandboxVerdict",
+    "check_command",
+    "is_absolute_spelling",
+    "scrub_env",
+]

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 
 import pytest
 from fastapi.testclient import TestClient
@@ -109,10 +108,6 @@ def test_cors_allows_any_origin(client: TestClient) -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="shell.exec 走平台 shell（Windows cmd 语义）；单用户本地 Harness 是 Windows",
-)
 def test_chat_regression_asks_then_runs(tmp_path: Path) -> None:
     # 产品默认要求不可逆命令人工确认；测试里显式放行 shell.exec，
     # 只验证 /chat 的完整契约（needs_input → answers → answered + result）。

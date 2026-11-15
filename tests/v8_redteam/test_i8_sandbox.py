@@ -19,11 +19,6 @@ from jagent.harness.registry import ToolRegistry, build_default_registry
 from jagent.harness.executor import Executor
 from jagent.harness.artifacts import ArtifactStore
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="shell.exec 走平台 shell（Windows cmd 语义，G-06）；单用户本地 Harness 是 Windows",
-)
-
 
 @pytest.fixture()
 def sandbox(harness):

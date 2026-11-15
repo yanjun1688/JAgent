@@ -284,10 +284,6 @@ def test_fs_write_missing_parent_is_not_found(make_env) -> None:
 # shell.exec
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="shell.exec 走平台 shell（Windows cmd 语义）；单用户本地 Harness 是 Windows",
-)
 def test_shell_exec_captures_stdout(make_env) -> None:
     env = make_env((Step(id="s1", tool="shell.exec", args={"cmd": _py("print(123)")}),))
 
@@ -299,10 +295,6 @@ def test_shell_exec_captures_stdout(make_env) -> None:
     assert any(env.artifacts.get_text(ref) for ref in outcome.artifact_refs)
 
 
-@pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="shell.exec 走平台 shell（Windows cmd 语义）；单用户本地 Harness 是 Windows",
-)
 def test_shell_exec_nonzero_exit_is_an_observation(make_env) -> None:
     env = make_env((
         Step(
@@ -329,10 +321,6 @@ def test_shell_exec_nonzero_exit_is_an_observation(make_env) -> None:
     assert classify(outcome, verdict) is FailureClass.ASSERTION
 
 
-@pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="shell.exec 走平台 shell（Windows cmd 语义）；单用户本地 Harness 是 Windows",
-)
 def test_shell_exec_timeout_is_transient(tmp_path: Path) -> None:
     registry = build_default_registry(tmp_path)
     # 子进程睡得比 timeout 长；杀掉 cmd.exe 后它的 python 子进程仍握着管道，
@@ -347,10 +335,6 @@ def test_shell_exec_timeout_is_transient(tmp_path: Path) -> None:
         FailureClass.TRANSIENT
 
 
-@pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="shell.exec 走平台 shell（Windows cmd 语义）；单用户本地 Harness 是 Windows",
-)
 def test_long_stdout_is_truncated_in_event_and_full_in_artifact(make_env) -> None:
     env = make_env((Step(id="s1", tool="shell.exec", args={"cmd": _py("print(chr(120)*9000)")}),))
 
