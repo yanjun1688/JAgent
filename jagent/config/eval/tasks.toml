@@ -1,0 +1,223 @@
+# JAgent v8 · 评估任务集 v1（D-035，docs/jagent-v8-evaluation.md §7）。
+#
+# 语料 = 数据（进 config hash，任务集版本自动进 run 指纹）；判定 = 确定性
+# checks kind registry（jagent/evaluation.py）。`model` 键指向 runner 的替身
+# 脚本库（scripts/run_eval.py）——脚本是"激励"，不是被评对象。
+# 分组依据 spec §7：执行面 / 建议面 / 对话面 / 取消面 / 系统面
+# （brief §5 硬性要求：闸门 / 重放 / 幂等回归用例必须在列）。
+
+schema = "eval.tasks.v1"
+
+# ---------------------------------------------------------------- 执行面 --
+
+[task.fs_read]
+description = "读文件并汇报（e2e_live read_file 的 stub 等价）"
+model = "fs_read"
+tags = ["execute", "happy_path"]
+workspace = { "doc.md" = "# 标题\n正文第一段。\n" }
+turns = ["读取 doc.md 告诉我里面写了什么"]
+checks = [
+  { kind = "run_verdict", expect = "completed" },
+  { kind = "turn_outcome", expect = "answered" },
+  { kind = "steps_passed_min", count = 1 },
+  { kind = "verify_consistent" },
+  { kind = "budget_within", model_calls = 10 },
+]
+
+[task.fs_list]
+description = "列目录（e2e_live list_dir 的 stub 等价）"
+model = "fs_list"
+tags = ["execute", "happy_path"]
+workspace = { "doc.md" = "# 标题\n正文第一段。\n" }
+turns = ["列一下当前目录有什么文件"]
+checks = [
+  { kind = "run_verdict", expect = "completed" },
+  { kind = "steps_passed_min", count = 1 },
+  { kind = "verify_consistent" },
+]
+
+[task.fs_write]
+description = "写文件并留产物（e2e_live write_file 的 stub 等价）"
+model = "fs_write"
+tags = ["execute", "happy_path"]
+turns = ["把会议纪要写到 notes.md，内容是：通过 D-035"]
+checks = [
+  { kind = "run_verdict", expect = "completed" },
+  { kind = "event_count", type = "artifact.written", min = 1 },
+  { kind = "steps_passed_min", count = 1 },
+]
+
+[task.shell_approval]
+description = "不可逆命令必须停人审，批准后跑完（e2e_live shell_approval）"
+model = "shell"
+tags = ["execute", "approval"]
+turns = [
+  "运行命令 python -c \"print(6*7)\"，把输出告诉我",
+  { action = "approve" },
+]
+checks = [
+  { kind = "run_verdict", expect = "completed" },
+  { kind = "approvals", min = 1 },
+  { kind = "turn_outcome", expect = "handed_off", at = "last" },
+]
+
+[task.shell_reject]
+description = "拒绝批准后 run 诚实失败，不谎报完成"
+model = "shell"
+tags = ["execute", "approval", "edge"]
+turns = [
+  "运行命令 python -c \"print(6*7)\"，把输出告诉我",
+  { action = "reject" },
+]
+checks = [
+  { kind = "run_verdict", expect = "failed" },
+  { kind = "approvals", min = 1 },
+  { kind = "turn_outcome", expect = "handed_off", at = "last" },
+]
+
+[task.multi_step_chain]
+description = "两步依赖链：读上游 → 写下游（e2e_live compound 的 stub 等价）"
+model = "multi_step"
+tags = ["execute", "multi_step"]
+workspace = { "doc.md" = "# 标题\n正文第一段。\n" }
+turns = ["把 doc.md 的内容复制一份到 out/copy.md"]
+checks = [
+  { kind = "run_verdict", expect = "completed" },
+  { kind = "steps_passed_min", count = 2 },
+  { kind = "verify_consistent" },
+]
+
+# ---------------------------------------------------------------- 建议面 --
+
+[task.advice_framework]
+description = "advise 路径：框架型建议过闸投递（e2e_live advice 的 stub 等价）"
+model = "advice"
+tags = ["advice", "happy_path"]
+turns = ["这只股票现在值得买吗？"]
+checks = [
+  # 脚本 judge 回 NONE（没意见）→ gate 记 undecidable（D-021：NONE 意见≠"没配置"的 none）
+  { kind = "gate_checked", pass = true, mode = "framework", judge = "undecidable" },
+  { kind = "advice_delivered", mode = "gated", fallback = false },
+  { kind = "turn_outcome", expect = "answered" },
+]
+
+[task.advice_gather]
+description = "gather 路径（E19）：取数后 grounded 建议带引用（e2e_live gather_e19）"
+model = "gather"
+tags = ["advice", "gather", "happy_path"]
+workspace = { "data.md" = "产品 A：当前单价 100 元，月销量 400 件，单位成本 60 元，月利润 16000 元。\n" }
+turns = ["先读 data.md 里的数据，再给我一个判断：产品 A 提价值不值得？"]
+checks = [
+  { kind = "run_verdict", expect = "completed" },
+  { kind = "gate_checked", pass = true, mode = "grounded" },
+  { kind = "advice_delivered", mode = "grounded", min_citations = 1, fallback = false },
+  { kind = "verify_consistent" },
+]
+
+[task.advice_t1_fallback]
+description = "T1 拦截：建议数字不在证据里 → 兜底（永不回打，D-008）"
+model = "gather_bad_number"
+tags = ["advice", "gather", "guardrail"]
+workspace = { "data.md" = "产品 A：当前单价 100 元，月销量 400 件，单位成本 60 元，月利润 16000 元。\n" }
+turns = ["先读 data.md 里的数据，再给我一个判断：产品 A 提价值不值得？"]
+checks = [
+  { kind = "gate_checked", pass = false, rules_present = ["advice.number_ungrounded"] },
+  { kind = "advice_delivered", fallback = true },
+  { kind = "turn_outcome", expect = "answered" },
+]
+
+[task.judge_reject]
+description = "T2 judge 否决即终局（D-006）：policy_reject → 兜底，不重生成"
+model = "advice_reject"
+tags = ["advice", "judge"]
+turns = ["这只股票现在值得买吗？"]
+checks = [
+  { kind = "gate_checked", judge = "reject", pass = false },
+  { kind = "advice_delivered", mode = "fallback", fallback = true },
+  { kind = "turn_outcome", expect = "answered" },
+]
+
+# ---------------------------------------------------------------- 对话面 --
+
+[task.clarify_multi_turn]
+description = "planner 澄清 → 应答 → 执行（e2e_live multi_turn_clarify 的 stub 等价）"
+model = "clarify"
+tags = ["chat", "clarify"]
+workspace = { "notes/a.txt" = "内容一行。\n" }
+turns = [
+  "帮我看一下那个文件",
+  { text = "notes/a.txt", answers = { target = "notes/a.txt" } },
+]
+checks = [
+  { kind = "clarify_asked", min = 1 },
+  { kind = "run_verdict", expect = "completed" },
+  { kind = "turn_outcome", expect = "answered", at = "last" },
+]
+
+[task.context_follow_up]
+description = "多轮上下文：先执行读文件，再基于上下文追问建议（e2e_live multi_turn_context）"
+model = "context"
+tags = ["chat", "multi_turn"]
+workspace = { "doc.md" = "# 标题\n正文第一段。\n" }
+turns = ["读取 doc.md", "结合刚才的内容，给我一条整体建议"]
+checks = [
+  { kind = "event_count", type = "run.started", exact = 1 },
+  { kind = "event_count", type = "advice.delivered", min = 1 },
+  { kind = "turn_outcome", expect = "answered", at = "last" },
+]
+
+# ---------------------------------------------------------------- 取消面 --
+
+[task.cancel_running]
+description = "挂起在人审闸口时取消：账本在取消点闭合（D-028 / e2e_live cancel_approval）"
+model = "shell"
+tags = ["cancel"]
+turns = [
+  "运行命令 python -c \"print(6*7)\"，把输出告诉我",
+  { action = "cancel" },
+]
+checks = [
+  { kind = "run_verdict", expect = "cancelled" },
+  { kind = "event_count", type = "run.cancelled", exact = 1 },
+  { kind = "turn_outcome", expect = "handed_off", at = "last" },
+]
+
+# ------------------------------------------------ 系统面（brief §5 硬性要求）--
+
+[task.gate_regression]
+description = "闸门回归：T1 违规留痕 + 兜底 + gate.checked 恰一次（重放/链同验）"
+model = "gather_bad_number"
+tags = ["system", "gate", "guardrail"]
+workspace = { "data.md" = "产品 A：当前单价 100 元，月销量 400 件，单位成本 60 元，月利润 16000 元。\n" }
+turns = ["先读 data.md 里的数据，再给我一个判断：产品 A 提价值不值得？"]
+checks = [
+  { kind = "gate_checked", pass = false, rules_present = ["advice.number_ungrounded"] },
+  { kind = "event_count", type = "gate.checked", exact = 1 },
+  { kind = "advice_delivered", fallback = true },
+  { kind = "replay_consistent" },
+  { kind = "verify_consistent" },
+]
+
+[task.replay_regression]
+description = "重放回归：事件链完整 + fold 两次指纹一致 + 声称与证据一致（I1）"
+model = "fs_read"
+tags = ["system", "replay"]
+workspace = { "doc.md" = "# 标题\n正文第一段。\n" }
+turns = ["读取 doc.md 告诉我里面写了什么"]
+checks = [
+  { kind = "run_verdict", expect = "completed" },
+  { kind = "replay_consistent" },
+  { kind = "verify_consistent" },
+]
+
+[task.idempotency_regression]
+description = "幂等回归：断言失败 → 修复改一步 → 未变的上游步按复用键不重跑（D-026/D-027）"
+model = "repair"
+tags = ["system", "repair", "idempotency"]
+workspace = { "a.txt" = "hello\n", "b.txt" = "zzz\n" }
+turns = ["读取 a.txt 和 b.txt，告诉我哪个以 H 开头"]
+checks = [
+  { kind = "run_verdict", expect = "completed" },
+  { kind = "steps_passed_min", count = 2 },
+  { kind = "step_started_max", step_id = "s1", max = 1 },
+]
