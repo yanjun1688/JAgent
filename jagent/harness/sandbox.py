@@ -500,11 +500,16 @@ def _prepend_service_interpreter(env: dict) -> None:
 
     白名单又不允许绝对路径，用户没有别的办法指定解释器；所以「命令里的 python
     就是跑 JAgent 的这个 python」是这里唯一自洽的语义。
+
+    **不做 resolve()**（D-038 容器验证发现）：Linux 的 uv/venv python 是指向
+    真实解释器的符号链接，resolve 会把 exe_dir 解析到系统 python 目录——前置
+    失效，`python -m pytest` 落到系统解释器（No module named pytest）。按
+    未解析的字符串去重即可，两平台语义一致。
     """
-    exe_dir = str(Path(sys.executable).resolve().parent)
+    exe_dir = str(Path(sys.executable).parent)
     key = _path_key(env)
     parts = [part for part in env.get(key, "").split(os.pathsep) if part]
-    rest = [part for part in parts if Path(part).resolve() != Path(exe_dir)]
+    rest = [part for part in parts if part != exe_dir]
     env[key] = os.pathsep.join([exe_dir, *rest])
 
 
