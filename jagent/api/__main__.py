@@ -3,9 +3,11 @@
 这是产品的唯一入口（没有 CLI）：
     python -m jagent.api            # 默认 http://127.0.0.1:8021
     JAGENT_PORT=9000 python -m jagent.api
+    JAGENT_HOST=0.0.0.0 python -m jagent.api   # Linux 服务器部署对外暴露
 
 环境变量：
     JAGENT_DATA_DIR   数据目录（默认 data/v8_http，内含 events.db / artifacts/ / ws/）
+    JAGENT_HOST       绑定地址（默认 127.0.0.1；对外暴露改 0.0.0.0，本服务无鉴权，勿裸奔公网）
     JAGENT_PORT       监听端口（默认 8021）
     JAGENT_LLM_*      接模型时用；不配则用模板/规则（离线可跑）
 """
@@ -17,14 +19,20 @@ import os
 from pathlib import Path
 
 
-def _load_dotenv() -> dict[str, str]:
-    """读仓库根的 .env（没有就跳过）。
+def _load_dotenv() -> tuple[dict[str, str], str]:
+    """读 .env（CWD → 仓库根，找到第一个为止），返回 (合并后的环境, 来源)。
 
     不装 python-dotenv：产品只需要 KEY=VALUE，注释与空行跳过即可。
     环境变量优先于文件，避免部署时被仓库里的文件覆盖。
+    来源写进启动日志——.env 找不到时是"没配"而不是"读了个空文件"，
+    两种静默降级必须可区分（运维视角）。
     """
     merged = dict(os.environ)
-    for candidate in (Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env"):
+    candidates = (
+        ("cwd", Path.cwd() / ".env"),
+        ("repo", Path(__file__).resolve().parents[2] / ".env"),
+    )
+    for source, candidate in candidates:
         if not candidate.is_file():
             continue
         # utf-8-sig：`.env` 常带 BOM，用 utf-8 读会把首行键名读成 `\ufeffLLM_API_KEY`，
@@ -36,8 +44,8 @@ def _load_dotenv() -> dict[str, str]:
             key, _, value = line.partition("=")
             key, value = key.strip(), value.strip().strip('"').strip("'")
             merged.setdefault(key, value)
-        break
-    return merged
+        return merged, str(candidate)
+    return merged, "<unset：没有找到 .env，全部依赖真实环境变量>"
 
 
 def _probe(model) -> bool:
@@ -53,12 +61,13 @@ def main() -> None:
     import uvicorn
 
     from ..adapters.mcp import mcp_servers_from_env
-    from .app import create_app
+    from .app import STATIC_FILE, UI_DIST, create_app
     from .logsink import attach
 
     root = os.environ.get("JAGENT_DATA_DIR", "data/v8_http")
+    host = os.environ.get("JAGENT_HOST", "127.0.0.1")
     port = int(os.environ.get("JAGENT_PORT", "8021"))
-    env = _load_dotenv()
+    env, env_source = _load_dotenv()
 
     model = None
     try:
@@ -87,15 +96,21 @@ def main() -> None:
         mcp_note = f"{len(app_obj.mcp_tools)} tools / {len(mcp_servers)} servers"
     else:
         mcp_note = "off"
+    ui_mode = "ui/dist" if (UI_DIST / "index.html").is_file() else f"fallback（{STATIC_FILE.name}）"
+    # 启动面（部署三件套的可见性）：绑的地址、.env 从哪读的、数据根绝对路径、
+    # 面板模式——任何一项不符合预期，启动日志第一行就能看见。
     log.info(
-        "JAgent 已启动 http://127.0.0.1:%d (model=%s, mcp=%s, data=%s)",
+        "JAgent 已启动 http://%s:%d (model=%s, mcp=%s, data=%s, env=%s, ui=%s)",
+        host,
         port,
         "on" if model else "template",
         mcp_note,
-        root,
+        Path(root).resolve(),
+        env_source,
+        ui_mode,
     )
     try:
-        uvicorn.run(application, host="127.0.0.1", port=port, log_config=None, log_level="info")
+        uvicorn.run(application, host=host, port=port, log_config=None, log_level="info")
     finally:
         detach_logs()
 

@@ -5,24 +5,18 @@
 
 ## 跑起来
 
-后端一个进程同时提供 API 和构建好的面板：
+后端一个进程同时提供 API 和构建好的面板（在仓库根目录）：
 
-```powershell
-cd ..
-$env:JAGENT_PORT = "8021"
-.venv\Scripts\python.exe -m jagent.api
-# 打开 http://127.0.0.1:8021
+```bash
+uv run python -m jagent.api   # 打开 http://127.0.0.1:8021
 ```
 
 前端开发（Vite 把 `/chat`、`/runs`、`/healthz`、`/api` 代理到 8021）：
 
-```powershell
+```bash
 cd ui
 npm install
 npm run dev      # http://localhost:5273
-```
-
-```powershell
 npm run build    # tsc --noEmit + vite build，产物在 ui/dist
 ```
 
@@ -44,29 +38,36 @@ npm run build    # tsc --noEmit + vite build，产物在 ui/dist
 
 ## 数据从哪来
 
-只有五个出口，全部在 `src/lib/api.ts`：
+全部出口集中在 `src/lib/api.ts`：
 
-| 函数 | 后端 |
+| 函数（节选） | 后端 |
 |---|---|
-| `chat(text, answers?)` | `POST /chat` |
+| `chat(text, answers?, sessionId?)` | `POST /chat` |
 | `decide(runId, decision, comment?)` | `POST /runs/{id}/decision` |
-| `getRun(runId)` | `GET /runs/{id}` |
-| `listRuns(limit)` | `GET /api/runs` |
+| `cancel(runId, reason?)` | `POST /runs/{id}/cancel` |
+| `getRun(runId)` / `listRuns(limit)` | `GET /runs/{id}` / `GET /api/runs` |
 | `pollEvents(runId, afterSeq)` | `GET /api/runs/{id}/events?after_seq=` |
+| `listSessions()` / `createSession()` | `GET/POST /api/sessions` |
+| `sessionMetrics(sessionId?)` | `GET /api/metrics/session` |
+| `verifyRun(runId)` | `GET /api/runs/{id}/verify` |
+| `pollLogs(after)` | `GET /api/logs?after=`（运维日志，与事件流严格分离） |
 
 事件轮询按 `next_seq` 前进，1s 一次；终态之后只再读一次。
 事件 payload 由后端原样返回，但审批 token 不会下发。
 
 ## 文件
 
-- `src/App.tsx` — 会话状态、run 轮询、批准决策、两栏布局
-- `src/components/IntakePanel.tsx` — 对话与选项按钮
+- `src/App.tsx` — 三栏布局、会话/run 状态与轮询
+- `src/components/ConversationPanel.tsx` — 对话与选项按钮
+- `src/components/DataFlowPanel.tsx` — 任务过程（`run.steps` 状态流）
+- `src/components/LogsPanel.tsx` — 右栏进程日志（`/api/logs`，运维视角）
+- `src/components/VerifyDrawer.tsx` — 声称 vs 事件证据核对（D-032）
+- `src/components/MetricStrip.tsx` — 会话级指标条（D-031 S2）
 - `src/components/ApprovalGate.tsx` — `approval.what` + 批准/拒绝
-- `src/components/StreamLoop.tsx` — 事件增量轮询与最近过程
-- `src/components/Topology.tsx` — 用 `run.steps` 画步骤状态
+- `src/components/Topology.tsx` — 步骤状态图
 - `src/lib/api.ts` — v8 类型与唯一 HTTP 出口
 - `src/lib/kernel.ts` — 状态/事件到人话和灯色的翻译
-- `src/lib/theme.ts` — 黑白主题（localStorage）
+- `src/lib/chat.ts` / `src/lib/cx.ts` — chat 轮次状态与类名工具
 
 ## 视觉
 

@@ -1,0 +1,20 @@
+# systemd 直跑（非容器）部署样例：仓库 checkout + uv sync 之后
+#   cp deploy/jagent.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now jagent
+[Unit]
+Description=JAgent task execution engine
+After=network-online.target
+
+[Service]
+Type=simple
+# 按实际部署路径修改；数据根与环境变量建议显式写全（部署不要依赖 CWD）
+WorkingDirectory=/opt/jagent
+Environment=JAGENT_DATA_DIR=/var/lib/jagent
+Environment=JAGENT_HOST=127.0.0.1
+EnvironmentFile=-/opt/jagent/.env
+ExecStart=/opt/jagent/.venv/bin/python -m jagent.api
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

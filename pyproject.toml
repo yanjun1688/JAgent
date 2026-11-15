@@ -44,9 +44,7 @@ addopts = ["--strict-markers", "-m", "not llm"]
 markers = [
     "known_bug(id, reason): tracked defect; strict xfail until the bug is fixed",
     "engineering: engineering/architecture test without a BDD scenario (must name its milestone)",
-    "slow: too slow for the PR gate; runs in nightly",
     "llm: requires a real LLM API key; opt-in only (JAGENT_REAL_LLM=1)",
-    "concurrency: thread/process race test; repeated in nightly",
 ]
 
 [tool.uvicorn]

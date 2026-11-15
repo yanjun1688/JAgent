@@ -43,4 +43,4 @@ jobs:
         run: uv run ruff check jagent tests
 
       - name: Pytest
-        run: uv run pytest -q tests/v8 tests/v8_eval tests/v8_redteam tests/v8_arch tests/v8_hardening
+        run: uv run pytest -q tests

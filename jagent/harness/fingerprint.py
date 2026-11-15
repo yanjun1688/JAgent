@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ..contracts import digest_of
+from .sandbox import is_absolute_spelling
 
 #: 文件不存在（或在读的时候消失）时的占位值。
 MISSING = "missing"
@@ -166,8 +167,10 @@ def probe_fingerprints(workspace: str | Path, probes: Sequence[str]) -> dict[str
     root = Path(workspace)
     out: dict[str, str] = {}
     for raw in probes:
-        path = Path(str(raw))
-        target = path if path.is_absolute() else root / path
-        out[str(raw)] = file_digest(target)
+        # 平台无关判定（D-038）：Windows 上 `/etc` 不算绝对、Linux 上 `C:/x`
+        # 不算绝对——跨机器重放日志时拼写漂移会让 probe 静默 MISSING。
+        text = str(raw)
+        target = Path(text) if is_absolute_spelling(text) else root / text
+        out[text] = file_digest(target)
     return out
 

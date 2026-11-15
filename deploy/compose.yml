@@ -1,0 +1,19 @@
+# 最小部署：docker compose -f deploy/compose.yml up -d --build
+# 本服务无鉴权：JAGENT_HOST 只在反代/防火墙之后才对外暴露。
+services:
+  jagent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "${JAGENT_PORT:-8021}:8021"
+    env_file:
+      - ../.env
+    environment:
+      JAGENT_DATA_DIR: /app/data
+      JAGENT_HOST: 0.0.0.0
+    volumes:
+      - jagent-data:/app/data
+    restart: unless-stopped
+volumes:
+  jagent-data:

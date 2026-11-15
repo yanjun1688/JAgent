@@ -37,6 +37,9 @@ secrets/
 # Data / Cache
 data/
 
+# AI 会话产物（ZCode 等）
+.zcode/
+
 # OS
 *.DS_Store
 Thumbs.db

@@ -30,7 +30,7 @@ jobs:
         run: |
           for i in $(seq 1 10); do
             echo "=== iteration $i ==="
-            uv run pytest -q tests/v8 tests/v8_redteam tests/v8_arch tests/v8_hardening
+            uv run pytest -q tests
           done
 
   supply-chain:

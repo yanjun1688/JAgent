@@ -218,3 +218,133 @@ def test_session_writes_events_only_through_the_writer() -> None:
     assert "store.append" not in session, "Session 直接写 EventStore（绕过 Writer）"
     assert "EventStore(" not in session, "Session 自建 EventStore"
     assert "writer.emit" in session, "Session 的编排事实应经 Writer 落事件"
+
+
+# --------------------------------------------------------------------------- #
+# 环境治理（D-038）：门禁面 = 发布面。三组机械规则把 CI 事故（2026-11-15，
+# ruff 查不存在的 scripts/ + 26 个 Windows 语义测试在 ubuntu 红）的教训
+# 编码成仓库规则——困难=信号→识别缺失→反馈到仓库（Roadmap 02）。
+# --------------------------------------------------------------------------- #
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+#: 本地私有（gitignored、公开树/CI 检出后不存在）的顶层路径，D-034 re-baseline。
+LOCAL_ONLY_TOP_DIRS: frozenset[str] = frozenset({"docs", "scripts", "data"})
+
+#: 对本地私有路径的**有意引用**登记处：`(文件名, 引用的顶层目录)`。
+#: 新的未登记引用会让这里变红——登记动作本身就是"这个引用是刻意的"这一决定的痕迹。
+LOCAL_ONLY_REFERENCE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("AGENTS.md", "docs"),      # 语义权威指针：规格本地维护（D-034）
+        ("AGENTS.md", "scripts"),   # 门禁与仓库地图：本地脚本（CI 不含）
+        ("AGENTS.md", "data"),      # 仓库地图：运行时数据
+        ("tests/README.md", "scripts"),  # 夹具说明提及（历史）
+        ("jagent/config/eval/tasks.toml", "docs"),      # 语料头注释：规格溯源标注
+        ("jagent/config/eval/tasks.toml", "scripts"),   # 语料头注释：runner 溯源标注
+        ("ui/README.md", "ui/dist"),                    # 构建说明：产物目录
+        ("README.md", ".env"),                          # 运行时产物说明：用户自建（非仓库路径）
+        ("README.md", "data"),                          # 运行时产物说明：JAGENT_DATA_DIR 默认值（自动生成）
+        ("CONTRIBUTING.md", "docs"),                    # 本地私有内容说明（规格/台账）
+        ("CONTRIBUTING.md", ".env"),                    # 环境配置指引（用户自建）
+        ("CONTRIBUTING.md", "data"),                    # 并行协议：每会话独立数据根
+        ("CONTRIBUTING.md", "scripts"),                 # 本地私有工具指引（ci_check/hygiene，D-034）
+        ("CONTRIBUTING.md", "ui/dist"),                 # 前端构建说明
+        ("deploy/README.md", ".env"),                   # 部署配置指引（--env-file / EnvironmentFile）
+        ("deploy/README.md", "ui/dist"),                # 面板构建产物挂载说明
+    }
+)
+
+_REF_RE = re.compile(
+    r"(?<![\w./-])((?:docs|scripts|data)/[\w\-./]+|\.env\b|ui/dist)"
+)
+_SCAN_SUFFIXES = (".md", ".yml", ".yaml", ".toml")
+
+
+def _committed_files() -> list[str]:
+    """公开树的文件清单（git ls-files）：本地私有文件天然不在扫描面。"""
+    import subprocess
+
+    completed = subprocess.run(
+        ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+    )
+    return [
+        line
+        for line in completed.stdout.splitlines()
+        if line.endswith(_SCAN_SUFFIXES)
+    ]
+
+
+def _committed_env_references() -> dict[str, set[str]]:
+    """已提交的 md/yml/toml 中对本地私有路径的引用：`文件 -> {顶层目录}`。"""
+    found: dict[str, set[str]] = {}
+    for relative in _committed_files():
+        path = REPO_ROOT / relative
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in _REF_RE.finditer(text):
+            token = match.group(1)
+            top = (
+                ".env"
+                if token.startswith(".env")
+                else ("ui/dist" if token.startswith("ui/dist") else token.split("/", 1)[0])
+            )
+            if top in LOCAL_ONLY_TOP_DIRS or top in (".env", "ui/dist"):
+                found.setdefault(relative, set()).add(top)
+    return found
+
+
+def test_document_references_to_local_only_paths_are_registered() -> None:
+    """AGENTS.md/README 等已提交文档对本地私有路径的每处引用都必须登记。
+
+    地图必须与领土一致（Roadmap 02 §4.1）：悬空指针会让新协作者/AI 会话
+    在公开树上照着不存在的路径走。未登记的新引用 = 无意的悬空指针，拒绝合入。
+    """
+    found = _committed_env_references()
+    unregistered = {
+        (filename, top)
+        for filename, tops in found.items()
+        for top in tops
+        if (filename, top) not in LOCAL_ONLY_REFERENCE_ALLOWLIST
+    }
+    assert not unregistered, (
+        f"对本地私有路径的未登记引用：{sorted(unregistered)}"
+        "——在 LOCAL_ONLY_REFERENCE_ALLOWLIST 登记理由，或改为引用公开树存在的路径"
+    )
+
+
+def test_workflow_paths_exist_in_the_published_tree() -> None:
+    """CI/nightly 的 ruff/pytest 目标不得指向本地私有目录。
+
+    事故本体（2026-11-15）：`ruff check jagent tests scripts` 在公开树上
+    E902——门禁面必须等于发布面。
+    """
+    workflows = REPO_ROOT / ".github" / "workflows"
+    assert workflows.is_dir(), "CI workflow 目录缺失"
+    offenders: list[str] = []
+    for path in sorted(workflows.glob("*.yml")):
+        # 注释行是文档不是可执行门禁，剥掉后再扫
+        lines = [line.split("#", 1)[0] for line in path.read_text(encoding="utf-8").splitlines()]
+        for token in re.findall(r"[\w./\-]+", "\n".join(lines)):
+            top = token.replace("\\", "/").split("/", 1)[0]
+            if top in LOCAL_ONLY_TOP_DIRS:
+                offenders.append(f"{path.name}: {token}")
+    assert not offenders, f"workflow 引用了本地私有目录：{offenders}"
+
+
+def test_ci_runs_the_full_offline_suite() -> None:
+    """CI 的 pytest 必须跑全量离线套件（裸 `tests`，不允许 --ignore 测试目录）。
+
+    事故的结构性放大器：CI 子集只覆盖 5/12 个测试目录，198 个测试零 CI 覆盖。
+    全量化的另一个收益：新增测试目录自动进 CI，不需要有人记得改 workflow。
+    （在线 e2e 由 addopts `-m "not llm"` 排除，与本规则无关。）
+    """
+    for name in ("ci.yml", "nightly.yml"):
+        text = (REPO_ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        commands = re.findall(r"pytest[^\n]*", text)
+        assert commands, f"{name}: 没有 pytest 步骤"
+        for command in commands:
+            assert re.search(r"pytest(?:\s+-\S+)*\s+tests\b", command), (
+                f"{name}: pytest 没有跑全量离线套件（裸 tests）：{command!r}"
+            )
+            assert "--ignore" not in command, f"{name}: pytest 用 --ignore 排除了测试目录：{command!r}"
