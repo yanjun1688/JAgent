@@ -21,6 +21,11 @@ from jagent.contracts import EventType, Plan, Step
 
 from .conftest import make_runner
 
+pytestmark = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="shell.exec 走平台 shell（Windows cmd 语义，G-06）；单用户本地 Harness 是 Windows",
+)
+
 SECRET = "TOPSECRET-OUTSIDE-WORKSPACE"
 
 #: 每次真实执行的硬上限（秒）。需求要求单测 5 秒内跑完；UNC 路径未拦截时会阻塞，

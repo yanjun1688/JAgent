@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -64,6 +65,10 @@ def app(tmp_path: Path):
 # 1. 确定性任务完成
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="shell.exec 走平台 shell（Windows cmd 语义）；单用户本地 Harness 是 Windows",
+)
 def test_two_step_task_completes(tmp_path: Path):
     # 模板规划层已删除：这里用 ScriptedPlanner 固定「找测试 → 跑测试」两步，
     # 验证的是 Session → Runner → Executor → Verifier 的完整链路。

@@ -16,6 +16,11 @@ import pytest
 from jagent.harness.registry import build_default_registry
 from jagent.harness.sandbox import SandboxVerdict, check_command, scrub_env
 
+pytestmark = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="shell.exec 走平台 shell（Windows cmd 语义，G-06）；单用户本地 Harness 是 Windows",
+)
+
 
 @pytest.fixture()
 def workspace(tmp_path: Path) -> Path:
