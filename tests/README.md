@@ -12,6 +12,7 @@
 | `v8_redteam/` | 红队攻击性测试（RT-\*；含 `known_bug` strict-xfail——修一条解一条） | redteam 报告 |
 | `v8_hardening/` | G-05 恢复对账独立验收 | hardening 报告 |
 | `v8_config/` | prompt/policy/budget 外置（I6） | brief §5.5 |
+| `v8_eval/` | 评估体系：任务集 schema 校验、checks kind、评分/聚合、对照（D-035） | evaluation 规格 |
 | `v8_model/` | 模型端口层（超时/重试/outage） | ports |
 | `v8_arch/` | conformance 结构断言——**时点快照**，随台账裁决 re-baseline（G-01/G-02/G-23 先例） | conformance |
 | `v8_repair/` | 修复闭环：LLMRepairer / 复用键 / 零模型重放（D-026/D-027） | brief §4 |

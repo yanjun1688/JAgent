@@ -33,10 +33,11 @@
 jagent/
 ├─ contracts.py        类型 + 事件词表 + REQUIRED_FIELDS（唯一真源）
 ├─ ports.py            ModelPort / Router / Planner / Proposer / Repairer / JudgePort 协议
-├─ config.py + config/ prompt / policy / budget 外置（I6）
+├─ config.py + config/ prompt / policy / budget / eval 外置（I6；eval/ = 评估任务集，进 config hash）
 ├─ evidence.py         missing()——evidence_requires 对账（中立模块）
 ├─ metrics.py          可观测性投影（S2：session/run/summaries，纯派生）
 ├─ audit.py            运行验证视图（D-032：声称 vs 证据）
+├─ evaluation.py       评估投影（D-035：任务集校验 / checks / 四维指标 / pass^k / 对照，纯派生）
 ├─ harness/            store fold statemachine writer artifacts executor verify
 │                      repair human report fingerprint reconcile registry sandbox
 │                      judge（JudgePort）contract_snapshot（契约快照）observability（S1）
@@ -45,7 +46,7 @@ jagent/
 ├─ app/                session（turn 驱动）runner（执行环）
 └─ api/                create_app + __main__（离线服务 :8021）
 tests/                 见 tests/README.md（各目录职责与落点）
-scripts/               check_invariants.py kernel_demo.py verify_run.py
+scripts/               check_invariants.py kernel_demo.py verify_run.py run_eval.py
 ui/                    控制面板原型（读 /api，不维护第二套状态）
 docs/                  现行规格平铺（见下）+ waves/（wave 过程文档）+ Agent Roadmap/（教材）
 data/                  运行时数据（gitignored）
@@ -57,6 +58,7 @@ data/                  运行时数据（gitignored）
 |---|---|---|
 | 新事件类型 | `contracts.py` 枚举 + REQUIRED_FIELDS + fold 处理器 + invariants 词表 + SPEC_VOCAB + 架构事件表——**六处同步**（D-031 教训） | run.cancelled（D-028） |
 | 横切纯投影（对账/指标类，零写事件） | `jagent/` 顶层新模块 | evidence.py / metrics.py / audit.py |
+| 评估任务集（数据） | `jagent/config/eval/`（进 config hash，任务集版本自动进 run 指纹） | budget.toml（D-035） |
 | 需要写事件的新组件 | `harness/`（agent/ 只产出判定与文本——conformance G-02 守卫） | observability.py |
 | 新对话级 API | `api/app.py`；会话参数可选、缺省 s_main（D-034） | /api/sessions |
 | 每会话/每组件的新依赖 | wiring 的 SharedComponents（共享）或 `_build_stack`（per-会话）——拆分线：**有 per-会话状态 → 栈；无 → 共享** | D-034 |
