@@ -19,17 +19,19 @@ from jagent.harness.sandbox import _path_key, scrub_env
 
 
 def test_scrubbed_path_puts_the_service_interpreter_first(tmp_path: Path) -> None:
+    """前置目录是「未解析符号链接」的解释器目录（D-038）：venv/bin 在前，
+    而不是被 resolve 解析到的真实解释器目录（Linux 上那是系统 python）。"""
     env = scrub_env(workspace=tmp_path)
     first = env[_path_key(env)].split(os.pathsep)[0]
 
-    assert Path(first).resolve() == Path(sys.executable).resolve().parent
+    assert Path(first) == Path(sys.executable).parent
 
 
 def test_the_interpreter_appears_once_in_path(tmp_path: Path) -> None:
     env = scrub_env(workspace=tmp_path)
-    entries = [Path(part).resolve() for part in env[_path_key(env)].split(os.pathsep) if part]
+    entries = [Path(part) for part in env[_path_key(env)].split(os.pathsep) if part]
 
-    assert entries.count(Path(sys.executable).resolve().parent) == 1
+    assert entries.count(Path(sys.executable).parent) == 1
 
 
 def test_shell_python_is_the_service_python(tmp_path: Path) -> None:

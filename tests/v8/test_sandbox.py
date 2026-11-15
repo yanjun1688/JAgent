@@ -366,9 +366,10 @@ def test_scrub_env_redirects_home_and_tmp_into_workspace(workspace: Path) -> Non
     assert env["TMP"] == str(sandbox / "tmp")
     assert (sandbox / "home").is_dir()
     assert (sandbox / "tmp").is_dir()
-    # PATH 原有条目保留，但服务解释器排第一（契约见 test_shell_interpreter.py）。
+    # PATH 原有条目保留，但服务解释器排第一（未解析符号链接的目录，契约见
+    # test_shell_interpreter.py / D-038）。
     assert env["PATH"].endswith(os.pathsep + "keep-me")
-    assert Path(env["PATH"].split(os.pathsep)[0]).resolve() == Path(sys.executable).resolve().parent
+    assert Path(env["PATH"].split(os.pathsep)[0]) == Path(sys.executable).parent
 
 
 def test_scrub_env_disables_msys_path_conversion(workspace: Path) -> None:
