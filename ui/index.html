@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/led.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="JAgent 控制面板：和助手对话，看清每一步状态；不可逆操作会先停下来等你确认。" />
+    <meta name="theme-color" content="#000000" />
+    <title>JAgent · 任务控制面板</title>
+    <script>
+      // Paint the stored theme before first frame so the swap never flashes.
+      try {
+        if (localStorage.getItem('jagent.ui.theme') === 'light') {
+          document.documentElement.dataset.theme = 'light'
+        }
+      } catch (error) {
+        /* storage blocked: keep the dark default */
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JAgent 助手</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: #f3f5f8; color: #1f2933; display: flex; justify-content: center;
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .app { width: 100%; max-width: 760px; height: 100dvh; display: flex; flex-direction: column; background: #fff; }
+  header { padding: 14px 18px; border-bottom: 1px solid #e6eaf0; }
+  header h1 { margin: 0; font-size: 17px; font-weight: 600; }
+  header p { margin: 2px 0 0; font-size: 12px; color: #7b8794; }
+  #messages { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+  .row { display: flex; }
+  .row.user { justify-content: flex-end; }
+  .bubble { max-width: 86%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; word-break: break-word; }
+  .row.bot .bubble { background: #f0f3f8; border-bottom-left-radius: 4px; }
+  .row.user .bubble { background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
+  .what { margin-top: 8px; padding: 8px 10px; background: #fff7ed; border: 1px solid #fed7aa;
+          border-radius: 8px; font-family: ui-monospace, Consolas, monospace; font-size: 13px;
+          word-break: break-all; white-space: pre-wrap; }
+  .choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .chip { border: 1px solid #b9c6d8; background: #fff; color: #1f2933; border-radius: 999px; padding: 6px 12px; font-size: 14px; cursor: pointer; }
+  .chip:hover { border-color: #2563eb; color: #2563eb; }
+  .chip:disabled { opacity: .45; cursor: default; }
+  .steps { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; color: #44505f; }
+  .composer { display: flex; gap: 8px; padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid #e6eaf0; background: #fff; }
+  #input { flex: 1; min-width: 0; padding: 10px 14px; font-size: 16px; border: 1px solid #c7d0dc; border-radius: 999px; outline: none; background: #fbfcfd; }
+  #input:focus { border-color: #2563eb; background: #fff; }
+  #send { border: 0; border-radius: 999px; padding: 0 20px; font-size: 15px; color: #fff; background: #2563eb; cursor: pointer; }
+  #send:disabled { opacity: .55; cursor: default; }
+  @media (max-width: 480px) {
+    #messages { padding: 14px; }
+    .bubble { max-width: 92%; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>JAgent 助手</h1>
+    <p>直接说你想做什么，我来处理。</p>
+  </header>
+  <main id="messages" aria-live="polite">
+    <div class="row bot"><div class="bubble">你好，把要做的事告诉我就行。</div></div>
+  </main>
+  <form id="composer" class="composer">
+    <input id="input" type="text" autocomplete="off" placeholder="例如：跑回归测试" aria-label="输入你想做的事">
+    <button id="send" type="submit">发送</button>
+  </form>
+</div>
+<script>
+(function () {
+  "use strict";
+  var messages = document.getElementById("messages");
+  var form = document.getElementById("composer");
+  var input = document.getElementById("input");
+  var sendButton = document.getElementById("send");
+  var lastText = "";
+  var busy = false;
+
+  function scrollDown() { messages.scrollTop = messages.scrollHeight; }
+
+  function addBubble(text, who) {
+    var row = document.createElement("div");
+    row.className = "row " + (who === "user" ? "user" : "bot");
+    var bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = text;
+    row.appendChild(bubble);
+    messages.appendChild(row);
+    scrollDown();
+    return bubble;
+  }
+
+  function addButtons(bubble, items) {
+    var box = document.createElement("div");
+    box.className = "choices";
+    items.forEach(function (item) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "chip";
+      button.textContent = item.label;
+      button.addEventListener("click", function () {
+        Array.prototype.forEach.call(box.querySelectorAll("button"), function (b) { b.disabled = true; });
+        item.onClick();
+      });
+      box.appendChild(button);
+    });
+    bubble.appendChild(box);
+    scrollDown();
+  }
+
+  function addSteps(bubble, steps) {
+    var list = document.createElement("div");
+    list.className = "steps";
+    steps.forEach(function (step, index) {
+      var line = document.createElement("div");
+      var mark = step.status === "passed" ? "✅ 已完成" : (step.status === "failed" ? "❌ 没成功" : "⏳ 进行中");
+      line.textContent = "第 " + (index + 1) + " 步 " + mark;
+      list.appendChild(line);
+    });
+    bubble.appendChild(list);
+    scrollDown();
+  }
+
+  function renderReply(data) {
+    var bubble = addBubble(data.message || "处理好了。", "bot");
+    if (data.result && data.result.steps && data.result.steps.length) {
+      addSteps(bubble, data.result.steps);
+    }
+    if (data.status === "needs_input" && data.choices && data.choices.length) {
+      addButtons(bubble, data.choices.map(function (choice) {
+        return {
+          label: choice.label,
+          onClick: function () {
+            var answers = {};
+            answers[data.slot] = choice.value;
+            send(lastText || choice.value, answers);
+          }
+        };
+      }));
+    }
+    if (data.status === "waiting_human" && data.run_id) {
+      if (data.approval && data.approval.what) {
+        var what = document.createElement("div");
+        what.className = "what";
+        what.textContent = "将要执行：" + data.approval.what;
+        bubble.appendChild(what);
+      }
+      addButtons(bubble, [
+        { label: "确认，继续", onClick: function () { decide(data.run_id, "approve"); } },
+        { label: "先不做", onClick: function () { decide(data.run_id, "reject"); } }
+      ]);
+    }
+  }
+
+  function readJson(response) {
+    return response.json().catch(function () { return {}; });
+  }
+
+  function payload(response, data) {
+    if (!response.ok) {
+      addBubble(data.message || "出错了，请重试。", "bot");
+      return;
+    }
+    renderReply(data);
+  }
+
+  function send(text, answers) {
+    var content = (text || "").trim();
+    if (!content || busy) { return; }
+    busy = true;
+    sendButton.disabled = true;
+    addBubble(content, "user");
+    lastText = content;
+    fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: content, answers: answers || null })
+    }).then(function (response) {
+      return readJson(response).then(function (data) { payload(response, data); });
+    }).catch(function () {
+      addBubble("连不上服务，请稍后再试。", "bot");
+    }).then(function () {
+      busy = false;
+      sendButton.disabled = false;
+      input.focus();
+    });
+  }
+
+  function decide(runId, decision) {
+    if (busy) { return; }
+    busy = true;
+    sendButton.disabled = true;
+    fetch("/runs/" + encodeURIComponent(runId) + "/decision", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision: decision, comment: "" })
+    }).then(function (response) {
+      return readJson(response).then(function (data) { payload(response, data); });
+    }).catch(function () {
+      addBubble("连不上服务，请稍后再试。", "bot");
+    }).then(function () {
+      busy = false;
+      sendButton.disabled = false;
+      input.focus();
+    });
+  }
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    var text = input.value;
+    input.value = "";
+    send(text, null);
+  });
+  input.focus();
+})();
+</script>
+</body>
+</html>

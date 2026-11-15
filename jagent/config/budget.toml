@@ -1,0 +1,15 @@
+# JAgent v8 · 预算（宪法 I6 / brief §5.5）。
+# 字段与 jagent.contracts.Budget 一一对应；缺任何一项都拒绝启动。
+# 这里的值是 519-passed 基线（p0）时的代码默认值，不是新调参。
+
+max_steps = 10
+max_wall_s = 120.0
+transient_per_step = 3
+max_repairs = 2
+max_plan_attempts = 3
+max_advice_attempts = 3
+max_clarify_rounds = 3
+# 证据包：最多带几步、每步观测值截断到多少字符（原 session.py 里写死的 8 / 600）。
+evidence_max_steps = 8
+evidence_clip_chars = 600
+auto_approve_tools = []

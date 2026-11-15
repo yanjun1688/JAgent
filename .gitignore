@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+*.db
+*.sqlite3
+.coverage
+coverage.json
+htmlcov/
+.pytest_cache/
+.pytest_tmp/
+.ruff_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+secrets/
+
+# Runtime / Temp
+.jagent/
+.pytest_tmp/
+.workbuddy-ai/
+.playwright-mcp/
+.ui-backup/
+.mock_v6/
+
+# Data / Cache
+data/
+
+# OS
+*.DS_Store
+Thumbs.db
+
+
+# 本地维护，不入库（D-034 re-baseline：文档与脚本不在公开仓库发布）
+docs/
+scripts/

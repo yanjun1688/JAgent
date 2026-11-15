@@ -1,0 +1,18 @@
+# JAgent v8 gate: ruff + pytest（只守活代码 jagent/ tests/ scripts/）
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: uv run ruff check jagent tests scripts
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
+      - id: pytest
+        name: run tests
+        entry: uv run pytest
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true

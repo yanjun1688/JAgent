@@ -1,0 +1,52 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 18 * * *"   # 02:00 Asia/Shanghai
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  repeat-suite:
+    name: repeat v8 suite x10 (flake detection)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+      - run: uv sync --frozen --dev
+      - name: Suite x10
+        run: |
+          for i in $(seq 1 10); do
+            echo "=== iteration $i ==="
+            uv run pytest -q tests/v8 tests/v8_redteam tests/v8_arch tests/v8_hardening
+          done
+
+  supply-chain:
+    name: dependency audit (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+      - run: uv sync --frozen --dev
+      - name: pip-audit
+        run: uvx pip-audit || true
