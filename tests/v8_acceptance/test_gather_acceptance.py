@@ -335,9 +335,11 @@ def test_e19_does_not_trigger_for_non_gather_plan_without_then(tmp_path) -> None
     assert out.result is not None and out.result.verdict.value == "completed"
     assert propose.calls == []
     assert _checked(events) == []
-    assert _delivered(events) == []
-    # 普通执行保留原来的总结路径：初始起草 1 次 + `_answer_from_evidence` 1 次。
-    assert app.session.planner.calls == 2
+    # 没有 E19 合成 → 没有建议投递；只有一条 run 收尾复述（D-042 / R2，mode=report）。
+    assert [e.payload.get("mode") for e in _delivered(events)] in ([], ["report"])
+    # 普通执行只起草一次：收尾复述在独立模块里，不再二次调 Planner（D-004 的
+    # `_answer_from_evidence` 已退役——一次 run 一段叙事）。
+    assert app.session.planner.calls == 1
 
 
 class _FailingPropose:

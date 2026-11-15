@@ -177,8 +177,8 @@ class App:
         if repairer is None:
             repairer = HeuristicRepairer()
 
-        # 收尾总结（D-042）：有模型才有总结；观测视图带本栈 writer，
-        # 日志/事件里能看到 purpose=reporter 的那次调用。
+        # 收尾复述（D-042 / I8）：模型不进 run 的终态事务——Runner 不持有总结器，
+        # 由 Session 在终态之后调用；观测视图仍带本栈 writer（purpose=reporter）。
         summarizer = shared.summarizer
         if summarizer is None and shared.model is not None:
             from .agent.summarize import LLMSummarizer
@@ -190,7 +190,7 @@ class App:
             repairer=repairer, reporter=shared.reporter,
             human=human, budget=shared.budget, registry=shared.registry,
             auto_approve=frozenset(shared.budget.auto_approve_tools),
-            env=shared.env, artifacts=shared.artifacts, summarizer=summarizer,
+            env=shared.env, artifacts=shared.artifacts,
         )
         session = Session(
             writer=writer,
@@ -207,6 +207,7 @@ class App:
             session_id=session_id,
             artifacts=shared.artifacts,
             root=shared.root,
+            summarizer=summarizer,
         )
         return SessionStack(
             session_id=session_id, writer=writer, executor=executor,

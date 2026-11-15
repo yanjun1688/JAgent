@@ -14,7 +14,6 @@ from jagent.contracts import (
     EventType,
     IntentType,
     Plan,
-    ReplyDraft,
     Step,
     Verify,
 )
@@ -23,9 +22,12 @@ from tests.support import DraftPlanner, FixedRouter
 
 
 def test_advice_and_report_text_land_in_artifacts(tmp_path) -> None:
-    """Given 一个正常完成的写文件 run（reply 收尾），When 读事件与产物库，
-    Then advice.delivered 与 report.rendered 都带 artifact_id，
-    且全文可从产物库按 id 取回。"""
+    """Given 一个正常完成的写文件 run（收尾投递），When 读事件与产物库，
+    Then 投递文本与报告文本都带 artifact_id，且全文可从产物库按 id 取回。
+
+    D-042 之后：``report.rendered`` 是模板事实（RunRecord），``advice.delivered{mode:report}``
+    是给用户看的那段文本（Delivery）；两者各落一份产物，内容寻址。
+    """
     plan = Plan(
         steps=(
             Step(
@@ -38,7 +40,7 @@ def test_advice_and_report_text_land_in_artifacts(tmp_path) -> None:
     )
     app = build_app(
         tmp_path,
-        planner=DraftPlanner([plan, ReplyDraft(text="写好了，内容在 done.txt。")]),
+        planner=DraftPlanner([plan]),
         router=FixedRouter(IntentType.EXECUTE),
         budget=Budget(auto_approve_tools=("fs.write",)),
     )
@@ -50,16 +52,17 @@ def test_advice_and_report_text_land_in_artifacts(tmp_path) -> None:
         delivered = [e.payload for e in events if e.type is EventType.ADVICE_DELIVERED][-1]
         report = [e.payload for e in events if e.type is EventType.REPORT_RENDERED][-1]
 
-        assert delivered.get("artifact_id"), "建议全文没落产物库"
+        assert delivered.get("artifact_id"), "投递全文没落产物库"
         assert report.get("artifact_id"), "报告全文没落产物库"
 
-        advice_text = app.artifacts.get_text(delivered["artifact_id"])
-        assert "写好了" in advice_text, "产物里的建议全文与投递文本不符"
+        delivery_text = app.artifacts.get_text(delivered["artifact_id"])
+        assert delivery_text, "投递全文取回为空"
+        assert delivered["delivery"]["regime"] == "verified", "没有模型装配时是模板文本"
         assert app.artifacts.get_text(report["artifact_id"]), "报告全文取回为空"
 
         # 内容寻址：产物 id 必须是全文的 sha256（与库的完整性校验一致）。
         import hashlib
 
-        assert delivered["artifact_id"] == hashlib.sha256(advice_text.encode()).hexdigest()
+        assert delivered["artifact_id"] == hashlib.sha256(delivery_text.encode()).hexdigest()
     finally:
         app.close()

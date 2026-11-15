@@ -410,18 +410,35 @@ def _turn_payload(outcome: TurnOutcome, approval: dict[str, Any] | None = None) 
     if outcome.status == "answered" and outcome.result is not None:
         body["result"] = _result_payload(outcome.result)
 
+    # 输出分级（宪法 v2 I3）：气泡的可信档位由代码给，前端只渲染徽标，不自己推断。
+    if outcome.delivery is not None:
+        body["delivery"] = {
+            "regime": outcome.delivery.regime.value,
+            "checks": list(outcome.delivery.checks),
+            "grounds": list(outcome.delivery.grounds),
+            "fallback": dict(outcome.delivery.fallback),
+        }
+
     return body
 
 
 def _message(outcome: TurnOutcome) -> str:
+    """气泡正文：**唯一来源是 `TurnOutcome.text`**（它已经是 delivery 文本）。
+
+    `result.summary` 只是模板事实（RunRecord 的一部分），不再抢气泡（I8：事实与措辞分家）。
+    只有 text 为空时才回退到模板摘要。
+    """
+
     if outcome.status == "needs_input":
         return outcome.question.text if outcome.question is not None else "还需要你补充一点信息。"
     if outcome.status == "waiting_human":
         return WAITING_HUMAN_TEXT
     if outcome.status == "answered":
+        if outcome.text:
+            return outcome.text
         if outcome.result is not None and outcome.result.summary:
             return outcome.result.summary
-        return outcome.text or "处理好了。"
+        return "处理好了。"
     return outcome.text or ""
 
 

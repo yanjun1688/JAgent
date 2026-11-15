@@ -659,6 +659,41 @@ class Result:
     generated_by: str = "template"
 
 
+class Regime(StrEnum):
+    """对外文本的可信档位（宪法 v2 I3）。
+
+    三值，且**没有"通过"**：
+
+    - ``VERIFIED``：文本由受信代码产生（模板 / 兜底 / 事实渲染），或由代码断言得出；
+    - ``GROUNDED``：模型写的复述，已过确定性检查（数字⊆事实、引用⊆证据、无指令性表述）；
+    - ``UNVERIFIED``：没有判据，只能标注——它永远不是"通过"，也不得流入受信输入。
+    """
+
+    VERIFIED = "verified"
+    GROUNDED = "grounded"
+    UNVERIFIED = "unverified"
+
+
+@dataclass(frozen=True)
+class Delivery:
+    """对外文本（对话气泡的唯一来源）。
+
+    ``regime`` / ``checks`` / ``grounds`` / ``fallback`` **全部由代码写**，模型看不到、
+    也改不了；``text`` 才是模型可能参与的那一部分。终态记录（``Result``）不装本对象的
+    文本——事实与措辞分家（I8）。
+    """
+
+    text: str
+    regime: Regime = Regime.VERIFIED
+    #: 本次实际跑过且通过的确定性检查 id（见 `jagent/grounding.py`）。
+    checks: tuple[str, ...] = ()
+    #: 这段文本能指回的事件 seq（grounded 文本必有；unverified 恒空）。
+    grounds: tuple[int, ...] = ()
+    #: 降级与原因：``{"bool": bool, "reason": str}``；未降级时为空 dict。
+    fallback: dict[str, Any] = field(default_factory=dict)
+    artifact_id: str | None = None
+
+
 # --------------------------------------------------------------------------- #
 # 预算 / 配置
 # --------------------------------------------------------------------------- #

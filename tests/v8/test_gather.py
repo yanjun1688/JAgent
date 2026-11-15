@@ -375,7 +375,10 @@ def test_failed_run_with_pending_downstream_does_not_compose(tmp_path: Path) -> 
 
     assert statuses == {"a": "passed", "b": "failed", "c": "pending"}
     assert propose.calls == [], "还有 pending 步时 E19 不合成"
-    assert not [e for e in events if e.type is EventType.ADVICE_DELIVERED]
+    # 收尾投递（D-042 / R2）不是"建议"：失败的 run 只投一条 mode=report 的复述，
+    # 绝不合成 advice、也不过 gate。判据按 mode 区分，不按事件类型一刀切。
+    modes = [e.payload.get("mode") for e in events if e.type is EventType.ADVICE_DELIVERED]
+    assert modes in ([], ["report"]), f"失败 run 不该合成建议：{modes}"
     assert not [e for e in events if e.type is EventType.GATE_CHECKED]
     # run 仍按普通失败路径收尾，不回建议。
     assert out.status == "answered"

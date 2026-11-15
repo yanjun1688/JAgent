@@ -116,7 +116,9 @@ def test_llm_planner_end_to_end_completes(root):
     assert model.calls.count("planner") == 1
     assert model.calls.count("router") == 1
     assert model.calls.count("reporter") == 1
-    assert out.result.summary == "已完成读取。", "收尾总结替换模板摘要"
+    # D-042 / I8：复述是投递文本，不再改写 Result.summary（终态记录只装模板事实）。
+    assert out.text == "已完成读取。", "气泡里是复述"
+    assert out.result.summary == "1/1 步通过", "Result.summary 是模板事实"
     app.close()
 
 

@@ -33,6 +33,7 @@ from ..contracts import (
     Budget,
     Citation,
     ClarifyDraft,
+    Delivery,
     EventType,
     EvidenceBundle,
     EvidenceItem,
@@ -41,6 +42,7 @@ from ..contracts import (
     JudgeRecord,
     MemoryDraft,
     Question,
+    Regime,
     ReplyDraft,
     Result,
     digest_of,
@@ -48,11 +50,13 @@ from ..contracts import (
 )
 from ..evidence import missing
 from ..gate.rules import AdviceGate, scan_reply
+from ..grounding import CHECK_CITATIONS, CHECK_DIRECTIVES
 from ..harness.fold import World
 from ..harness.human import HumanCenter
 from ..harness.plancheck import PlanIssue, first_message
 from ..harness.writer import Writer
-from .runner import Runner, has_model_summary
+from .report_delivery import build_run_delivery, delivery_dict
+from .runner import Runner
 
 PATH_SLOT = "__path__"
 
@@ -88,6 +92,8 @@ class TurnOutcome:
     result: Result | None = None
     decision: IntentDecision | None = None
     error_code: str = ""
+    #: 对外文本的分级与来源（宪法 v2 I3/I8）：API/UI 的气泡与徽标都读它。
+    delivery: Delivery | None = None
 
 
 class Session:
@@ -108,6 +114,7 @@ class Session:
         artifacts: Any = None,
         propose: Any = None,
         root: Path | None = None,
+        summarizer: Any = None,
     ) -> None:
         self.writer = writer
         self.router = router
@@ -120,6 +127,8 @@ class Session:
         self.workspace = workspace
         self.registry = registry
         self.artifacts = artifacts
+        #: run 收尾复述（D-042 / I8）：终态之后才调用，模型不进终态事务。
+        self.summarizer = summarizer
         #: 应用数据根（D-030 L2）：memory.md 写在 `<root>/memory/`，不是任务
         #: workspace（那会被清空/替换）；None = 记忆落盘不可用（只起草不持久）。
         self.root = Path(root) if root is not None else None
@@ -327,45 +336,59 @@ class Session:
             # 的收尾只能走 Propose）。直接按普通执行结果收尾。
             return self._handed_off(decision, outcome)
 
-        # run 完成后一律让模型基于执行证据做一次收尾：要判断的给建议（过闸），
-        # 只是查/做的给一段总结回复。E19 已按意图/`then` 收尾；普通执行走这里。
-        # D-042：run 层已经写过收尾总结（Result.summary 带模型草稿）时不再写第二遍——
-        # 一次 run 一段总结，否则事件流里两套叙事、端到端还多付一次 token。
-        # 这条路保留给「总结缺席」（模型不可用 / 输出不合法）的 completed run。
-        if (
-            plan.then != "advice"
-            and outcome.status == "completed"
-            and self._draft_capable
-            and not has_model_summary(outcome.result)
-        ):
-            synthesized = self._answer_from_evidence(decision, text, outcome)
-            if synthesized is not None:
-                # 同上：模型总结只产出文本，run 的判定/ID 不能在收尾时蒸发。
-                return replace(synthesized, run_id=outcome.run_id, result=outcome.result)
+        # run 到终态 → 收尾投递（输出分级 R2，D-042）：终态事件已经落完，模型在这里才参与。
+        # 复述通过接地检查就带 regime 投递，不合格降级为模板文本（仍 verified）。
+        if outcome.result is not None and outcome.status in ("completed", "failed"):
+            return self._report_delivery(decision, outcome)
 
         return self._handed_off(decision, outcome)
 
     def _handed_off(self, decision: IntentDecision | None, outcome: Any) -> TurnOutcome:
-        """普通收尾：只回 run 的结果摘要。
+        """普通收尾：只回 run 的结果摘要（模板文本，verified），不调模型。
 
-        事件口径（D-042）：``Result.summary`` 已由模型写过时，这一次 turn 交付的
-        就是一段模型写的回答，落 ``turn.ended{outcome:"answered"}``；总结缺席
-        （模板摘要）才是 ``handed_off``——"只把手里的 run 结果原样交出去"。
-        不再调用模型或规划器；E19 合成失败时也用它收尾，避免 gather 回落到
-        ``Planner.plan``（D-004）。
+        E19 合成失败时用它收尾，避免 gather 回落到 ``Planner.plan``（D-004）。
         """
 
         result = getattr(outcome, "result", None)
-        self.writer.emit(
-            EventType.TURN_ENDED,
-            {"outcome": "answered" if has_model_summary(result) else "handed_off"},
-        )
+        text = result.summary if result is not None else ""
+        self.writer.emit(EventType.TURN_ENDED, {"outcome": "handed_off"})
         return TurnOutcome(
             status="answered",
-            text=(outcome.result.summary if outcome.result else ""),
+            text=text,
+            run_id=outcome.run_id,
+            result=result,
+            decision=decision,
+            delivery=Delivery(text=text, regime=Regime.VERIFIED) if text else None,
+        )
+
+    def _report_delivery(self, decision: IntentDecision | None, outcome: Any) -> TurnOutcome:
+        """run 终态之后的人话投递（R2）：草稿 + 接地检查 + regime，落一条事件。
+
+        模型在这里才被调用（I8：不进终态事务）。草稿不合格时投递模板摘要（verified），
+        ``fallback{bool,reason}`` 说明原因；两种情况都不会改写 run 的判定（Result 只读）。
+        """
+
+        run = self.world.runs.get(outcome.run_id or "")
+        delivery = build_run_delivery(run, outcome.result, summarizer=self.summarizer)
+        artifact_id = self._store_delivery_text(delivery.text)
+        delivery = replace(delivery, artifact_id=artifact_id)
+        self.writer.emit(
+            EventType.ADVICE_DELIVERED,
+            {
+                "advice": {"body": delivery.text},
+                "mode": "report",
+                "delivery": delivery_dict(delivery),
+                "artifact_id": artifact_id,
+            },
+        )
+        self.writer.emit(EventType.TURN_ENDED, {"outcome": "answered"})
+        return TurnOutcome(
+            status="answered",
+            text=delivery.text,
             run_id=outcome.run_id,
             result=outcome.result,
             decision=decision,
+            delivery=delivery,
         )
 
     # -------------------------------------------------- planner 草稿三种模式 --
@@ -462,41 +485,6 @@ class Session:
             f"这个计划我试了 {attempts} 次都没过自己的检查（{head}）。"
             "下一步：把目标拆成更小、每步都有可验证完成态的动作；或者告诉我第一步先做什么。"
         )
-
-    # -------------------------------------------------- planner 草稿三种模式 --
-    def _answer_from_evidence(
-        self, decision: IntentDecision, text: str, outcome: Any
-    ) -> TurnOutcome | None:
-        """取数/执行完成后，基于 run 的产物做一次收尾回答。
-
-        模型看得到证据，自己决定：要判断 → advice（过合规闸门）；
-        只是查/做 → reply（一段总结，引用证据里的数字）。
-        只做一次：合成失败不影响已完成的 run，返回 None 走普通收尾。
-        """
-        evidence = self._evidence_of(getattr(outcome, "run_id", None))
-        if not evidence.get("steps"):
-            return None
-        try:
-            draft = self.planner.plan(
-                decision=decision,
-                slots=self.state.slots,
-                tools=[],
-                text=text,
-                evidence=evidence,
-                turns=self._history_lines(),
-                memory=self._memory_lines(),
-            )
-        except Exception as exc:  # noqa: BLE001 - 合成失败不推翻已完成的 run
-            if _is_model_outage(exc) or _is_planning_failure(exc):
-                return None
-            raise
-        if isinstance(draft, AdviceDraft):
-            return self._advice_draft(draft, decision)
-        if isinstance(draft, ReplyDraft):
-            return self._reply_draft(draft, decision)
-        if isinstance(draft, MemoryDraft):
-            return self._memory_draft(draft, decision, text)
-        return None
 
     # ------------------------------------------------------- E19 证据合成 --
     def _e19_trigger(self, decision: IntentDecision | None, plan: Any) -> str | None:
@@ -606,6 +594,7 @@ class Session:
                 "partial": verdict.partial,
                 "fallback": _fallback_dict(verdict.fallback),
                 "artifact_id": self._store_delivery_text(render(delivered)),
+                "delivery": delivery_dict(_advice_delivery(render(delivered), verdict)),
                 "evidence": {
                     "run_id": evidence.run_id,
                     "citations": [_citation_dict(c) for c in verdict.citations],
@@ -783,22 +772,42 @@ class Session:
                     "advice": {"body": draft.text},
                     "mode": "reply",
                     "artifact_id": self._store_delivery_text(draft.text),
+                    # R3：没有证据包、没有判据 → 只标注，不当通过（I3）。
+                    "delivery": delivery_dict(
+                        Delivery(
+                            text=draft.text,
+                            regime=Regime.UNVERIFIED,
+                            checks=(CHECK_DIRECTIVES,),
+                            fallback={"bool": False, "reason": ""},
+                        )
+                    ),
                 },
             )
             self.writer.emit(EventType.TURN_ENDED, {"outcome": "answered"})
-            return TurnOutcome(status="answered", text=draft.text, decision=decision)
+            return TurnOutcome(
+                status="answered", text=draft.text, decision=decision,
+                delivery=Delivery(text=draft.text, regime=Regime.UNVERIFIED,
+                                  checks=(CHECK_DIRECTIVES,)),
+            )
         # 命中指令性表述/无来源数字声明：落兜底文本，不让合规风险绕过闸门。
         safe = fallback(violations)
+        text = render(safe)
+        delivery = Delivery(
+            text=text,
+            regime=Regime.VERIFIED,
+            fallback={"bool": True, "reason": violations[0].code if violations else "reply_blocked"},
+        )
         self.writer.emit(
             EventType.ADVICE_DELIVERED,
             {
                 "advice": _advice_dict(safe),
                 "mode": "reply_fallback",
-                "artifact_id": self._store_delivery_text(render(safe)),
+                "artifact_id": self._store_delivery_text(text),
+                "delivery": delivery_dict(delivery),
             },
         )
         self.writer.emit(EventType.TURN_ENDED, {"outcome": "answered"})
-        return TurnOutcome(status="answered", text=render(safe), decision=decision)
+        return TurnOutcome(status="answered", text=text, decision=decision, delivery=delivery)
 
     def _advice_draft(self, draft: AdviceDraft, decision: IntentDecision) -> TurnOutcome:
         verdict = self.gate.check(draft.advice, framework_only=False)
@@ -810,6 +819,8 @@ class Session:
             self._gate_payload(verdict, advice_hash=digest_of(_advice_dict(advice))),
         )
         if verdict.passed:
+            text = render(advice)
+            delivery = _advice_delivery(text, verdict)
             self.writer.emit(
                 EventType.ADVICE_DELIVERED,
                 {
@@ -818,16 +829,19 @@ class Session:
                     "partial": verdict.partial,
                     "fallback": _fallback_dict(verdict.fallback),
                     "judge": _judge_dict(verdict.judge),
-                    "artifact_id": self._store_delivery_text(render(advice)),
+                    "artifact_id": self._store_delivery_text(text),
+                    "delivery": delivery_dict(delivery),
                 },
             )
             self.writer.emit(EventType.TURN_ENDED, {"outcome": "answered"})
-            return TurnOutcome(status="answered", text=render(advice), decision=decision)
+            return TurnOutcome(status="answered", text=text, decision=decision, delivery=delivery)
         # 不过闸：一次裁决，直接落兜底（fail-closed；内容质量的重试预算已由 planner 内部用掉）。
         # 兜底模板也是投递给用户的建议：评审没真正发生时同样要标未经语义评审。
         safe = fallback(verdict.violations)
         if unreviewed:
             safe = _mark_unsemantic(safe)
+        text = render(safe)
+        delivery = _advice_delivery(text, verdict)
         self.writer.emit(
             EventType.ADVICE_DELIVERED,
             {
@@ -836,11 +850,12 @@ class Session:
                 "partial": verdict.partial,
                 "fallback": _fallback_dict(verdict.fallback),
                 "judge": _judge_dict(verdict.judge),
-                "artifact_id": self._store_delivery_text(render(safe)),
+                "artifact_id": self._store_delivery_text(text),
+                "delivery": delivery_dict(delivery),
             },
         )
         self.writer.emit(EventType.TURN_ENDED, {"outcome": "answered"})
-        return TurnOutcome(status="answered", text=render(safe), decision=decision)
+        return TurnOutcome(status="answered", text=text, decision=decision, delivery=delivery)
 
     # ------------------------------------------------------------ 评审记录 --
     def _review_state(self, verdict: Any, advice: Advice) -> tuple[Any, Advice]:
@@ -1155,7 +1170,18 @@ class Session:
             },
         )
         self.writer.emit(
-            EventType.ADVICE_DELIVERED, {"advice": {"body": _CANCEL_NOTICE}, "mode": "reply"}
+            EventType.ADVICE_DELIVERED,
+            {
+                "advice": {"body": _CANCEL_NOTICE},
+                "mode": "reply",
+                "delivery": delivery_dict(
+                    Delivery(
+                        text=_CANCEL_NOTICE,
+                        regime=Regime.VERIFIED,
+                        fallback={"bool": True, "reason": "cancelled"},
+                    )
+                ),
+            },
         )
 
     def _last_turn_text(self) -> str:
@@ -1257,6 +1283,35 @@ def _advice_dict(advice: Advice) -> dict[str, Any]:
         "disclaimer": advice.disclaimer,
         "body": advice.body,
     }
+
+
+def _advice_delivery(text: str, verdict: Any) -> Delivery:
+    """gate 裁决 + 文本 → Delivery（R2 接地 / R3 未核验 / 兜底 verified）。
+
+    - 过闸且有引用：``grounded``，checks 记 ``citations.grounded``，grounds 是引用 seq；
+    - 过闸但无引用（framework）：``unverified``——没有可核对来源就不是接地文本；
+    - 不过闸：投递的是兜底模板（代码文本），``verified`` + ``fallback{bool,reason}``。
+    """
+
+    citations = tuple(getattr(verdict, "citations", ()) or ())
+    grounds = tuple(
+        citation.seq for citation in citations if getattr(citation, "seq", None) is not None
+    )
+    if not getattr(verdict, "passed", False):
+        codes = tuple(getattr(v, "code", "") for v in (getattr(verdict, "violations", ()) or ()))
+        return Delivery(
+            text=text,
+            regime=Regime.VERIFIED,
+            fallback={"bool": True, "reason": codes[0] if codes else "gate_blocked"},
+        )
+    checks = (CHECK_CITATIONS,) if citations else ()
+    return Delivery(
+        text=text,
+        regime=Regime.GROUNDED if checks else Regime.UNVERIFIED,
+        checks=checks,
+        grounds=grounds,
+        fallback={"bool": False, "reason": ""},
+    )
 
 
 def _is_outage(exc: BaseException) -> bool:
