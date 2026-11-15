@@ -37,6 +37,8 @@ def session_metrics(events: Iterable[Event]) -> dict[str, Any]:
     memory_proposed = 0
     memory_confirmed = 0
     invalidated = 0
+    #: 输出分级计数（I3）：有界枚举，回答"多少输出没核验"。
+    delivery_regimes: dict[str, int] = {"verified": 0, "grounded": 0, "unverified": 0}
 
     for event in events:
         kind = event.type
@@ -73,6 +75,11 @@ def session_metrics(events: Iterable[Event]) -> dict[str, Any]:
                 memory_confirmed += 1
         elif kind is EventType.STEP_INVALIDATED:
             invalidated += 1
+        elif kind is EventType.ADVICE_DELIVERED:
+            # 输出分级（I3）：只数代码写下的 regime；旧事件没有这个字段就不入账。
+            regime = str((event.payload.get("delivery") or {}).get("regime") or "")
+            if regime in delivery_regimes:
+                delivery_regimes[regime] += 1
 
     finished = verdicts["completed"] + verdicts["failed"]
     return {
@@ -88,6 +95,7 @@ def session_metrics(events: Iterable[Event]) -> dict[str, Any]:
         "model_tokens_by_purpose": model_tokens_by_purpose,
         "repairs": repairs,
         "invalidations": invalidated,
+        "delivery_regimes": delivery_regimes,
         "memory_proposed": memory_proposed,
         "memory_confirmed": memory_confirmed,
     }

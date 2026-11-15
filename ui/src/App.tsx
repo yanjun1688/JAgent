@@ -19,7 +19,7 @@ import {
   type SessionSummary,
 } from './lib/api'
 import type { ChatMessage } from './lib/chat'
-import { runStatusLabel, runStatusTone, type Tone } from './lib/kernel'
+import { regimeBadge, runStatusLabel, runStatusTone, type Tone } from './lib/kernel'
 import { cx } from './lib/cx'
 
 const GREETING =
@@ -79,7 +79,7 @@ export default function App() {
   const nextId = useRef(2)
 
   const pushMessage = useCallback(
-    (role: ChatMessage['role'], text: string, extra?: Pick<ChatMessage, 'meta' | 'tone'>) => {
+    (role: ChatMessage['role'], text: string, extra?: Pick<ChatMessage, 'meta' | 'tone' | 'badge' | 'badgeTone'>) => {
       const clean = text.trim()
       if (!clean) return
       setMessages((current) => [
@@ -191,11 +191,13 @@ export default function App() {
       if (sentText !== null) setLastInput(sentText)
 
       const meta = resultMeta(reply)
+      const badge = regimeBadge(reply.delivery?.regime)
       const tone: Tone =
         meta?.tone ??
         (reply.status === 'waiting_human' || reply.status === 'needs_input' ? 'warn' : 'ok')
       pushMessage('agent', reply.message?.trim() || fallbackMessage(reply), {
         ...(meta ? { meta: meta.text } : {}),
+        ...(badge ? { badge: badge.label, badgeTone: badge.tone } : {}),
         tone,
       })
 

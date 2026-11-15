@@ -23,6 +23,7 @@ from typing import Any
 
 from .audit import run_verification
 from .contracts import Event, EventType
+from .grounding import CHECK_NUMBERS, number_claims
 from .harness.fold import fold
 from .metrics import run_metrics, session_metrics
 
@@ -312,6 +313,19 @@ def _validate_turn_outcome(params: dict[str, Any]) -> None:
     _validate_at(params)
 
 
+_REGIMES = ("verified", "grounded", "unverified")
+
+
+def _validate_delivery_regime(params: dict[str, Any]) -> None:
+    """输出分级（I3）：期望档位只能是三值之一；``at`` 只允许 last/all。"""
+
+    _require(
+        params.get("expect") in _REGIMES,
+        f"delivery_regime.expect 必须是 {'/'.join(_REGIMES)}",
+    )
+    _validate_at(params)
+
+
 def _validate_steps(params: dict[str, Any]) -> None:
     _require(
         _is_int(params.get("count")) and params["count"] >= 0,
@@ -428,6 +442,10 @@ _KIND_SPECS: dict[str, _KindSpec] = {
         frozenset({"type"}), frozenset({"min", "max", "exact"}), _validate_event_count
     ),
     "replay_consistent": _KindSpec(frozenset(), frozenset(), _validate_no_params),
+    "delivery_regime": _KindSpec(
+        frozenset({"expect"}), frozenset({"at"}), _validate_delivery_regime
+    ),
+    "numbers_grounded": _KindSpec(frozenset(), frozenset(), _validate_no_params),
 }
 
 
@@ -721,6 +739,48 @@ def _check_replay_consistent(ctx: _Attempt, check: CheckDef) -> CheckResult:
     return _result(check, ctx.replay_ok, ctx.fingerprint)
 
 
+def _deliveries(ctx: _Attempt) -> list[Any]:
+    return [event for event in ctx.events if event.type is EventType.ADVICE_DELIVERED]
+
+
+def _delivery_regime_of(event: Any) -> str:
+    return str((event.payload.get("delivery") or {}).get("regime") or "")
+
+
+def _check_delivery_regime(ctx: _Attempt, check: CheckDef) -> CheckResult:
+    """``delivery_regime``：投递文本的可信档位（代码写下，不推断）。"""
+
+    expect = check.params["expect"]
+    at = check.params.get("at", "last")
+    deliveries = _deliveries(ctx)
+    regimes = [_delivery_regime_of(event) for event in deliveries]
+    if not deliveries:
+        return _result(check, False, [])
+    if at == "last":
+        passed = regimes[-1] == expect
+        observed = [regimes[-1]]
+    else:
+        passed = expect in regimes
+        observed = regimes
+    return _result(check, passed, observed, seqs=[event.seq for event in deliveries])
+
+
+def _check_numbers_grounded(ctx: _Attempt, check: CheckDef) -> CheckResult:
+    """``numbers_grounded``：带数字声明的投递必须声明过 ``numbers.grounded``。
+
+    只查契约（声明 vs 实际），不重算数字——重算属于运行时接地检查（R2），
+    评估面再算一遍就会变成第二套实现（I9）。
+    """
+
+    offenders = []
+    for event in _deliveries(ctx):
+        text = str((event.payload.get("advice") or {}).get("body") or "")
+        checks = tuple((event.payload.get("delivery") or {}).get("checks") or ())
+        if number_claims(text) and CHECK_NUMBERS not in checks:
+            offenders.append(event.seq)
+    return _result(check, not offenders, len(offenders), seqs=offenders)
+
+
 _REGISTRY = {
     "run_verdict": _check_run_verdict,
     "turn_outcome": _check_turn_outcome,
@@ -734,6 +794,8 @@ _REGISTRY = {
     "step_started_max": _check_step_started_max,
     "event_count": _check_event_count,
     "replay_consistent": _check_replay_consistent,
+    "delivery_regime": _check_delivery_regime,
+    "numbers_grounded": _check_numbers_grounded,
 }
 
 

@@ -49,7 +49,19 @@ export interface ChatReply {
   choices?: Choice[]
   run_id?: string
   result?: ResultView
+  /** 输出分级（宪法 v2 I3）：这段文本的可信档位，由后端代码给。 */
+  delivery?: DeliveryView
   approval?: ApprovalView
+}
+
+/** 三档可信度：verified（代码事实）/ grounded（复述事实并过检查）/ unverified（无判据）。 */
+export type Regime = 'verified' | 'grounded' | 'unverified'
+
+export interface DeliveryView {
+  regime: Regime
+  checks: string[]
+  grounds: number[]
+  fallback: { bool?: boolean; reason?: string }
 }
 
 export interface RunView {

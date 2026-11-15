@@ -212,6 +212,22 @@ export function logLevelTone(level: string): Tone {
   }
 }
 
+// --------------------------------------------------------------------------- //
+// 输出分级（宪法 v2 I3）：regime → 徽标文案与颜色
+// --------------------------------------------------------------------------- //
+
+const REGIME_BADGE: Record<string, { label: string; tone: Tone }> = {
+  verified: { label: '已核验', tone: 'ok' },
+  grounded: { label: '本次观测 · 已对账', tone: 'flow' },
+  unverified: { label: '未核验 · 模型观点', tone: 'warn' },
+}
+
+/** 徽标：未知字段返回 null（旧后端/缺失时宁可不显示，也不猜可信度）。 */
+export function regimeBadge(regime: string | null | undefined): { label: string; tone: Tone } | null {
+  if (!regime) return null
+  return REGIME_BADGE[regime] ?? null
+}
+
 const ERROR_LABEL: Record<string, string> = {
   not_found: '没找到',
   permission_denied: '没有权限',

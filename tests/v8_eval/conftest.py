@@ -217,6 +217,18 @@ class EvalRig:
                 "partial": partial,
                 "fallback": {"bool": fallback, "reason": "x" if fallback else ""},
                 "artifact_id": "a1",
+                # 输出分级（I3）：投递事件必带 regime。与生产 `_advice_delivery` 同规则：
+                # 不过闸 → verified（兜底模板）；过闸且有引用 → grounded；过闸无引用 → unverified。
+                "delivery": {
+                    "regime": (
+                        "grounded" if passed and citations
+                        else "unverified" if passed
+                        else "verified"
+                    ),
+                    "checks": ["citations.grounded"] if passed and citations else [],
+                    "grounds": [i for i in range(citations)],
+                    "fallback": {"bool": fallback, "reason": "x" if fallback else ""},
+                },
                 "evidence": {
                     "run_id": None,
                     "citations": [

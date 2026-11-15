@@ -105,3 +105,40 @@ def test_metrics_api_endpoints(tmp_path) -> None:
         missing = client.get("/api/runs/run_missing/metrics")
         assert missing.status_code == 404
         app_obj.close()
+
+
+def test_session_metrics_counts_delivery_regimes(tmp_path) -> None:
+    """Given 一条 grounded 复述与一条 unverified 闲聊，When session_metrics，
+    Then 三档计数可见（有界枚举，符合 D-031 基数纪律）——"多少输出没核验"可度量。"""
+
+    from jagent.contracts import Delivery, EventType, Regime
+    from jagent.harness.fold import World
+    from jagent.harness.store import EventStore
+    from jagent.harness.writer import Writer
+
+    store = EventStore(tmp_path / "events.db")
+    writer = Writer(store, World(), "s_regime")
+    try:
+        for delivery in (
+            Delivery(text="读到了 17.19。", regime=Regime.GROUNDED),
+            Delivery(text="我觉得可以再想想。", regime=Regime.UNVERIFIED),
+            Delivery(text="1/1 步通过", regime=Regime.VERIFIED),
+        ):
+            writer.emit(
+                EventType.ADVICE_DELIVERED,
+                {
+                    "advice": {"body": delivery.text},
+                    "mode": "report",
+                    "delivery": {
+                        "regime": delivery.regime.value,
+                        "checks": [],
+                        "grounds": [],
+                        "fallback": {},
+                    },
+                },
+            )
+        metrics = session_metrics(store.read())
+    finally:
+        store.close()
+
+    assert metrics["delivery_regimes"] == {"verified": 1, "grounded": 1, "unverified": 1}

@@ -146,7 +146,7 @@ REQUIRED_FIELDS: dict[EventType, tuple[str, ...]] = {
     EventType.RUN_CANCELLED: ("reason",),
     EventType.RUN_TRANSITION_REJECTED: ("from", "to", "reason", "illegal"),
     EventType.REPORT_RENDERED: ("result",),
-    EventType.ADVICE_DELIVERED: ("advice", "mode"),
+    EventType.ADVICE_DELIVERED: ("advice", "mode", "delivery"),
 }
 
 

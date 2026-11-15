@@ -22,17 +22,15 @@ judge 只能否决、不能放行（没有 PASS 语义）；judge 也不能把 T
 ``Step.required`` 表达，``evidence_requires`` 只服务 ``evidence_incomplete``
 （D-013）。
 
-数字的抽取与豁免**写死在代码里**（属解析语法，不是策略，不进 ``config/``，
-D-005）：日期/时间、序号、千分位与小数格式、单位换算豁免；正文里的自身
-结构计数（"以下 3 点"）**不豁免**；系统模板（免责声明 / 信息来源）不进入
-正文扫描。``evidence_truncated`` 是 ``advice.number_ungrounded`` 的 ``reason``，
-不是第五个 rule_id。
+数字的**语法**（抽取/豁免/等价写法）住在 :mod:`jagent.grounding`（I9：一个检查
+只有一份实现）；本文件只保留**策略**：哪种情形算违规、报什么 rule_id。闸门之间允许
+策略不同（reply 没有证据包，所以任何数字声明都是无来源），不允许语法各写一套。
+``evidence_truncated`` 是 ``advice.number_ungrounded`` 的 ``reason``，不是第五个 rule_id。
 """
 
 from __future__ import annotations
 
 import re
-from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
 from ..contracts import (
@@ -47,6 +45,7 @@ from ..contracts import (
     Violation,
 )
 from ..evidence import missing
+from ..grounding import all_number_variants, body_numbers, number_claims
 from ..harness.judge import JudgeRequest, JudgeVerdict
 
 RULESET = "advice.v8.2"
@@ -97,15 +96,6 @@ _DIRECTIVE = re.compile(
 )
 
 #: reply 侧需要溯源的数字声明：百分比、四位年份、金额、倍数、小数。
-_NUMBER_CLAIM = re.compile(
-    r"\d+(?:\.\d+)?\s*%"
-    r"|\d{4}\s*年"
-    r"|\d+(?:\.\d+)?\s*(?:元|万|亿|美元|港元|块钱)"
-    r"|\d+(?:\.\d+)?\s*(?:倍|成|个百分点)"
-    r"|\b\d+\.\d+\b"
-)
-
-
 def scan_reply(text: str) -> tuple[Violation, ...]:
     """reply 模式（无需工具的直接回答）的合规扫描。
 
@@ -123,149 +113,16 @@ def scan_reply(text: str) -> tuple[Violation, ...]:
                 f"回答出现指令性表述：{directive.group(0)}",
             )
         )
-    number = _NUMBER_CLAIM.search(text)
-    if number is not None:
+    claims = number_claims(text)
+    if claims:
         violations.append(
             _violation(
                 "REPLY_UNSOURCED_CLAIM",
                 _REPLY_RULES["REPLY_UNSOURCED_CLAIM"],
-                f"回答出现数字声明「{number.group(0)}」但没有可核对来源",
+                f"回答出现数字声明「{claims[0]}」但没有可核对来源",
             )
         )
     return tuple(violations)
-
-
-# --------------------------------------------------------------------------- #
-# 数字抽取与豁免（解析语法，写死；不进 config）
-# --------------------------------------------------------------------------- #
-
-_NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
-
-#: 日期（ISO / 中文年月日）与时间（HH:MM、N点M分）。
-_DATE = re.compile(
-    r"\d{4}\s*[-/]\s*\d{1,2}\s*[-/]\s*\d{1,2}"
-    r"|\d{4}\s*年(?:\s*\d{1,2}\s*月)?(?:\s*\d{1,2}\s*[日号])?"
-    r"|\d{1,2}\s*月\s*\d{1,2}\s*[日号]"
-)
-_CLOCK = re.compile(r"\d{1,2}\s*[:：]\s*\d{2}(?:\s*[:：]\s*\d{2})?")
-_TIME_POINT = re.compile(r"\d{1,2}\s*点(?:\s*\d{1,2}\s*分|半|整)?")
-
-#: 序号：第 N 条 / 行首 1. / （1）。
-_ORDINAL = re.compile(r"第\s*\d+\s*(?:[条点项步个名位章节])?")
-_LIST_MARKER = re.compile(r"(?m)^\s*\d+\s*[.)、]\s*")
-_PAREN_MARKER = re.compile(r"[（(]\s*\d+\s*[)）]")
-
-#: "以下 3 点" 这类自身结构计数：不是时间，也不豁免。
-_STRUCTURE_PREFIX = ("以下", "下面", "如下", "以上", "上述")
-_STRUCTURE_SUFFIX = ("建议", "风险", "结论", "事项", "内容", "要点", "问题", "理由", "做法")
-
-#: 单位换算：万/亿/千/百 与 B/M/K。只做"同一数量的不同写法"对齐。
-_UNIT_SCALE: dict[str, Decimal] = {
-    "万": Decimal(10) ** 4,
-    "亿": Decimal(10) ** 8,
-    "千": Decimal(10) ** 3,
-    "百": Decimal(10) ** 2,
-    "B": Decimal(10) ** 9,
-    "b": Decimal(10) ** 9,
-    "M": Decimal(10) ** 6,
-    "m": Decimal(10) ** 6,
-    "K": Decimal(10) ** 3,
-    "k": Decimal(10) ** 3,
-}
-
-#: 系统模板段（免责声明 / 信息来源）里的数字不进入正文扫描（T3 负责）。
-_SYSTEM_BLOCK = re.compile(r"【(?:免责声明|信息来源)】.*?(?=\n【|\Z)", re.DOTALL)
-
-
-def _canon(value: Decimal) -> str:
-    """把数值写成唯一字符串：去掉千分位与无意义的尾零，避免科学计数法。"""
-
-    if value == value.to_integral_value():
-        return str(int(value))
-    return format(value.normalize(), "f")
-
-
-def _decimal(raw: str) -> Decimal | None:
-    try:
-        return Decimal(raw.replace(",", ""))
-    except InvalidOperation:
-        return None
-
-
-def _unit_after(text: str, end: int) -> Decimal | None:
-    index = end
-    while index < len(text) and text[index].isspace():
-        index += 1
-    if index >= len(text):
-        return None
-    return _UNIT_SCALE.get(text[index])
-
-
-def _percent_after(text: str, end: int) -> bool:
-    index = end
-    while index < len(text) and text[index].isspace():
-        index += 1
-    return index < len(text) and text[index] in "%％"
-
-
-def _variants(text: str, match: re.Match[str]) -> set[str]:
-    value = _decimal(match.group(0))
-    if value is None:
-        return set()
-    out = {_canon(value)}
-    scale = _unit_after(text, match.end())
-    if scale is not None:
-        out.add(_canon(value * scale))
-    if _percent_after(text, match.end()):
-        out.add(_canon(value / 100))
-    return out
-
-
-def _looks_like_structure_count(text: str, match: re.Match[str]) -> bool:
-    before = text[max(0, match.start() - 8):match.start()]
-    if any(word in before for word in _STRUCTURE_PREFIX):
-        return True
-    after = text[match.end():match.end() + 8].lstrip()
-    return any(after.startswith(word) for word in _STRUCTURE_SUFFIX)
-
-
-def _exempt_spans(text: str) -> list[tuple[int, int]]:
-    spans: list[tuple[int, int]] = []
-    for pattern in (_DATE, _CLOCK, _ORDINAL, _LIST_MARKER, _PAREN_MARKER):
-        spans.extend(match.span() for match in pattern.finditer(text))
-    for match in _TIME_POINT.finditer(text):
-        if not _looks_like_structure_count(text, match):
-            spans.append(match.span())
-    return spans
-
-
-def _in_spans(span: tuple[int, int], spans: Sequence[tuple[int, int]]) -> bool:
-    start, end = span
-    return any(start >= left and end <= right for left, right in spans)
-
-
-def _body_numbers(text: str) -> list[tuple[str, set[str]]]:
-    """正文里的「事实性数字」：豁免日期/时间/序号后按出现顺序返回。"""
-
-    clean = _SYSTEM_BLOCK.sub(" ", text)
-    spans = _exempt_spans(clean)
-    claims: list[tuple[str, set[str]]] = []
-    for match in _NUMBER.finditer(clean):
-        if _in_spans(match.span(), spans):
-            continue
-        variants = _variants(clean, match)
-        if variants:
-            claims.append((match.group(0), variants))
-    return claims
-
-
-def _all_number_variants(text: str) -> set[str]:
-    """证据（观测 / artifact 全文）里所有数字的等价写法；不豁免。"""
-
-    out: set[str] = set()
-    for match in _NUMBER.finditer(text):
-        out |= _variants(text, match)
-    return out
 
 
 def _judge_model(judge: Any) -> str:
@@ -454,7 +311,7 @@ class AdviceGate:
         allowed: set[str] = set()
         truncated_gap = False
         for citation, item, value in resolved:
-            allowed |= _all_number_variants(value)
+            allowed |= all_number_variants(value)
             if citation.field not in item.truncated:
                 continue
             # 观测被截断：只有能回查 artifact 全文时才算"可核对"。
@@ -468,14 +325,14 @@ class AdviceGate:
             ]
             if texts:
                 for text in texts:
-                    allowed |= _all_number_variants(text)
+                    allowed |= all_number_variants(text)
             else:
                 truncated_gap = True
 
         body = "\n".join(part for part in (advice.body, *advice.framework) if part)
         violations: list[Violation] = []
         seen: set[str] = set()
-        for raw, variants in _body_numbers(body):
+        for raw, variants in body_numbers(body):
             if variants & allowed or raw in seen:
                 continue
             seen.add(raw)

@@ -68,6 +68,20 @@ export function ConversationPanel({ messages, pending, busy, onChoice }: Convers
                 >
                   {message.text}
                 </div>
+                {message.badge ? (
+                  <span
+                    className={cx(
+                      'inline-flex items-center gap-1 border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em]',
+                      message.badgeTone === 'warn'
+                        ? 'border-led-warn/50 text-led-warn'
+                        : message.badgeTone === 'flow'
+                          ? 'border-neon-cyan/40 text-neon-cyan'
+                          : 'border-led-ok/40 text-led-ok',
+                    )}
+                  >
+                    {message.badge}
+                  </span>
+                ) : null}
                 {message.meta ? (
                   <span
                     className={cx(
