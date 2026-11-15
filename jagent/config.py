@@ -132,6 +132,28 @@ def _hash(root: Path, policy_path: Path) -> str:
     return digest.hexdigest()
 
 
+def config_manifest(root: Path | None = None) -> dict[str, str]:
+    """``config/**`` + ``gate/policy.md`` 的逐文件 sha256 清单（D-035）。
+
+    与 :func:`_hash` 同一套文件枚举（相对包目录的 posix 路径为键），所以
+    manifest 的键集合与 ``config_hash`` 的覆盖面一致——评估对照（compare）
+    用两份 manifest 的差异把 config_hash 变化归因到具体文件。
+    """
+    root = CONFIG_ROOT if root is None else Path(root).resolve()
+    package = root.parent
+    policy_path = root.parent / "gate" / "policy.md"
+    entries = [
+        (path.relative_to(package).as_posix(), path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    ]
+    entries.append((policy_path.relative_to(package).as_posix(), policy_path))
+    return {
+        relative: hashlib.sha256(path.read_bytes()).hexdigest()
+        for relative, path in sorted(entries)
+    }
+
+
 @lru_cache(maxsize=1)
 def git_commit() -> str:
     """本次启动的代码指纹：``git rev-parse --short HEAD``（脏工作区加 ``+dirty``）。
